@@ -1,8 +1,7 @@
 //@name serial_gradation_agents_for_rp
 //@display-name Serial Gradation Agents for RP
 //@api 3.0
-//@version 0.12.1
-//@update-url https://raw.githubusercontent.com/rusinus12-droid/Serial-Gradation-Agents-for-RP/main/Serial_Gradation_Agents_for_RP.js
+//@version 0.12.2
 //@arg mode string off|lite|normal|full
 //@arg turn_window int Recent chat turn-pair window used by the pipeline
 //@arg max_recent_chars int Maximum recent-chat characters sent to each stage
@@ -69,7 +68,7 @@
 //@arg enable_gui string true|false
 
 /*
- * Serial Gradation Agents for RP v0.12.0
+ * Serial Gradation Agents for RP v0.12.2
  *
  * A RisuAI API v3 plugin that turns the old RE Companion V2 current-turn
  * Shadow Act/AIDE staging idea into the Serial Gradation Agents for RP
@@ -87,6 +86,10 @@
  * - Chat Completions / Responses request-format routing.
  * - LIBRA 6.1 reasoning presets and output-budget ceiling semantics.
  * - Provider-specific endpoint, header, and reasoning-payload normalization.
+ *
+ * v0.12.2 isolates the narrative pipeline to the RisuAI `model` request type.
+ * beforeRequest and afterRequest now fail closed for submodel, memory, emotion,
+ * otherAx, translate, chat, image, empty, and unknown request types.
  *
  * v0.4.0 adds an in-plugin settings GUI for presets, stage routing,
  * beforeRequest agents, afterRequest checks, direction guidance prompts,
@@ -229,7 +232,7 @@
   }
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.12.1';
+  const PLUGIN_VERSION = '0.12.2';
   const INJECTION_HEADER = '[SERIAL GRADATION AGENTS FOR RP]';
   const STAGE_SCHEMA = 'serial_gradation_agents_for_rp_stage_v1';
   const FULL_DRAFT_STAGE_SCHEMA = 'serial_gradation_agents_for_rp_full_draft_stage_v1';
@@ -3126,17 +3129,16 @@
     return { block, meta, snapshot: source, activeLore, selectedCandidates, memory };
   };
 
-  const isAuxiliaryType = (type) => {
-    const raw = text(type || '').toLowerCase();
-    if (!raw) return false;
-    return /(embed|embedding|translate|translation|image|inlay|tts|summary|summarize|hypa|lore|memory|otherax|aux|checkinput|title|suggest|regex|module)/i.test(raw);
-  };
+  const normalizeRequestType = (type) => text(type || '').trim().toLowerCase();
+
+  const isMainNarrativeRequest = (type) => normalizeRequestType(type) === 'model';
 
   const shouldPassThrough = (messages, type, settings) => {
     if (settings.mode === 'off') return 'mode_off';
+    const requestType = normalizeRequestType(type);
+    if (!isMainNarrativeRequest(requestType)) return `non_model_request:${requestType || 'missing'}`;
     if (!Array.isArray(messages)) return 'non_array_payload';
     if (!messages.length) return 'empty_messages';
-    if (isAuxiliaryType(type)) return `auxiliary_type:${text(type)}`;
     const allText = compact(messages.map(m => contentToText(m?.content)).join('\n'), 6000);
     // LBDATA is structured lore text; only actual binary/visual payloads should disable the agent pipeline.
     if (/data:image\/|<svg|base64,/i.test(allText) && allText.length > 2500) return 'asset_heavy_payload';
@@ -5978,7 +5980,16 @@ If JSON is difficult, output only the complete revised assistant response as pla
   const afterRequest = async (content, type) => {
     const settings = await loadSettings();
     if (settings.mode === 'off') return content;
-    if (isAuxiliaryType(type)) return content;
+    if (!isMainNarrativeRequest(type)) {
+      Runtime.lastPost = {
+        at: Date.now(),
+        ok: true,
+        skipped: true,
+        reason: `non_model_request:${normalizeRequestType(type) || 'missing'}`,
+        type: text(type || '')
+      };
+      return content;
+    }
     if (Runtime.postInFlight) return content;
 
     const replacementDraft = '';
