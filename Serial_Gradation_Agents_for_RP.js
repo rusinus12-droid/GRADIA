@@ -2,6 +2,7 @@
 //@display-name Serial Gradation Agents for RP
 //@api 3.0
 //@version 0.12.1
+//@update-url https://raw.githubusercontent.com/rusinus12-droid/Flasgback-Memory/refs/heads/main/Flashback%20Memory.js
 //@arg mode string off|lite|normal|full
 //@arg turn_window int Recent chat turn-pair window used by the pipeline
 //@arg max_recent_chars int Maximum recent-chat characters sent to each stage
