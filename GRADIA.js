@@ -2,6 +2,7 @@
 //@display-name GRADIA
 //@api 3.0
 //@version 0.12.19
+//@update-url https://raw.githubusercontent.com/rusinus12-droid/GRADIA/main/GRADIA.js
 //@arg mode string off|lite|normal|full
 //@arg turn_window int Legacy global recent-turn fallback; migrated once into each stage slot
 //@arg max_recent_chars int Legacy global context fallback; migrated once into each stage slot
