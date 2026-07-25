@@ -1,7 +1,7 @@
 //@name serial_gradation_agents_for_rp
 //@display-name GRADIA
 //@api 3.0
-//@version 0.12.19
+//@version 0.12.23
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/GRADIA/main/GRADIA.js
 //@arg mode string off|lite|normal|full
 //@arg turn_window int Legacy global recent-turn fallback; migrated once into each stage slot
@@ -68,7 +68,7 @@
 //@arg enable_gui string true|false
 
 /*
- * Serial Gradation Agents for RP v0.12.19
+ * Serial Gradation Agents for RP v0.12.23
  *
  * A RisuAI API v3 plugin that turns the old RE Companion V2 current-turn
  * Shadow Act/AIDE staging idea into the Serial Gradation Agents for RP
@@ -77,6 +77,11 @@
  * v0.2.0 adds model preset routing and afterRequest post-processing.
  * v0.12.3 adds request-scoped draft lineage locking, prior-turn regression detection,
  * isolated lineage recovery retries, and authoritative field-first draft parsing.
+ * v0.12.23 aligns the plugin more closely with RisuAI API v3 runtime behavior:
+ * same-request retries reuse one completed GRADIA injection, legacy arguments are cached,
+ * replacer permission is verified explicitly, bridge tokens move to local-only storage,
+ * GUI initialization is deferred, and host iframe selection uses exact document ownership.
+ *
  * v0.12.16 redesigns the visible settings around plain-language choices, guided
  * presets, conversation scope, review priority, and one-click saving while keeping
  * internal numeric controls inside an expert-only section.
@@ -109,6 +114,10 @@
  * the exact plugin iframe from pre-show state changes, uses a parent-document drag shield
  * instead of unreliable screen coordinates, preserves scroll during live trace refreshes,
  * reclamps the panel after viewport changes, and hides before restoring fullscreen styles.
+ * v0.12.20 removes HAYAKU hidden packets before GRADIA builds recent-chat,
+ * stored-chat, system-context, lore-search, and scene-anchor inputs. It supports official
+ * hidden/visible packet wrappers, loose or damaged marker tails, HAYAKU context sections,
+ * and standalone hayaku_packet_v1 JSON while preserving the surrounding RP prose.
  * v0.3.0 expands the provider layer to a full LIBRA-style provider core:
  * - OpenAI-compatible providers, Anthropic, Gemini, Vertex Gemini, Vertex OpenAI,
  *   Ollama native /api/chat, Ollama Cloud, NanoGPT, LM Studio, Copilot, Custom.
@@ -249,6 +258,16 @@
  * editor. Only SHADOW ACT and the three core AIDE stages may call models.
  * Legacy optional-agent storage is purged automatically.
  *
+ * v0.12.21 separates HAYAKU transport from GRADIA private-stage context.
+ * HAYAKU continuity/state-view and side-write prompts remain byte-for-byte in the
+ * outbound main-model request, while private GRADIA stage history strips HAYAKU-owned
+ * packet-writing prompts and sanitizes any packet accidentally emitted by a draft model.
+ *
+ * v0.12.22 removes host-panel dragging and every associated parent-DOM pointer shield,
+ * geometry read, and viewport listener. The GUI now renders one sidebar section at a time,
+ * suppresses full DOM rebuilds while the model pipeline is running, loads settings only once
+ * per open, and replaces expensive blur/animation/shadow effects with lightweight surfaces.
+ *
  *
  * v0.12.11 realigns the RAG route around documented plugins.md API v3 calls
  * and the Agents! reference pipeline: current chat indices/getChatFromIndex for
@@ -285,7 +304,7 @@
   }
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.12.19';
+  const PLUGIN_VERSION = '0.12.23';
   const INJECTION_HEADER = '[GRADIA]';
   const LEGACY_INJECTION_HEADERS = Object.freeze(['[SERIAL GRADATION AGENTS FOR RP]']);
   const STAGE_SCHEMA = 'serial_gradation_agents_for_rp_stage_v1';
@@ -299,6 +318,7 @@
   const STORAGE_RUNTIME_SETTINGS_KEY = 'serial_gradation_agents_for_rp:runtime_settings:v2';
   const STORAGE_MIGRATION_KEY = 'serial_gradation_agents_for_rp:migration:v2';
   const LOCAL_PROVIDER_SECRETS_KEY = 'serial_gradation_agents_for_rp:provider_secrets:v1';
+  const LOCAL_BACKEND_HOSTING_TOKEN_KEY = 'serial_gradation_agents_for_rp:backend_hosting_token:v1';
   const SETTINGS_UI_ID = 'serial-gradation-agents-for-rp-settings';
   const DEFAULT_STAGE_TIMEOUT_MS = 90000;
   const DEFAULT_STAGE_CONTEXT_CHARS = 10000;
@@ -326,6 +346,11 @@
   const EXPORT_VERSION = 3;
   const FLOW_EXPORT_VERSION = 1;
   const LIBRA_HOSTING_BRIDGE_LOCAL_BOOTSTRAP_URL = 'http://127.0.0.1:18787/__libra_host__/bootstrap';
+  const SETTINGS_CACHE_TTL_MS = 30 * 1000;
+  const ARGUMENT_CACHE_TTL_MS = 30 * 1000;
+  const REQUEST_REUSE_TTL_MS = 3 * 60 * 1000;
+  const REQUEST_FAILURE_REUSE_TTL_MS = 20 * 1000;
+  const REQUEST_REUSE_CACHE_MAX = 8;
 
   const BEFORE_STAGE_DEFS = Object.freeze([
     Object.freeze({ id: 'shadow_act', label: 'SHADOW ACT', description: '최근 대화와 최신 입력으로 현재 턴의 첫 RP 초안을 만듭니다.' }),
@@ -880,7 +905,7 @@
     'deepseek-chat', 'deepseek-reasoner'
   ]);
 
-  const registered = { before: null, setting: null, button: null };
+  const registered = { before: null, after: null, setting: null, button: null };
   const Runtime = {
     runs: 0,
     last: null,
@@ -888,6 +913,7 @@
     warnings: [],
     inFlight: false,
     settings: null,
+    settingsLoadedAt: 0,
     providerPresets: {},
     secretStorage: 'unknown',
     migratedFrom: null,
@@ -906,7 +932,8 @@
     activeLineage: null,
     lastCompletedDraftSet: null,
     analysisLedger: {},
-    hookStatus: { beforeRequest: false, unload: false, setting: false, button: false }
+    requestReuse: { hits: 0, misses: 0, stores: 0, evictions: 0, lastFingerprint: '', lastReuseAt: 0 },
+    hookStatus: { beforeRequest: false, afterRequest: false, replacerPermission: 'unknown', unload: false, setting: false, button: false }
   };
 
   const log = (...args) => {
@@ -1036,23 +1063,21 @@
       && !isBackendBridgeUrl(url);
   };
 
+  const ArgumentCache = new Map();
+  const clearArgumentCache = () => ArgumentCache.clear();
   const getArgument = async (name, fallback = '') => {
-    const tryNames = [name, `${PLUGIN_NAME}::${name}`];
-    for (const key of tryNames) {
-      try {
-        if (typeof API.getArgument === 'function') {
-          const value = await API.getArgument(key);
-          if (value !== undefined && value !== null && value !== '') return value;
-        }
-      } catch (_) {}
-      try {
-        if (typeof API.getArg === 'function') {
-          const value = await API.getArg(key);
-          if (value !== undefined && value !== null && value !== '') return value;
-        }
-      } catch (_) {}
-    }
-    return fallback;
+    const key = text(name || '').trim();
+    if (!key) return fallback;
+    const cached = ArgumentCache.get(key);
+    if (cached && Date.now() - cached.at < ARGUMENT_CACHE_TTL_MS) return cached.hasValue ? cached.value : fallback;
+    let value;
+    try {
+      if (typeof API.getArgument === 'function') value = await API.getArgument(key);
+      else if (typeof API.getArg === 'function') value = await API.getArg(key);
+    } catch (_) { value = undefined; }
+    const hasValue = value !== undefined && value !== null && value !== '';
+    ArgumentCache.set(key, { at: Date.now(), hasValue, value: hasValue ? value : undefined });
+    return hasValue ? value : fallback;
   };
 
   const RisuCompat = (() => {
@@ -1380,6 +1405,14 @@
     return await RisuCompat.localSetItem(LOCAL_PROVIDER_SECRETS_KEY, clean);
   };
 
+
+  const readBackendHostingToken = async () => text(await RisuCompat.localGetItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY) || '').trim();
+  const writeBackendHostingToken = async (token = '') => {
+    const clean = text(token || '').trim();
+    if (!clean) return await RisuCompat.localRemoveItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY);
+    return await RisuCompat.localSetItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY, clean);
+  };
+
   const stripPresetSecret = (preset) => {
     const clean = sanitizePreset(preset || {});
     delete clean.key;
@@ -1545,6 +1578,13 @@
   const readRuntimeSettings = async () => normalizeRuntimeRecord(await readObject(STORAGE_RUNTIME_SETTINGS_KEY, {}));
   const writeRuntimeSettings = async (value) => {
     const settings = stripLegacyStageRuntimeSettings(normalizeRuntimeRecord(value || {}));
+    delete settings.backend_hosting_token;
+    if (settings.backendHosting && typeof settings.backendHosting === 'object' && !Array.isArray(settings.backendHosting)) {
+      settings.backendHosting = { ...settings.backendHosting };
+      delete settings.backendHosting.token;
+      delete settings.backendHosting.backendToken;
+      delete settings.backendHosting.backend_hosting_token;
+    }
     return await writeObject(STORAGE_RUNTIME_SETTINGS_KEY, { version: 3, savedAt: new Date().toISOString(), settings });
   };
   const readAgentSlots = async () => normalizeStoredAgentSlots(await readObject(STORAGE_AGENT_SLOTS_KEY, {}));
@@ -1739,6 +1779,13 @@
     const sections = legacyFlatToSections(flat || {});
     const compactObject = (obj) => Object.fromEntries(Object.entries(obj || {}).filter(([, value]) => value !== undefined && value !== null && value !== ''));
     const runtime = { ...(current.runtime || {}), ...compactObject(sections.runtime) };
+    const incomingBackendToken = normalizeBackendHostingConfig({
+      ...(runtime.backendHosting || {}),
+      token: runtime.backend_hosting_token || runtime.backendHosting?.token || ''
+    }).token;
+    if (incomingBackendToken) await writeBackendHostingToken(incomingBackendToken);
+    delete runtime.backend_hosting_token;
+    if (runtime.backendHosting && typeof runtime.backendHosting === 'object') runtime.backendHosting = { ...runtime.backendHosting, token: '' };
     const agents = { ...(current.agentSlots || {}) };
     for (const [stage, value] of Object.entries(sections.agents || {})) agents[stage] = { ...(agents[stage] || {}), ...compactObject(value) };
     const prompts = JSON.parse(JSON.stringify(current.promptOverrides || { before: {}, post: {} }));
@@ -1746,6 +1793,8 @@
     for (const [stage, value] of Object.entries(sections.prompts.before || {})) prompts.before[stage] = { ...(prompts.before[stage] || {}), ...compactObject(value) };
     const results = await Promise.all([writeRuntimeSettings(runtime), writeAgentSlots(agents), writePromptOverrides(prompts), RisuCompat.removeItem(STORAGE_POST_PROCESSORS_KEY)]);
     Runtime.settings = null;
+    Runtime.settingsLoadedAt = 0;
+    clearRequestReuseCache();
     return results.every(Boolean);
   };
 
@@ -1757,6 +1806,9 @@
       RisuCompat.removeItem(STORAGE_PROMPT_OVERRIDES_KEY)
     ]);
     Runtime.settings = null;
+    Runtime.settingsLoadedAt = 0;
+    clearRequestReuseCache();
+    clearArgumentCache();
     return results.some(Boolean);
   };
 
@@ -1806,6 +1858,7 @@
   };
 
   const loadSettings = async () => {
+    if (Runtime.settings && Date.now() - Number(Runtime.settingsLoadedAt || 0) < SETTINGS_CACHE_TTL_MS) return Runtime.settings;
     await ensureV2Migration();
     const runtimeStored = await readRuntimeSettings();
     const agentSlots = await readAgentSlots();
@@ -1821,11 +1874,17 @@
     const injectionPosition = normalizeChoice(await runtimeCfg('injection_position', 'first_system'), ['first_system', 'last_system', 'before_last_user'], 'first_system');
     const failureMode = normalizeChoice(await runtimeCfg('failure_mode', 'soft'), ['soft', 'degraded', 'hard'], 'soft');
     const backendStored = normalizeBackendHostingConfig(runtimeStored.backendHosting || {});
+    const localBackendToken = await readBackendHostingToken();
+    const legacyBackendToken = localBackendToken ? '' : text(await runtimeCfg('backend_hosting_token', backendStored.token || '')).trim();
+    if (!localBackendToken && legacyBackendToken) {
+      const migrated = await writeBackendHostingToken(legacyBackendToken);
+      if (migrated) await writeRuntimeSettings(runtimeStored);
+    }
     const backendHosting = normalizeBackendHostingConfig({
       ...backendStored,
       mode: await runtimeCfg('backend_hosting_mode', backendStored.mode || 'off'),
       url: await runtimeCfg('backend_hosting_url', backendStored.url || ''),
-      token: await runtimeCfg('backend_hosting_token', backendStored.token || ''),
+      token: localBackendToken || legacyBackendToken,
       autoDetected: await runtimeCfg('backend_hosting_auto_detected', backendStored.autoDetected ? 'true' : 'false'),
       lastDetectedAt: await runtimeCfg('backend_hosting_last_detected_at', backendStored.lastDetectedAt || ''),
       lastManifest: await runtimeCfg('backend_hosting_last_manifest', backendStored.lastManifest ? JSON.stringify(backendStored.lastManifest) : '')
@@ -1912,6 +1971,7 @@
     settings.twoCallAide = CORE_AIDE_STAGE_IDS.every(stageId => settings.stageOptions[stageId]?.execution_mode === 'analysis_draft');
     settings.presets = await loadPresetBank(settings);
     Runtime.settings = settings;
+    Runtime.settingsLoadedAt = Date.now();
     return settings;
   };
 
@@ -2019,9 +2079,9 @@
 
   const isOthersInfoMessage = (value) => {
     const body = text(value).trim();
-    if (!body) return false;
+    if (!body || isHayakuOwnedPromptPayload(body)) return false;
     return /<\/?(?:Others Info|Lore|Last output|Past conversations|Image Commands|information)>/i.test(body)
-      || /(?:하야쿠|hayaku|packet reading|packet\s*read|패킷\s*리딩|LBDATA|Response template|Narration Principles|Content Policy|Character Information|Basic Information|Long-Term Memory Archive|Final Check|Tags|Expansion|Annotation Feature|Status Interface)/i.test(body);
+      || /(?:packet reading|packet\s*read|패킷\s*리딩|LBDATA|Response template|Narration Principles|Content Policy|Character Information|Basic Information|Long-Term Memory Archive|Final Check|Tags|Expansion|Annotation Feature|Status Interface)/i.test(body);
   };
 
   const SGA_CURRENT_INPUT_TAGS = Object.freeze([
@@ -2175,10 +2235,163 @@
     return '';
   };
 
+  const SGA_HAYAKU_PACKET_START = 'HAYAKU_STATE_PACKET_START';
+  const SGA_HAYAKU_PACKET_END = 'HAYAKU_STATE_PACKET_END';
   const SGA_HAYAKU_BACKSTAGE_PAYLOAD_RE = /\[HAYAKU [A-Z0-9][A-Z0-9 -]{1,100}\]/i;
+  const SGA_HAYAKU_PACKET_JSON_SIGNAL_RE = /"(?:schema|ledger_profile)"\s*:\s*"(?:hayaku_packet_v1|hidden_packet_ledger_v2)"/i;
+  const SGA_HAYAKU_CONTEXT_MARKER_RE = /\[(?:\/)?HAYAKU[^\]\n]*(?:PACKET|RECALL|CONTINUITY|IMMUTABLE|SIDE-WRITE)[^\]\n]*\]/i;
+  const SGA_HAYAKU_PRIVATE_STAGE_MARKER_RE = /\[HAYAKU (?:SIDE-WRITE FINAL REMINDER|BUDGET-SAFE COMPLETION CONTRACT|PACKET RECOVERY CARE|STATE VIEW USAGE RULE|TURN EXECUTION CONTRACT|RECALL KERNEL|IMMUTABLE CORE|BUDGET-SAFE CONTINUITY|CONTINUITY CONTEXT)\]/i;
+  const SGA_HAYAKU_PACKET_WRITE_INSTRUCTION_RE = /(?:write|append|emit|return|produce|update|carry forward)[^\n]{0,180}(?:HAYAKU_STATE_PACKET|hidden HTML-comment packet|current_snapshot packet|recovery_snapshot packet)|(?:HAYAKU_STATE_PACKET|hidden HTML-comment packet)[^\n]{0,180}(?:write|append|emit|return|produce|update)/i;
+  const SGA_HAYAKU_PACKET_ARTIFACT_RE = /HAYAKU_STATE_PACKET_(?:START|END)|"schema"\s*:\s*"hayaku_packet_v1"|"ledger_profile"\s*:\s*"hidden_packet_ledger_v2"/i;
   const SGA_EXTERNAL_MEMORY_INJECTION_RE = /\[VECTOR RAG MEMORY\]|\[[A-Z0-9_-]+\s+[^\]\n]{1,100}\s+Injection\]/i;
-  const isBackstageUserPayload = value => SGA_HAYAKU_BACKSTAGE_PAYLOAD_RE.test(text(value));
-  const isExternalMemoryInjectionPayload = value => isSgaInjectionText(value) || SGA_EXTERNAL_MEMORY_INJECTION_RE.test(text(value));
+
+  const sgaHayakuJsonObjectEnd = (source, start) => {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < source.length; index += 1) {
+      const char = source[index];
+      if (escaped) { escaped = false; continue; }
+      if (inString && char === '\\') { escaped = true; continue; }
+      if (char === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (char === '{') depth += 1;
+      else if (char === '}') {
+        depth -= 1;
+        if (depth === 0) return index;
+        if (depth < 0) return -1;
+      }
+    }
+    return -1;
+  };
+
+  const isHayakuPacketObject = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const meta = value.meta && typeof value.meta === 'object' && !Array.isArray(value.meta) ? value.meta : {};
+    return text(meta.schema).trim().toLowerCase() === 'hayaku_packet_v1'
+      || text(meta.ledger_profile || meta.ledgerProfile).trim().toLowerCase() === 'hidden_packet_ledger_v2';
+  };
+
+  const stripStandaloneHayakuPacketJson = (value, aggressive = false) => {
+    let body = text(value || '');
+    let guard = 0;
+    while (guard < 8) {
+      guard += 1;
+      const signal = body.search(SGA_HAYAKU_PACKET_JSON_SIGNAL_RE);
+      if (signal < 0) break;
+      let open = body.lastIndexOf('{', signal);
+      let attempts = 0;
+      let removed = false;
+      while (open >= 0 && attempts < 24) {
+        attempts += 1;
+        const end = sgaHayakuJsonObjectEnd(body, open);
+        if (end >= signal) {
+          const candidate = body.slice(open, end + 1);
+          const parsed = tryJsonParse(candidate, null);
+          if (isHayakuPacketObject(parsed)) {
+            const fenceBefore = body.lastIndexOf('```', open);
+            const fenceAfter = body.indexOf('```', end + 1);
+            const fenceCountBefore = (body.slice(0, open).match(/```/g) || []).length;
+            const startsInsideFence = fenceBefore >= 0 && fenceCountBefore % 2 === 1;
+            const removeStart = startsInsideFence && /^```(?:json)?\s*$/i.test(body.slice(fenceBefore, open).trim()) ? fenceBefore : open;
+            const removeEnd = startsInsideFence && fenceAfter >= 0 ? fenceAfter + 3 : end + 1;
+            body = `${body.slice(0, removeStart)} ${body.slice(removeEnd)}`;
+            removed = true;
+            break;
+          }
+        }
+        open = body.lastIndexOf('{', open - 1);
+      }
+      if (removed) continue;
+      if (aggressive) {
+        const nearestOpen = body.lastIndexOf('{', signal);
+        const marker = body.lastIndexOf(SGA_HAYAKU_PACKET_START, signal);
+        const fence = body.lastIndexOf('```', signal);
+        const paragraphStart = Math.max(0, body.lastIndexOf('\n\n', signal) + 2, fence >= 0 ? fence : 0);
+        const paragraphOpen = body.indexOf('{', paragraphStart);
+        const cutCandidate = marker >= 0
+          ? marker
+          : fence >= 0
+            ? fence
+            : paragraphOpen >= 0 && paragraphOpen <= signal ? paragraphOpen : nearestOpen;
+        const cut = cutCandidate >= 0 ? body.lastIndexOf('\n', cutCandidate) + 1 : body.lastIndexOf('\n', signal) + 1;
+        if (cut >= 0 && (signal >= Math.max(0, body.length * 0.18) || !body.slice(0, cut).trim())) {
+          body = body.slice(0, cut);
+        }
+      }
+      break;
+    }
+    return body;
+  };
+
+  const stripHayakuPacketBlocks = (value, options = {}) => {
+    const original = text(value || '');
+    if (!original) return '';
+    let stripped = original
+      .replace(/<!--\s*HAYAKU_STATE_PACKET_START\b[\s\S]*?\bHAYAKU_STATE_PACKET_END\s*-->/gi, ' ')
+      .replace(/<<<\s*HAYAKU_STATE_PACKET_START\s*>>>\s*[\s\S]*?<<<\s*HAYAKU_STATE_PACKET_END\s*>>>/gi, ' ')
+      .replace(/\[HAYAKU CONTINUITY CONTEXT\][\s\S]*?\[\/HAYAKU CONTINUITY CONTEXT\]/gi, ' ')
+      .replace(/\[HAYAKU IMMUTABLE CORE\][\s\S]*?\[\/HAYAKU IMMUTABLE CORE\]/gi, ' ');
+    if (options.looseMarkers === true) {
+      stripped = stripped.replace(/(?:<!--\s*)?HAYAKU_STATE_PACKET_START\b[\s\S]*?\bHAYAKU_STATE_PACKET_END\s*(?:-->)?/gi, ' ');
+      const danglingStart = stripped.search(/(?:<!--\s*)?HAYAKU_STATE_PACKET_START\b/i);
+      if (danglingStart >= 0) {
+        const tail = stripped.slice(danglingStart);
+        if (options.stripDanglingTail === true || SGA_HAYAKU_PACKET_JSON_SIGNAL_RE.test(tail)) stripped = stripped.slice(0, danglingStart);
+      }
+    }
+    stripped = stripStandaloneHayakuPacketJson(stripped, options.aggressiveJson === true);
+    if (options.stripContextTail === true) {
+      const markerIndex = stripped.search(SGA_HAYAKU_CONTEXT_MARKER_RE);
+      if (markerIndex >= 0) {
+        const before = stripped.slice(0, markerIndex).trim();
+        const tail = stripped.slice(markerIndex);
+        if (!before || before.length < 240 || SGA_HAYAKU_PACKET_JSON_SIGNAL_RE.test(tail)) stripped = before;
+      }
+    }
+    if (stripped === original) return original;
+    return stripped
+      .replace(/^[ \t]+|[ \t]+$/gm, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  };
+
+  // GRADIA private stages must never inherit HAYAKU's downstream packet-writing
+  // transport prompt. This function is used only on private copies built for GRADIA
+  // analysis/drafting. The original request array returned to RisuAI is untouched.
+  const stripHayakuOwnedPromptForPrivateStage = (value, options = {}) => {
+    const original = text(value || '');
+    if (!original) return '';
+    let body = stripHayakuPacketBlocks(original, {
+      looseMarkers: true,
+      stripDanglingTail: true,
+      aggressiveJson: true,
+      stripContextTail: true
+    });
+    const markerIndex = body.search(SGA_HAYAKU_PRIVATE_STAGE_MARKER_RE);
+    if (markerIndex >= 0) body = body.slice(0, markerIndex);
+    const instructionMatch = body.search(SGA_HAYAKU_PACKET_WRITE_INSTRUCTION_RE);
+    if (instructionMatch >= 0 && SGA_HAYAKU_PACKET_ARTIFACT_RE.test(body.slice(Math.max(0, instructionMatch - 240)))) {
+      const paragraphStart = Math.max(0, body.lastIndexOf('\n\n', instructionMatch) + 2);
+      const safePrefix = body.slice(0, paragraphStart).trim();
+      if (!safePrefix || paragraphStart >= body.length * 0.12 || options.draftOutput === true) body = safePrefix;
+    }
+    body = body
+      .replace(/(?:<!--\s*)?HAYAKU_STATE_PACKET_END\s*(?:-->)?/gi, ' ')
+      .replace(/^[ \t]+|[ \t]+$/gm, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    return body;
+  };
+
+  const isHayakuOwnedPromptPayload = value => {
+    const body = text(value || '');
+    return SGA_HAYAKU_PRIVATE_STAGE_MARKER_RE.test(body)
+      || (SGA_HAYAKU_PACKET_ARTIFACT_RE.test(body) && SGA_HAYAKU_PACKET_WRITE_INSTRUCTION_RE.test(body));
+  };
+
+  const isBackstageUserPayload = value => SGA_HAYAKU_BACKSTAGE_PAYLOAD_RE.test(text(value)) || isHayakuOwnedPromptPayload(value);
+  const isExternalMemoryInjectionPayload = value => isSgaInjectionText(value) || SGA_EXTERNAL_MEMORY_INJECTION_RE.test(text(value)) || isHayakuOwnedPromptPayload(value);
 
   const SgaCurrentInputRequestKind = (() => {
     const moduleMarkerPattern = /(?:<\s*\/?\s*(?:lb-[a-z0-9-]+|lightboard-[a-z0-9-]+)\b|\blb-(?:rerolling|pending|lazy|reroll|interaction-identifier|xnai)\b|재생성\s*중)/i;
@@ -2465,6 +2678,7 @@ ${text(paired.leadingAssistant.content || '')}
     const normalized = normalizeMessages(messages);
     const allowed = normalized
       .filter(m => ['system', 'user', 'assistant', 'developer'].includes(m.role))
+      .filter(m => text(m.content || '').trim())
       .filter(m => !isSgaInjectionText(m.content));
     const systemContextMessages = allowed.filter(m => ['system', 'developer'].includes(m.role));
     const otherInfoMessages = allowed.filter(m => {
@@ -2707,7 +2921,7 @@ ${text(paired.leadingAssistant.content || '')}
     const role = rawRole === 'user' ? 'user'
       : ['assistant', 'char', 'character', 'bot', 'ai', 'model'].includes(rawRole) ? 'assistant' : '';
     if (!role) return null;
-    const content = contentToText(item.data ?? item.content ?? '').trim();
+    const content = sanitizeMessageContentForHistory(role, contentToText(item.data ?? item.content ?? '')).trim();
     return content ? { role, content } : null;
   };
 
@@ -2734,10 +2948,11 @@ ${text(paired.leadingAssistant.content || '')}
     if (!Array.isArray(rawMessages)) return { ...fallback, error: 'chat.message array unavailable' };
     const normalized = rawMessages.map(normalizeStoredRagMessage).filter(Boolean);
     const greeting = resolveCurrentFirstMessageForRag(character, chat);
+    const cleanGreeting = sanitizeMessageContentForHistory('assistant', greeting.message || '');
     let messages = normalized.slice();
     let firstMessageIncluded = false;
-    if (greeting.message && !(messages[0]?.role === 'assistant' && sameRagChatContent(messages[0]?.content, greeting.message))) {
-      messages.unshift({ role: 'assistant', content: greeting.message });
+    if (cleanGreeting && !(messages[0]?.role === 'assistant' && sameRagChatContent(messages[0]?.content, cleanGreeting))) {
+      messages.unshift({ role: 'assistant', content: cleanGreeting });
       firstMessageIncluded = true;
     }
     const currentText = text(currentTurnResolution?.text || extractLatestUserInput(requestMessages) || '');
@@ -5096,7 +5311,7 @@ function mergeAgentCbsWarnings(...warningLists) {
   };
 
   const draftBodyText = (value) => {
-    const raw = text(value || '').replace(/\\n/g, '\n').replace(/\\r/g, '\r').trim();
+    const raw = stripHayakuOwnedPromptForPrivateStage(value, { draftOutput: true }).replace(/\\n/g, '\n').replace(/\\r/g, '\r').trim();
     return raw.split(/\n+/)
       .map(line => line.trim())
       .filter(line => line
@@ -5138,8 +5353,15 @@ function mergeAgentCbsWarnings(...warningLists) {
   };
 
   const sanitizeMessageContentForHistory = (role, value) => {
-    const raw = text(value || '');
-    if (role !== 'assistant') return raw;
+    const normalizedRole = text(role || '').trim().toLowerCase();
+    const assistantLike = ['assistant', 'char', 'character', 'bot', 'model', 'ai'].includes(normalizedRole);
+    const contextLike = assistantLike || normalizedRole === 'system' || normalizedRole === 'developer';
+    const raw = stripHayakuOwnedPromptForPrivateStage(value, {
+      role: normalizedRole,
+      assistantLike,
+      contextLike
+    });
+    if (!raw || !assistantLike) return raw;
     const hadHiddenBlock = /<\s*(?:thoughts?|thinking|reasoning|analysis)\s*>/i.test(raw) || hiddenReasoningStartRe.test(raw);
     if (!hadHiddenBlock) return raw;
     let body = stripHiddenReasoningBlocks(raw);
@@ -5177,7 +5399,10 @@ function mergeAgentCbsWarnings(...warningLists) {
     return changed ? lines.slice(i).join('\n').trim() : body;
   };
 
-  const normalizeDraftCandidateText = (value) => stripAutoResponseWrapper(stripHiddenReasoningBlocks(compact(value || '', 80000))).trim();
+  const normalizeDraftCandidateText = (value) => stripAutoResponseWrapper(stripHiddenReasoningBlocks(compact(
+    stripHayakuOwnedPromptForPrivateStage(value, { draftOutput: true }),
+    80000
+  ))).trim();
   const isCompleteDraftText = (value) => isUsableDraftText(value) && hasCompleteDraftEnding(value);
 
   const normalizeLineageComparableText = (value) => normalizeDraftCandidateText(value)
@@ -5281,6 +5506,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     body = body.replace(/\n\s*["']?(?:beats|do_not_reveal|pov_limits|notes|draft_kind|change_log|continuity_notes|final_overlay|analysis|edits|schema|stage|ok|thinking|reasoning|reasoning_content|scratchpad)["']?\s*:\s*[\s\S]*$/i, '').trim();
     body = body.replace(/["']\s*,\s*["']?(?:beats|do_not_reveal|pov_limits|notes|draft_kind|change_log|continuity_notes|final_overlay|analysis|edits|schema|stage|ok|thinking|reasoning|reasoning_content|scratchpad)["']?\s*:\s*[\s\S]*$/i, '').trim();
     body = stripHiddenReasoningBlocks(body);
+    body = stripHayakuOwnedPromptForPrivateStage(body, { draftOutput: true });
     return compact(body, 80000);
   };
 
@@ -5340,8 +5566,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     }
     candidate = candidate.replace(/^Here(?:'s| is) (?:the )?(?:revised |final |complete )?(?:draft|response)[:：]\s*/i, '').trim();
     candidate = candidate.replace(/^Of course!?\s*/i, '').trim();
-    candidate = stripHiddenReasoningBlocks(candidate);
-    candidate = stripAutoResponseWrapper(candidate);
+    candidate = normalizeDraftCandidateText(candidate);
     // Never silently substitute the input draft and report the stage as a success.
     if (!isCompleteDraftText(candidate)) return '';
     return compact(candidate, 80000);
@@ -5616,6 +5841,7 @@ function mergeAgentCbsWarnings(...warningLists) {
   "change_log": ["short concrete changes"]
 }
 Never put <Thoughts>, thinking, reasoning, key beats, structure notes, or constraints check inside response_draft or draft.rp_text.
+Never generate, reproduce, quote, or append hidden memory-plugin packets, packet JSON, hidden metadata comments, side-write instructions, continuity transport blocks, or memory-plugin metadata. Memory-packet writing belongs only to the downstream main response model after GRADIA finishes its private draft.
 If valid JSON is difficult, output ONLY the complete RP response draft as plain text. A complete draft is better than broken JSON or analysis.`;
 
   const ANALYSIS_SCHEMA = 'serial_gradation_agents_for_rp_analysis_v3';
@@ -5755,7 +5981,8 @@ If valid JSON is difficult, output ONLY the complete RP response draft as plain 
     '- Preserve user agency. Do not decide the user character hidden thoughts, feelings, choices, or dialogue unless the user already provided them.',
     '- Maintain grounded continuity. Visible causes should lead to visible effects, physical and social constraints should stay active, and bystanders or public context should not vanish.',
     '- Expand weak parts only when it improves the current response. Do not bloat, derail, skip ahead, or replace the current scene with a different next beat.',
-    '- Never output <Thoughts>, thinking, reasoning, key beats, structure notes, constraints checks, stage names, JSON labels, or plugin terminology inside the draft.'
+    '- Never output <Thoughts>, thinking, reasoning, key beats, structure notes, constraints checks, stage names, JSON labels, or plugin terminology inside the draft.',
+    '- Never write hidden memory packets, packet JSON, hidden metadata comments, side-write text, or continuity transport metadata. Those belong to the downstream main response model, not to any private GRADIA stage.'
   ].join('\n');
 
   const shadowActDraftStyleBridgePrompt = () => [
@@ -6874,6 +7101,149 @@ This completed U+A pair is the strongest continuity anchor. Continue from its en
     return copy;
   };
 
+  const countHayakuTransportSignals = list => (Array.isArray(list) ? list : []).reduce((count, message) => {
+    const body = contentToText(message?.content ?? message?.data ?? '');
+    return count + (isHayakuOwnedPromptPayload(body) || SGA_HAYAKU_PACKET_ARTIFACT_RE.test(body) || /\[HAYAKU CONTINUITY CONTEXT\]/i.test(body) ? 1 : 0);
+  }, 0);
+
+  const verifyHayakuTransportPreservation = (messages = [], injectedMessages = []) => {
+    const original = Array.isArray(messages) ? messages : [];
+    const outgoing = Array.isArray(injectedMessages) ? injectedMessages : [];
+    // injectSystemMessage shallow-copies the array and inserts one new object. Filter by
+    // object identity, not text markers, so a pre-existing GRADIA/HAYAKU system message
+    // is never mistaken for the newly inserted draft message.
+    const originalRefs = new Set(original);
+    const retained = outgoing.filter(message => originalRefs.has(message));
+    const identityPreserved = retained.length === original.length && retained.every((message, index) => message === original[index]);
+    let valuePreserved = false;
+    try { valuePreserved = JSON.stringify(retained) === JSON.stringify(original); } catch (_) { valuePreserved = false; }
+    return {
+      preserved: identityPreserved && valuePreserved && outgoing.length === original.length + 1,
+      identityPreserved,
+      valuePreserved,
+      originalCount: original.length,
+      outgoingCount: outgoing.length,
+      retainedCount: retained.length,
+      originalHayakuSignals: countHayakuTransportSignals(original),
+      retainedHayakuSignals: countHayakuTransportSignals(retained)
+    };
+  };
+
+
+  const RequestReuseCache = new Map();
+  let RequestReuseCleanupTimer = null;
+  const clearRequestReuseCache = () => {
+    RequestReuseCache.clear();
+    Runtime.requestReuse.lastFingerprint = '';
+    if (RequestReuseCleanupTimer) { clearTimeout(RequestReuseCleanupTimer); RequestReuseCleanupTimer = null; }
+  };
+  const scheduleCompletedRequestReuseCleanup = fingerprint => {
+    if (!fingerprint) return;
+    if (RequestReuseCleanupTimer) clearTimeout(RequestReuseCleanupTimer);
+    RequestReuseCleanupTimer = setTimeout(() => {
+      RequestReuseCleanupTimer = null;
+      RequestReuseCache.delete(fingerprint);
+    }, 1500);
+  };
+
+  const pruneRequestReuseCache = () => {
+    const now = Date.now();
+    for (const [key, entry] of RequestReuseCache.entries()) {
+      if (!entry || Number(entry.expiresAt || 0) <= now) RequestReuseCache.delete(key);
+    }
+    while (RequestReuseCache.size > REQUEST_REUSE_CACHE_MAX) {
+      const oldest = RequestReuseCache.keys().next().value;
+      if (oldest == null) break;
+      RequestReuseCache.delete(oldest);
+      Runtime.requestReuse.evictions += 1;
+    }
+  };
+
+  const requestSettingsSignature = settings => {
+    const hasher = createTextHasher().update('gradia-settings-v1');
+    const simple = {
+      mode: settings?.mode,
+      outputMode: settings?.outputMode,
+      injectionPosition: settings?.injectionPosition,
+      failureMode: settings?.failureMode,
+      maxPreviousStageChars: settings?.maxPreviousStageChars,
+      maxInjectionChars: settings?.maxInjectionChars,
+      targetDraftMinChars: settings?.targetDraftMinChars,
+      targetDraftMaxChars: settings?.targetDraftMaxChars,
+      aideStageOrder: settings?.aideStageOrder,
+      stageOptions: settings?.stageOptions,
+      stagePresetNames: settings?.stagePresetNames,
+      beforePromptModes: settings?.beforePromptModes,
+      beforeCustomPrompts: settings?.beforeCustomPrompts,
+      beforeExtraPrompts: settings?.beforeExtraPrompts,
+      backendHosting: {
+        mode: settings?.backendHosting?.mode || 'off',
+        url: settings?.backendHosting?.url || ''
+      }
+    };
+    hasher.update(text(simple));
+    for (const [name, preset] of Object.entries(settings?.presets || {}).sort((a, b) => a[0].localeCompare(b[0]))) {
+      hasher.update(name).update(text({ ...preset, key: undefined }));
+      if (preset?.key) hasher.update(`secret:${stableDraftHash(preset.key)}`);
+    }
+    return hasher.digest();
+  };
+
+  const requestFingerprint = (messages = [], type = '', settings = {}, currentTurnResolution = null) => {
+    const hasher = createTextHasher()
+      .update('gradia-before-request-v1')
+      .update(normalizeRequestType(type))
+      .update(requestSettingsSignature(settings))
+      .update(currentTurnResolution?.source || '')
+      .update(currentTurnResolution?.text || '');
+    for (const message of (Array.isArray(messages) ? messages : [])) hasher.update(text(message));
+    return hasher.digest();
+  };
+
+  const getRequestReuseEntry = fingerprint => {
+    pruneRequestReuseCache();
+    const entry = RequestReuseCache.get(fingerprint);
+    if (!entry) {
+      Runtime.requestReuse.misses += 1;
+      return null;
+    }
+    RequestReuseCache.delete(fingerprint);
+    RequestReuseCache.set(fingerprint, entry);
+    Runtime.requestReuse.hits += 1;
+    Runtime.requestReuse.lastFingerprint = fingerprint;
+    Runtime.requestReuse.lastReuseAt = Date.now();
+    return entry;
+  };
+
+  const storeRequestReuseEntry = (fingerprint, value = {}, ttlMs = REQUEST_REUSE_TTL_MS) => {
+    if (!fingerprint) return;
+    RequestReuseCache.delete(fingerprint);
+    RequestReuseCache.set(fingerprint, {
+      ...value,
+      storedAt: Date.now(),
+      expiresAt: Date.now() + Math.max(1000, Number(ttlMs) || REQUEST_REUSE_TTL_MS)
+    });
+    Runtime.requestReuse.stores += 1;
+    Runtime.requestReuse.lastFingerprint = fingerprint;
+    pruneRequestReuseCache();
+  };
+
+  const applyRequestReuseEntry = (entry, messages, requestSettings, fingerprint) => {
+    if (!entry?.injection) {
+      Runtime.last = { at: Date.now(), ok: true, skipped: true, reused: true, reason: entry?.reason || 'cached_pipeline_passthrough', requestFingerprint: fingerprint };
+      Runtime.finalDraftMeta = { ...(entry?.finalDraftMeta || {}), at: Date.now(), reused: true, requestFingerprint: fingerprint, reason: entry?.reason || '' };
+      return messages;
+    }
+    const injectedMessages = injectSystemMessage(messages, entry.injection, requestSettings);
+    const transportCheck = verifyHayakuTransportPreservation(messages, injectedMessages);
+    if (!transportCheck.preserved) return null;
+    Runtime.finalDraft = entry.finalDraft || '';
+    Runtime.finalDraftMeta = { ...(entry.finalDraftMeta || {}), at: Date.now(), reused: true, requestFingerprint: fingerprint, hayakuTransport: transportCheck };
+    Runtime.lastSafeStage = entry.lastSafeStage || Runtime.lastSafeStage;
+    Runtime.last = { at: Date.now(), ok: true, skipped: false, reused: true, reason: 'same_request_retry_reuse', requestFingerprint: fingerprint, stageCount: Number(entry.stageCount || 0) };
+    return injectedMessages;
+  };
+
   const recordBeforeSkip = (reason, details = {}) => {
     const cleanReason = compact(reason || 'skipped', 500);
     const preserveDebug = !!details.preserveDebug;
@@ -7098,21 +7468,11 @@ This completed U+A pair is the strongest continuity anchor. Continue from its en
       return messages;
     }
 
-    if (Runtime.inFlight) {
-      Runtime.last = { at: Date.now(), ok: true, skipped: true, reason: 'pipeline_already_in_flight' };
-      recordBeforeSkip('pipeline_already_in_flight', { type: text(type || '') });
-      return messages;
-    }
-
     const currentTurnResolution = resolveSgaCurrentTurn(messages);
     if (!currentTurnResolution.text) {
       const reason = 'current_user_input_unresolved';
       Runtime.last = {
-        at: Date.now(),
-        ok: true,
-        skipped: true,
-        reason,
-        type: text(type || ''),
+        at: Date.now(), ok: true, skipped: true, reason, type: text(type || ''),
         currentTurnResolution: {
           source: currentTurnResolution.source,
           confidence: currentTurnResolution.confidence,
@@ -7123,7 +7483,22 @@ This completed U+A pair is the strongest continuity anchor. Continue from its en
       recordBeforeSkip(reason, { type: text(type || ''), currentTurnResolution: Runtime.last.currentTurnResolution });
       return messages;
     }
+
     const requestSettings = { ...settings, currentTurnResolution };
+    const fingerprint = requestFingerprint(messages, type, requestSettings, currentTurnResolution);
+    const reused = getRequestReuseEntry(fingerprint);
+    if (reused) {
+      const applied = applyRequestReuseEntry(reused, messages, requestSettings, fingerprint);
+      if (applied) return applied;
+      RequestReuseCache.delete(fingerprint);
+      warn('request_reuse_transport_check_failed', fingerprint);
+    }
+
+    if (Runtime.inFlight) {
+      Runtime.last = { at: Date.now(), ok: true, skipped: true, reason: 'pipeline_already_in_flight', requestFingerprint: fingerprint };
+      recordBeforeSkip('pipeline_already_in_flight', { type: text(type || ''), requestFingerprint: fingerprint });
+      return messages;
+    }
 
     const defaultResolved = resolvePreset(requestSettings, 'shadow_act').preset;
     const defaultIssues = providerConfigurationIssues(defaultResolved);
@@ -7146,13 +7521,9 @@ This completed U+A pair is the strongest continuity anchor. Continue from its en
     try {
       const result = await runPipeline(messages, type, requestSettings);
       Runtime.last = {
-        at: Date.now(),
-        ok: result.ok,
-        skipped: !result.ok,
-        reason: result.reason || '',
-        stageCount: result.stages?.length || 0,
-        elapsedMs: Date.now() - startedAt,
-        recentMeta: result.recentMeta || null,
+        at: Date.now(), ok: result.ok, skipped: !result.ok, reason: result.reason || '',
+        stageCount: result.stages?.length || 0, elapsedMs: Date.now() - startedAt,
+        recentMeta: result.recentMeta || null, requestFingerprint: fingerprint,
         currentTurnResolution: {
           source: currentTurnResolution.source,
           confidence: currentTurnResolution.confidence,
@@ -7161,42 +7532,43 @@ This completed U+A pair is the strongest continuity anchor. Continue from its en
           tag: currentTurnResolution.tag || ''
         },
         stages: (result.stages || []).map(s => ({
-          stage: s.stage,
-          label: s.label || '',
-          ok: s.ok,
-          fallback: !!s.fallback,
-          reason: s.reason || '',
-          presetName: s.presetName || '',
-          provider: s.provider || '',
-          model: s.model || '',
-          elapsedMs: s.elapsedMs || 0,
-          draftPreview: compactMiddle(stageDraft(s), 500)
+          stage: s.stage, label: s.label || '', ok: s.ok, fallback: !!s.fallback,
+          reason: s.reason || '', presetName: s.presetName || '', provider: s.provider || '',
+          model: s.model || '', elapsedMs: s.elapsedMs || 0, draftPreview: compactMiddle(stageDraft(s), 500)
         }))
       };
       if (!result.ok || !result.injection) {
-        recordBeforeSkip(result.reason || 'pipeline_failed_no_injection', { type: text(type || ''), stageCount: result.stages?.length || 0, preserveDebug: true });
-        if (settings.failureMode === 'hard') throw new Error(`${PUBLIC_LOG_PREFIX} Pipeline failed: ${result.reason || 'unknown'}`);
+        const reason = result.reason || 'pipeline_failed_no_injection';
+        recordBeforeSkip(reason, { type: text(type || ''), stageCount: result.stages?.length || 0, preserveDebug: true, requestFingerprint: fingerprint });
+        storeRequestReuseEntry(fingerprint, { injection: '', reason, finalDraftMeta: Runtime.finalDraftMeta || null }, REQUEST_FAILURE_REUSE_TTL_MS);
+        if (settings.failureMode === 'hard') throw new Error(`${PUBLIC_LOG_PREFIX} Pipeline failed: ${reason}`);
         return messages;
       }
-      return injectSystemMessage(messages, result.injection, requestSettings);
+      const injectedMessages = injectSystemMessage(messages, result.injection, requestSettings);
+      const transportCheck = verifyHayakuTransportPreservation(messages, injectedMessages);
+      Runtime.finalDraftMeta = { ...(Runtime.finalDraftMeta || {}), requestFingerprint: fingerprint, hayakuTransport: transportCheck };
+      if (!transportCheck.preserved) {
+        warn('hayaku_transport_preservation_failed', transportCheck);
+        storeRequestReuseEntry(fingerprint, { injection: '', reason: 'hayaku_transport_preservation_failed', finalDraftMeta: Runtime.finalDraftMeta }, REQUEST_FAILURE_REUSE_TTL_MS);
+        if (requestSettings.failureMode === 'hard') throw new Error(`${PUBLIC_LOG_PREFIX} HAYAKU transport preservation check failed.`);
+        return messages;
+      }
+      storeRequestReuseEntry(fingerprint, {
+        injection: result.injection,
+        finalDraft: Runtime.finalDraft,
+        finalDraftMeta: Runtime.finalDraftMeta,
+        lastSafeStage: Runtime.lastSafeStage,
+        stageCount: result.stages?.length || 0
+      });
+      return injectedMessages;
     } catch (error) {
       warn('beforeRequest failed', error);
       const reason = compact(error?.message || error, 500);
-      Runtime.last = { at: Date.now(), ok: false, reason, elapsedMs: Date.now() - startedAt };
-      Runtime.finalDraftMeta = { at: Date.now(), skipped: true, reason, type: text(type || '') };
+      Runtime.last = { at: Date.now(), ok: false, reason, elapsedMs: Date.now() - startedAt, requestFingerprint: fingerprint };
+      Runtime.finalDraftMeta = { at: Date.now(), skipped: true, reason, type: text(type || ''), requestFingerprint: fingerprint };
+      storeRequestReuseEntry(fingerprint, { injection: '', reason, finalDraftMeta: Runtime.finalDraftMeta }, REQUEST_FAILURE_REUSE_TTL_MS);
       if (!Runtime.stageTrace.length) {
-        Runtime.stageTrace = [{
-          at: Date.now(),
-          stage: 'beforeRequest',
-          ok: false,
-          skipped: false,
-          reason,
-          systemPrompt: '',
-          userPrompt: '',
-          rawResponse: '',
-          parsed: null,
-          fallbackStage: null
-        }];
+        Runtime.stageTrace = [{ at: Date.now(), stage: 'beforeRequest', ok: false, skipped: false, reason, systemPrompt: '', userPrompt: '', rawResponse: '', parsed: null, fallbackStage: null }];
       }
       if (settings.failureMode === 'hard') throw error;
       return messages;
@@ -7204,6 +7576,16 @@ This completed U+A pair is the strongest continuity anchor. Continue from its en
       Runtime.inFlight = false;
       scheduleGuiTraceRefresh();
     }
+  };
+
+
+  const afterRequestReuseCleanup = async (response, type) => {
+    if (!isMainNarrativeRequest(type)) return response;
+    // RisuAI can still reject a successful response for blank/banned-output fallback after
+    // afterRequest runs. Delay cache removal briefly so the immediate retry reuses GRADIA,
+    // while a later user reroll receives a fresh draft.
+    scheduleCompletedRequestReuseCleanup(Runtime.requestReuse.lastFingerprint || Runtime.last?.requestFingerprint || '');
+    return response;
   };
 
   const renderTemplate = renderPromptTemplate;
@@ -7238,34 +7620,54 @@ This completed U+A pair is the strongest continuity anchor. Continue from its en
     mainDomPermissionRequested: false,
     mainDomPermissionPromise: null,
     hostPanelReady: false,
-    hostPanelPosition: null,
-    hostPanelGeometry: null,
-    hostFrameSnapshot: null,
-    dragCleanup: null,
-    resizeCleanup: null,
     scrollState: null,
-    interactionUntil: 0,
-    interactionCleanup: null
+    inputRenderTimer: null
+  };
+
+  const refreshGuiRuntimeIndicators = () => {
+    try {
+      if (!Gui.root) return;
+      const hookActive = Runtime.hookStatus?.beforeRequest === true;
+      const permissionDenied = Runtime.hookStatus?.replacerPermission === 'denied';
+      const liveText = !hookActive ? (permissionDenied ? '권한 필요' : '비활성') : Runtime.inFlight ? '실행 중' : '활성';
+      Gui.root.querySelectorAll('[data-runtime-live]').forEach(node => { node.textContent = liveText; });
+      Gui.root.querySelectorAll('[data-runtime-pipeline]').forEach(node => {
+        node.textContent = !hookActive ? (permissionDenied ? 'replacer 권한 필요' : '플러그인 훅 비활성') : Runtime.inFlight ? '실행 중' : '대기 중';
+        node.className = `sga-badge ${!hookActive ? 'danger' : Runtime.inFlight ? 'warn' : 'good'}`;
+      });
+      const lastRunAt = Number(Runtime.lastPipeline?.at || Runtime.last?.at || 0);
+      const lastRunText = lastRunAt ? new Date(lastRunAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '기록 없음';
+      Gui.root.querySelectorAll('[data-runtime-last]').forEach(node => { node.textContent = lastRunText; });
+    } catch (_) {}
   };
 
   function scheduleGuiTraceRefresh() {
     try {
       if (!Gui.visible || !Gui.app || typeof document === 'undefined') return;
+      refreshGuiRuntimeIndicators();
+      if (Gui.refreshTimer) { clearTimeout(Gui.refreshTimer); Gui.refreshTimer = null; }
+      // Stage traces can arrive several times per response. Rebuilding the entire GUI while
+      // providers are running is expensive in PocketRisu/WebView, so update only text badges.
+      if (Runtime.inFlight) return;
       const active = document.activeElement;
-      if (active && Gui.app.contains(active) && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName || '')) return;
-      if (Gui.refreshTimer) clearTimeout(Gui.refreshTimer);
-      const wait = Date.now() < Number(Gui.interactionUntil || 0) ? 420 : 120;
+      const editing = !!(active && Gui.app.contains(active) && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName || ''));
       Gui.refreshTimer = setTimeout(() => {
         Gui.refreshTimer = null;
-        if (!Gui.visible || !Gui.app) return;
-        if (Date.now() < Number(Gui.interactionUntil || 0)) {
-          scheduleGuiTraceRefresh();
-          return;
-        }
+        if (!Gui.visible || !Gui.app || Runtime.inFlight) return;
         void renderSettingsGui();
-      }, wait);
+      }, editing ? 650 : 220);
     } catch (_) {}
   }
+
+  const queueGuiRender = (delay = 120) => {
+    try {
+      if (Gui.inputRenderTimer) clearTimeout(Gui.inputRenderTimer);
+      Gui.inputRenderTimer = setTimeout(() => {
+        Gui.inputRenderTimer = null;
+        if (Gui.visible) void renderSettingsGui();
+      }, Math.max(0, Number(delay) || 0));
+    } catch (_) {}
+  };
 
   const cloneJson = value => JSON.parse(JSON.stringify(value ?? null));
 
@@ -7456,8 +7858,10 @@ This completed U+A pair is the strongest continuity anchor. Continue from its en
   const saveGuiState = async () => {
     const state = await ensureGuiState();
     const runtime = state.runtime || {};
+    const backendConfig = normalizeBackendHostingConfig(runtime.backendHosting || {});
     const ok = await Promise.all([
       writeStoredPresetBank(state.providers || {}),
+      writeBackendHostingToken(backendConfig.token),
       writeRuntimeSettings({
         mode: runtime.mode,
         gradation_mode: runtime.gradationMode || 'full_draft',
@@ -7472,12 +7876,11 @@ This completed U+A pair is the strongest continuity anchor. Continue from its en
         quick_profile: normalizeChoice(runtime.quickProfile || 'custom', QUICK_PROFILE_IDS, 'custom'),
         target_draft_min_chars: String(runtime.targetDraftMinChars || DEFAULT_TARGET_DRAFT_MIN_CHARS),
         target_draft_max_chars: String(runtime.targetDraftMaxChars || DEFAULT_TARGET_DRAFT_MAX_CHARS),
-        backend_hosting_mode: normalizeBackendHostingConfig(runtime.backendHosting || {}).mode,
-        backend_hosting_url: normalizeBackendHostingConfig(runtime.backendHosting || {}).url,
-        backend_hosting_token: normalizeBackendHostingConfig(runtime.backendHosting || {}).token,
-        backend_hosting_auto_detected: String(normalizeBackendHostingConfig(runtime.backendHosting || {}).autoDetected === true),
-        backend_hosting_last_detected_at: normalizeBackendHostingConfig(runtime.backendHosting || {}).lastDetectedAt,
-        backend_hosting_last_manifest: normalizeBackendHostingConfig(runtime.backendHosting || {}).lastManifest ? JSON.stringify(normalizeBackendHostingConfig(runtime.backendHosting || {}).lastManifest) : '',
+        backend_hosting_mode: backendConfig.mode,
+        backend_hosting_url: backendConfig.url,
+        backend_hosting_auto_detected: String(backendConfig.autoDetected === true),
+        backend_hosting_last_detected_at: backendConfig.lastDetectedAt,
+        backend_hosting_last_manifest: backendConfig.lastManifest ? JSON.stringify(backendConfig.lastManifest) : '',
         debug_log: String(!!runtime.debugLog),
         enable_gui: String(runtime.guiEnabled !== false)
       }),
@@ -7488,6 +7891,8 @@ This completed U+A pair is the strongest continuity anchor. Continue from its en
     if (!ok.every(Boolean)) throw new Error('일부 설정을 저장하지 못했습니다. RisuAI 저장소 사용 가능 여부를 확인하세요.');
     await RisuCompat.removeItem(LEGACY_STORAGE_SETTINGS_KEY);
     Runtime.settings = null;
+    Runtime.settingsLoadedAt = 0;
+    clearRequestReuseCache();
     await ensureGuiState(true);
     return true;
   };
@@ -7504,11 +7909,17 @@ This completed U+A pair is the strongest continuity anchor. Continue from its en
       LEGACY_STORAGE_PRESETS_KEY
     ];
     await Promise.all(keys.map(key => RisuCompat.removeItem(key)));
-    if (includeSecrets) await RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY);
+    if (includeSecrets) {
+      await RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY);
+      await RisuCompat.localRemoveItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY);
+    }
     const marker = { version: 2, ragRouteVersion: RAG_ROUTE_VERSION, migrated: false, migratedAt: new Date().toISOString(), source: 'reset' };
     await writeObject(STORAGE_MIGRATION_KEY, marker);
     migrationPromise = Promise.resolve(marker);
     Runtime.settings = null;
+    Runtime.settingsLoadedAt = 0;
+    clearRequestReuseCache();
+    clearArgumentCache();
     Runtime.providerPresets = {};
     Runtime.migration = marker;
     Runtime.migratedFrom = marker.source;
@@ -7540,12 +7951,11 @@ This completed U+A pair is the strongest continuity anchor. Continue from its en
 :root{color-scheme:dark;--sga-vh:100vh;--sga-bg:#090d14;--sga-surface:#111827;--sga-surface2:#172033;--sga-surface3:#202b40;--sga-line:#2b3850;--sga-text:#eef2ff;--sga-muted:#9aa8bf;--sga-accent:#7c9cff;--sga-good:#4ade80;--sga-warn:#fbbf24;--sga-danger:#fb7185}
 @supports (height:100dvh){:root{--sga-vh:100dvh}}
 *{box-sizing:border-box}html,body{margin:0;min-height:100%;background:transparent;color:var(--sga-text);font-family:Inter,Pretendard,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input,select,textarea{font:inherit}
-#sga-rp-gui-root{min-height:var(--sga-vh);background:radial-gradient(circle at 15% 0%,rgba(124,156,255,.13),transparent 30%),var(--sga-bg)}
-.sga-app{min-height:var(--sga-vh)}.sga-top{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 24px;border-bottom:1px solid var(--sga-line);background:rgba(9,13,20,.94);backdrop-filter:blur(18px);cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}.sga-top:active{cursor:grabbing}.sga-top button,.sga-top input,.sga-top select,.sga-top textarea,.sga-top a{user-select:auto;-webkit-user-select:auto}.sga-top button{cursor:pointer}
-.sga-brand h1{font-size:20px;line-height:1.2;margin:0}.sga-brand p{margin:5px 0 0;color:var(--sga-muted);font-size:12px}.sga-drag-hint{display:inline-flex;align-items:center;margin-top:7px;padding:3px 7px;border:1px solid rgba(124,156,255,.18);border-radius:999px;color:#8798b3;font-size:9px;font-weight:750;letter-spacing:.02em}.sga-head-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
-html[data-sga-dragging="true"],html[data-sga-dragging="true"] *{cursor:grabbing!important;user-select:none!important;-webkit-user-select:none!important}
+#sga-rp-gui-root{min-height:var(--sga-vh);background:var(--sga-bg)}
+.sga-app{min-height:var(--sga-vh)}.sga-top{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 24px;border-bottom:1px solid var(--sga-line);background:#090d14;user-select:auto;-webkit-user-select:auto}.sga-top button{cursor:pointer}
+.sga-brand h1{font-size:20px;line-height:1.2;margin:0}.sga-brand p{margin:5px 0 0;color:var(--sga-muted);font-size:12px}.sga-head-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .sga-dirty{font-size:11px;color:var(--sga-muted);padding:6px 9px;border:1px solid var(--sga-line);border-radius:999px}.sga-dirty[data-dirty="true"]{color:#fde68a;border-color:#8a6b1e;background:rgba(251,191,36,.08)}
-.sga-tabs{position:sticky;top:77px;z-index:15;display:flex;gap:7px;overflow:auto;padding:10px 24px;border-bottom:1px solid var(--sga-line);background:rgba(9,13,20,.92);scrollbar-width:thin}.sga-tab{white-space:nowrap;border:1px solid var(--sga-line);border-radius:999px;background:var(--sga-surface);color:#cbd5e1;padding:8px 12px;font-size:12px;font-weight:800;cursor:pointer}.sga-tab:hover{background:var(--sga-surface2)}.sga-tab[data-active="true"]{background:var(--sga-text);border-color:var(--sga-text);color:#09101d}.sga-tab .sga-tab-short{display:none}
+.sga-tabs{position:sticky;top:77px;z-index:15;display:flex;gap:7px;overflow:auto;padding:10px 24px;border-bottom:1px solid var(--sga-line);background:#090d14;scrollbar-width:thin}.sga-tab{white-space:nowrap;border:1px solid var(--sga-line);border-radius:999px;background:var(--sga-surface);color:#cbd5e1;padding:8px 12px;font-size:12px;font-weight:800;cursor:pointer}.sga-tab:hover{background:var(--sga-surface2)}.sga-tab[data-active="true"]{background:var(--sga-text);border-color:var(--sga-text);color:#09101d}.sga-tab .sga-tab-short{display:none}
 .sga-main{max-width:1320px;margin:0 auto;padding:22px 24px 80px}.sga-status{min-height:24px;margin-bottom:10px;padding:0 2px;color:#bbf7d0;font-size:12px}.sga-status.err{color:#fecdd3}
 .sga-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.sga-grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}.sga-card{border:1px solid var(--sga-line);border-radius:16px;background:linear-gradient(180deg,rgba(23,32,51,.92),rgba(17,24,39,.92));padding:16px;box-shadow:0 18px 45px rgba(0,0,0,.13)}.sga-card.wide{grid-column:1/-1}.sga-card h2,.sga-card h3{margin:0 0 8px}.sga-card h2{font-size:17px}.sga-card h3{font-size:14px}.sga-note{color:var(--sga-muted);font-size:12px;line-height:1.55}.sga-section-title{margin-bottom:14px}.sga-section-title h2{margin:0;font-size:18px}.sga-section-title p{margin:6px 0 0;color:var(--sga-muted);font-size:12px}
 .sga-stat{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.sga-stat-value{font-size:28px;font-weight:900}.sga-stat-label{color:var(--sga-muted);font-size:12px}.sga-badge{display:inline-flex;align-items:center;border:1px solid var(--sga-line);border-radius:999px;padding:4px 8px;font-size:11px;font-weight:800}.sga-badge.good{color:#bbf7d0;border-color:#166534;background:rgba(34,197,94,.08)}.sga-badge.warn{color:#fde68a;border-color:#854d0e;background:rgba(251,191,36,.08)}.sga-badge.off{color:#cbd5e1}.sga-flow{display:flex;align-items:stretch;gap:8px;overflow:auto;padding:8px 0}.sga-flow-node{min-width:150px;flex:1;border:1px solid var(--sga-line);border-radius:13px;padding:12px;background:#0d1421}.sga-flow-node strong{display:block;font-size:12px}.sga-flow-node span{display:block;color:var(--sga-muted);font-size:11px;margin-top:5px;line-height:1.4}.sga-arrow{display:flex;align-items:center;color:var(--sga-muted)}
@@ -7661,10 +8071,13 @@ html,body{width:100%;height:100%;overflow:hidden;background:transparent!importan
 @media(max-width:980px){#sga-rp-gui-root[data-host-panel="true"]{padding:0}#sga-rp-gui-root[data-host-panel="true"] .sga-app{width:100%;height:100%;border-radius:16px}}
 @media(max-width:600px){#sga-rp-gui-root[data-host-panel="true"] .sga-app{width:100%;height:100%;border:1px solid rgba(124,156,255,.28);border-radius:14px}}
 
-/* v0.12.19 PocketRisu/WebView stability */
+/* v0.12.22 lightweight GUI paint path */
 .sga-main,.sga-sidebar,.sga-insight-rail,.sga-list-items,.sga-live-result-text,.sga-live-result-code{-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
-html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer-events:none!important}
-@media(hover:none) and (pointer:coarse){.sga-simple-choice:hover,.sga-quicknav-btn:hover{transform:none}.sga-top{cursor:default}.sga-drag-hint{font-size:9px}}
+.sga-top,.sga-tabs{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+.sga-flow-node.state-run::after{display:none!important;animation:none!important}
+.sga-card,.sga-glance-card,.sga-quicknav-btn,.sga-simple-choice,.sga-insight-rail,.sga-sidebar,.sga-rail-card{box-shadow:none!important}
+.sga-flow-node,.sga-simple-choice,.sga-advanced>summary::before{transition:none!important}
+@media(hover:none) and (pointer:coarse){.sga-simple-choice:hover,.sga-quicknav-btn:hover{transform:none}}
 
 `;
     document.head.appendChild(style);
@@ -7967,7 +8380,7 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
           renderSettingsGui();
         } })
       ]),
-      guiEl('input', { class: 'sga-list-search', type: 'search', placeholder: '프리셋 이름 · 모델 · 프로바이더 검색', value: Gui.providerFilter || '', onInput: event => { Gui.providerFilter = event.target.value; renderSettingsGui(); } }),
+      guiEl('input', { class: 'sga-list-search', type: 'search', placeholder: '프리셋 이름 · 모델 · 프로바이더 검색', value: Gui.providerFilter || '', onInput: event => { Gui.providerFilter = event.target.value; queueGuiRender(140); } }),
       guiEl('div', { class: 'sga-list-items' }, (visibleNames.length ? visibleNames : names).map(name => {
         const item = Gui.state.providers[name];
         return guiEl('button', { class: 'sga-list-item', dataset: { selected: String(name === Gui.selectedPreset) }, onClick: () => { Gui.selectedPreset = name; renderSettingsGui(); } }, [
@@ -8807,36 +9220,26 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
     ]);
   };
 
-  const buildAgentsTab = () => {
+  const buildAgentsTab = (stageIdFilter = '') => {
     const settings = Gui.state.runtime;
     const orderedDefs = orderedBeforeStageDefs(settings?.aideStageOrder);
-    const cards = [];
-    orderedDefs.forEach((def, index) => {
-      const nextDef = orderedDefs[index + 1] || null;
-      cards.push(buildStageCard(def, Gui.state.agents[def.id], index, 'before', settings, { nextStageLabel: nextDef?.label || '' }));
-      if (index < orderedDefs.length - 1) {
-        cards.push(guiEl('div', { class: 'sga-handoff sga-flow-handoff', style: { padding: '7px 18px' } }, [
-          guiEl('span', { text: '↓ 현재 턴 초안과 누적 분석을 다음 AIDE에 전달' })
-        ]));
-      }
-    });
+    const selectedDef = stageIdFilter && STAGE_DEF_MAP[stageIdFilter]
+      ? STAGE_DEF_MAP[stageIdFilter]
+      : orderedDefs[0];
+    const index = Math.max(0, orderedDefs.findIndex(def => def.id === selectedDef?.id));
+    const nextDef = orderedDefs[index + 1] || null;
+    const card = selectedDef
+      ? buildStageCard(selectedDef, Gui.state.agents[selectedDef.id], index, 'before', settings, { nextStageLabel: nextDef?.label || '' })
+      : null;
     const sequenceText = orderedDefs.map(def => def.label).join(' → ');
     return guiEl('section', { class: 'sga-flow-section', id: 'sga-flow-before' }, [
       guiEl('div', { class: 'sga-section-title' }, [
-        guiEl('h2', { text: '단계별 전문가 설정' }),
-        guiEl('p', { text: `${sequenceText} 순서로 실행합니다. 실제 분석과 초안은 위 “실행 결과”에서 확인하고, 아래 세부 설정은 필요할 때만 열어보세요.` })
+        guiEl('h2', { text: selectedDef ? `${selectedDef.label} 설정` : '단계별 전문가 설정' }),
+        guiEl('p', { text: `${sequenceText} 순서로 실행합니다. 현재 선택한 단계만 불러와 초기 렌더링 부담을 줄였습니다.` })
       ]),
-      settings.mode === 'lite' ? guiEl('div', { class: 'sga-callout', text: '현재 라이트 모드에서는 순서와 무관하게 인물 AIDE와 세계관 AIDE를 건너뜁니다. 간략 프로필을 적용하면 표준 모드로 돌아갑니다.', style: { marginBottom: '14px' } }) : null,
-      guiEl('details', { class: 'sga-advanced sga-stage-advanced' }, [
-        guiEl('summary', {}, [
-          guiEl('span', { text: '단계별 세부 설정 열기' }),
-          guiEl('span', { class: 'sga-advanced-hint', text: '필요할 때만 열기 · 단계별 AI/검토 방식/대화 범위/프롬프트' })
-        ]),
-        guiEl('div', { class: 'sga-advanced-body' }, [
-          buildAideOrderPanel(),
-          guiEl('div', { class: 'sga-stack', style: { marginTop: '14px' } }, cards)
-        ])
-      ])
+      settings.mode === 'lite' ? guiEl('div', { class: 'sga-callout', text: '현재 라이트 모드에서는 인물 AIDE와 세계관 AIDE를 건너뜁니다. 간략 프로필을 적용하면 표준 모드로 돌아갑니다.', style: { marginBottom: '14px' } }) : null,
+      selectedDef?.id !== 'shadow_act' ? buildAideOrderPanel() : null,
+      card
     ]);
   };
 
@@ -9481,12 +9884,28 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
 
   const buildExecutionFlowTab = () => {
     const runtime = Gui.state.runtime || {};
+    const section = Gui.sidebarSection || 'overview';
+    const page = (title, description, children) => guiEl('div', { class: 'sga-flow-page' }, [
+      guiEl('div', { class: 'sga-section-title sga-flow-page-title' }, [
+        guiEl('h2', { text: title }),
+        description ? guiEl('p', { text: description }) : null
+      ]),
+      ...(Array.isArray(children) ? children : [children])
+    ]);
+
+    if (section === 'results') return page('실행 결과', '단계별 실제 분석과 초안을 필요할 때만 불러옵니다.', buildExecutionResultsPanel());
+    if (section === 'runtime') return page('전문가 설정', '내부 한도와 실행 방식을 조정합니다.', buildRuntimeTab());
+    if (section === 'main') return page('메인 응답', 'GRADIA 초안을 최종 응답 모델에 전달하는 방식을 확인합니다.', buildMainResponseBridge());
+    if (section === 'transfer') return page('가져오기 / 내보내기', '설정 JSON을 이동하거나 병합합니다.', buildTransferTab());
+    if (section === 'debug') return page('디버그 / 실행 진단', '대형 실행 데이터는 이 화면을 열었을 때만 생성됩니다.', buildDebugTab());
+    if (section.startsWith('agent_')) {
+      const stageId = section.slice('agent_'.length);
+      return buildAgentsTab(stageId);
+    }
+
     const shadowSlot = normalizeAgentSlot(Gui.state.agents?.shadow_act, {
-      enabled: true,
-      maxChars: DEFAULT_STAGE_CONTEXT_CHARS,
-      turnWindow: DEFAULT_RECENT_TURNS,
-      timeoutMs: DEFAULT_STAGE_TIMEOUT_MS,
-      executionMode: 'draft_only',
+      enabled: true, maxChars: DEFAULT_STAGE_CONTEXT_CHARS, turnWindow: DEFAULT_RECENT_TURNS,
+      timeoutMs: DEFAULT_STAGE_TIMEOUT_MS, executionMode: 'draft_only',
       risuRefs: defaultRisuReferencesForStage('shadow_act')
     }, 'shadow_act');
     const beforeEnabled = BEFORE_STAGE_DEFS.filter(def => Gui.state.agents?.[def.id]?.enabled).length;
@@ -9497,103 +9916,40 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
       guiEl('strong', { text: def.label }),
       guiEl('span', { text: resolvedPresetNameForStage(def.id) })
     ]));
-    const jumpItems = [
-      ['쉬운 설정', '#sga-simple-settings'],
-      ['개요', '.sga-flow-overview-card'],
-      ['실행 결과', '#sga-execution-results'],
-      ['단계별 세부 설정', '#sga-flow-before'],
-      ['메인 응답', '#sga-flow-main-response'],
-      ['전문가 설정', '#sga-flow-runtime'],
-      ['가져오기/내보내기', '#sga-flow-transfer'],
-      ['디버그', '.sga-debug-fold']
-    ];
-    return guiEl('div', { class: 'sga-flow-page' }, [
-      guiEl('div', { class: 'sga-section-title sga-flow-page-title' }, [
-        guiEl('h2', { text: 'GRADIA 설정' }),
-        guiEl('p', { text: '쉬운 설정을 순서대로 선택하고 저장하면 바로 사용할 수 있습니다. 전문 설정은 필요할 때만 열어보세요.' })
-      ]),
+
+    return page('GRADIA 설정', '쉬운 설정과 현재 상태만 먼저 표시합니다. 세부 화면은 왼쪽 메뉴를 눌렀을 때 불러옵니다.', [
       buildSimpleSettingsPanel(),
       guiEl('div', { class: 'sga-glance-grid' }, [
-        guiEl('div', { class: 'sga-glance-card accent-purple' }, [
-          guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '작동 모드' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Mode' })]),
-          guiEl('div', { class: 'sga-glance-value', text: runtime.mode === 'lite' ? '간소' : runtime.mode === 'off' ? '꺼짐' : '표준' }),
-          guiEl('div', { class: 'sga-glance-label', text: '현재 파이프라인 실행 범위' }),
-          guiEl('div', { class: 'sga-glance-meta', text: runtime.failureMode === 'hard' ? '오류 시 전체 중단' : '오류가 나도 다음 단계 계속' })
-        ]),
-        guiEl('div', { class: 'sga-glance-card accent-blue' }, [
-          guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '활성 단계' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Stages' })]),
-          guiEl('div', { class: 'sga-glance-value', text: `${beforeEnabled}/4` }),
-          guiEl('div', { class: 'sga-glance-label', text: '활성화된 주요 직렬 단계 수' }),
-          guiEl('div', { class: 'sga-glance-meta', text: '추가 에이전트 없음' })
-        ]),
-        guiEl('div', { class: 'sga-glance-card' }, [
-          guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '최대 대기 시간' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Wait' })]),
-          guiEl('div', { class: 'sga-glance-value', text: `${Math.round(shadowSlot.timeoutMs / 1000)}초` }),
-          guiEl('div', { class: 'sga-glance-label', text: '각 단계는 자신의 타임아웃을 사용' }),
-          guiEl('div', { class: 'sga-glance-meta', text: `${shadowSlot.timeoutMs}ms` })
-        ]),
-        guiEl('div', { class: 'sga-glance-card accent-green' }, [
-          guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '출력 방식' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Output' })]),
-          guiEl('div', { class: 'sga-glance-value', text: runtime.outputMode === 'risu_engine' ? '확장' : '일반' }),
-          guiEl('div', { class: 'sga-glance-label', text: '최종 응답을 마무리하는 방식' }),
-          guiEl('div', { class: 'sga-glance-meta', text: runtime.outputMode === 'risu_engine' ? '한 단계 더 깊게 처리' : 'RisuAI 메인 모델이 마무리' })
-        ]),
-        guiEl('div', { class: 'sga-glance-card accent-amber' }, [
-          guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: 'AI 연결' }), guiEl('span', { class: 'sga-glance-kicker', text: 'AI' })]),
-          guiEl('div', { class: 'sga-glance-value', text: `${configuredProviders}/${providerNames.length}` }),
-          guiEl('div', { class: 'sga-glance-label', text: '즉시 사용 가능한 프리셋' }),
-          guiEl('div', { class: 'sga-glance-meta', text: `기본: ${runtime.defaultPresetName || 'default'}` })
-        ])
+        guiEl('div', { class: 'sga-glance-card accent-purple' }, [guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '작동 모드' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Mode' })]), guiEl('div', { class: 'sga-glance-value', text: runtime.mode === 'lite' ? '간소' : runtime.mode === 'off' ? '꺼짐' : '표준' }), guiEl('div', { class: 'sga-glance-label', text: '현재 파이프라인 실행 범위' })]),
+        guiEl('div', { class: 'sga-glance-card accent-blue' }, [guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '활성 단계' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Stages' })]), guiEl('div', { class: 'sga-glance-value', text: `${beforeEnabled}/4` }), guiEl('div', { class: 'sga-glance-label', text: '활성화된 주요 직렬 단계 수' })]),
+        guiEl('div', { class: 'sga-glance-card' }, [guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '최대 대기 시간' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Wait' })]), guiEl('div', { class: 'sga-glance-value', text: `${Math.round(shadowSlot.timeoutMs / 1000)}초` }), guiEl('div', { class: 'sga-glance-label', text: 'SHADOW ACT 기준' })]),
+        guiEl('div', { class: 'sga-glance-card accent-green' }, [guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '출력 방식' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Output' })]), guiEl('div', { class: 'sga-glance-value', text: runtime.outputMode === 'risu_engine' ? '확장' : '일반' }), guiEl('div', { class: 'sga-glance-label', text: '최종 응답 마무리 방식' })]),
+        guiEl('div', { class: 'sga-glance-card accent-amber' }, [guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: 'AI 연결' }), guiEl('span', { class: 'sga-glance-kicker', text: 'AI' })]), guiEl('div', { class: 'sga-glance-value', text: `${configuredProviders}/${providerNames.length}` }), guiEl('div', { class: 'sga-glance-label', text: '즉시 사용 가능한 프리셋' })])
       ]),
-      guiEl('div', { class: 'sga-quicknav' }, jumpItems.map(([label, selector]) => guiEl('button', { class: 'sga-quicknav-btn', text: label, onClick: () => scrollGuiSectionIntoView(selector) }))),
       guiEl('div', { class: 'sga-card wide sga-flow-overview-card' }, [
-        guiEl('div', { class: 'sga-agent-head' }, [
-          guiEl('h3', { text: '직렬 처리 흐름' }),
-          guiEl('span', { class: `sga-badge ${Runtime.inFlight ? 'warn' : 'good'}`, text: Runtime.inFlight ? '실행 중' : '대기 중' })
-        ]),
+        guiEl('div', { class: 'sga-agent-head' }, [guiEl('h3', { text: '직렬 처리 흐름' }), guiEl('span', { class: `sga-badge ${Runtime.inFlight ? 'warn' : 'good'}`, dataset: { runtimePipeline: 'true' }, text: Runtime.inFlight ? '실행 중' : '대기 중' })]),
         guiEl('div', { class: 'sga-note', text: '현재 턴 초안은 네 단계 사이에서만 순서대로 전달됩니다.' }),
         guiEl('div', { class: 'sga-flow-overview', style: { marginTop: '12px' } }, beforeMiniNodes)
       ]),
-      buildExecutionResultsPanel(),
       guiEl('div', { class: 'sga-dashboard-lower' }, [
         guiEl('div', { class: 'sga-card' }, [
-          guiEl('div', { class: 'sga-agent-head' }, [guiEl('h3', { text: '주요 설정 요약' }), guiEl('button', { class: 'sga-btn ghost', text: '전문가 설정 보기', onClick: () => navigateGui('flow', '#sga-flow-runtime', 'runtime') })]),
+          guiEl('div', { class: 'sga-agent-head' }, [guiEl('h3', { text: '주요 설정 요약' }), guiEl('button', { class: 'sga-btn ghost', text: '전문가 설정 보기', onClick: () => navigateGui('flow', '', 'runtime') })]),
           guiEl('div', { class: 'sga-summary-table' }, [
-            guiEl('span', { text: 'SHADOW 최근 챗' }), guiEl('strong', { text: `${shadowSlot.turnWindow}턴 U+A 원문 전체` }),
-            guiEl('span', { text: 'SHADOW 보조 컨텍스트' }), guiEl('strong', { text: `${shadowSlot.maxChars}자` }),
-            guiEl('span', { text: '이전 단계 전달 상한' }), guiEl('strong', { text: `${runtime.maxPreviousStageChars || DEFAULT_MAX_PREVIOUS_STAGE_CHARS}자` }),
-            guiEl('span', { text: '최종 초안 주입 상한' }), guiEl('strong', { text: `${runtime.maxInjectionChars || DEFAULT_MAX_INJECTION_CHARS}자` }),
-            guiEl('span', { text: '목표 초안 길이' }), guiEl('strong', { text: `${runtime.targetDraftMinChars || DEFAULT_TARGET_DRAFT_MIN_CHARS} ~ ${runtime.targetDraftMaxChars || DEFAULT_TARGET_DRAFT_MAX_CHARS}자` }),
+            guiEl('span', { text: '최근 챗' }), guiEl('strong', { text: `${shadowSlot.turnWindow}턴 U+A 원문 전체` }),
             guiEl('span', { text: 'AIDE 실행 순서' }), guiEl('strong', { text: orderedAideStageDefs(runtime.aideStageOrder).map(def => def.label).join(' → ') }),
-            guiEl('span', { text: '출력 방식' }), guiEl('strong', { text: runtime.outputMode === 'risu_engine' ? '확장 모드' : '기본 모드' }),
-            guiEl('span', { text: '전역 프리셋' }), guiEl('strong', { text: runtime.defaultPresetName || 'default' })
+            guiEl('span', { text: '기본 AI' }), guiEl('strong', { text: runtime.defaultPresetName || 'default' }),
+            guiEl('span', { text: '목표 초안 길이' }), guiEl('strong', { text: `${runtime.targetDraftMinChars || DEFAULT_TARGET_DRAFT_MIN_CHARS} ~ ${runtime.targetDraftMaxChars || DEFAULT_TARGET_DRAFT_MAX_CHARS}자` })
           ])
         ]),
         guiEl('div', { class: 'sga-card' }, [
-          guiEl('div', { class: 'sga-agent-head' }, [guiEl('h3', { text: '최근 실행 로그' }), guiEl('button', { class: 'sga-btn ghost', text: '진단 보기', onClick: () => navigateGui('flow', '.sga-debug-fold', 'debug') })]),
-          guiEl('div', { class: 'sga-recent-log-list' }, (() => {
-            const recent = (Runtime.stageTrace || []).slice(-5).reverse();
-            if (!recent.length) return [guiEl('div', { class: 'sga-note', text: '아직 실행 기록이 없습니다.' })];
-            return recent.map(trace => {
-              const label = STAGE_DEF_MAP[trace?.stage]?.label || trace?.stage || '단계';
-              const stateClass = trace?.ok === false || trace?.fallback || trace?.fallbackStage ? 'warn' : trace?.skipped ? 'off' : '';
-              return guiEl('div', { class: 'sga-recent-log-item' }, [
-                guiEl('i', { class: stateClass }),
-                guiEl('div', {}, [guiEl('strong', { text: `${label} ${trace?.ok === false ? '실패' : trace?.fallback ? '폴백' : trace?.skipped ? '건너뜀' : '완료'}` }), guiEl('span', { text: [trace?.provider, trace?.model].filter(Boolean).join(' · ') || '실행 정보' })]),
-                guiEl('em', { text: trace?.elapsedMs ? formatElapsedBrief(trace.elapsedMs) : '-' })
-              ]);
-            });
-          })())
+          guiEl('div', { class: 'sga-agent-head' }, [guiEl('h3', { text: '빠른 이동' })]),
+          guiEl('div', { class: 'sga-actions' }, [
+            guiEl('button', { class: 'sga-btn', text: '실행 결과', onClick: () => navigateGui('flow', '', 'results') }),
+            guiEl('button', { class: 'sga-btn', text: 'SHADOW 설정', onClick: () => navigateToStageAgent('shadow_act', 'agent_shadow_act') }),
+            guiEl('button', { class: 'sga-btn', text: 'AI 연결', onClick: () => navigateGui('providers', '', 'providers') }),
+            guiEl('button', { class: 'sga-btn', text: '디버그', onClick: () => navigateGui('flow', '', 'debug') })
+          ])
         ])
-      ]),
-      buildAgentsTab(),
-      guiEl('div', { class: 'sga-handoff sga-flow-major-handoff' }, [guiEl('span', { text: `↓ ${orderedDefs[orderedDefs.length - 1]?.label || '마지막 AIDE'}의 최종 초안을 메인 응답 단계로 전달` })]),
-      buildMainResponseBridge(),
-      buildRuntimeTab(),
-      guiEl('section', { class: 'sga-flow-section', id: 'sga-flow-transfer' }, [buildTransferTab()]),
-      guiEl('details', { class: 'sga-advanced sga-debug-fold' }, [
-        guiEl('summary', {}, [guiEl('span', { text: '디버그 / 실행 진단' }), guiEl('span', { class: 'sga-advanced-hint', text: '네 단계 실행 기록' })]),
-        guiEl('div', { class: 'sga-advanced-body' }, [buildDebugTab()])
       ])
     ]);
   };
@@ -9654,8 +10010,8 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
         item('debug', '디버그 / 진단', '?', 'flow', '.sga-debug-fold')
       ]),
       guiEl('div', { class: 'sga-side-bottom' }, [
-        guiEl('div', { class: 'sga-side-status-row' }, [guiEl('span', { text: '플러그인 상태' }), guiEl('strong', { class: 'sga-live-dot', text: Runtime.inFlight ? '실행 중' : '활성' })]),
-        guiEl('div', { class: 'sga-side-status-row' }, [guiEl('span', { text: '마지막 실행' }), guiEl('strong', { text: lastRunText })]),
+        guiEl('div', { class: 'sga-side-status-row' }, [guiEl('span', { text: '플러그인 상태' }), guiEl('strong', { class: 'sga-live-dot', dataset: { runtimeLive: 'true' }, text: Runtime.inFlight ? '실행 중' : '활성' })]),
+        guiEl('div', { class: 'sga-side-status-row' }, [guiEl('span', { text: '마지막 실행' }), guiEl('strong', { dataset: { runtimeLast: 'true' }, text: lastRunText })]),
         guiEl('div', { class: 'sga-side-status-row' }, [guiEl('span', { text: '버전' }), guiEl('strong', { text: PLUGIN_VERSION })])
       ])
     ]);
@@ -9698,66 +10054,45 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
   const renderActiveTab = () => Gui.activeTab === 'providers' ? buildProvidersTab() : buildExecutionFlowTab();
 
   const GUI_SCROLL_SELECTORS = Object.freeze([
-    '.sga-main', '.sga-sidebar', '.sga-insight-rail', '.sga-list-items',
-    '.sga-live-result-text', '.sga-live-result-code', '.sga-flow-chain', '.sga-side-nav'
+    '.sga-main', '.sga-sidebar', '.sga-list-items', '.sga-live-result-text', '.sga-live-result-code'
   ]);
 
   const captureGuiViewportState = () => {
     if (!Gui.root || typeof document === 'undefined') return null;
     const scroll = {};
     for (const selector of GUI_SCROLL_SELECTORS) {
-      scroll[selector] = Array.from(Gui.root.querySelectorAll(selector)).map(node => ({
-        top: Number(node.scrollTop || 0),
-        left: Number(node.scrollLeft || 0)
-      }));
+      const node = Gui.root.querySelector(selector);
+      if (node) scroll[selector] = { top: Number(node.scrollTop || 0), left: Number(node.scrollLeft || 0) };
     }
-    const details = Array.from(Gui.root.querySelectorAll('details')).map(node => !!node.open);
-    return { tab: Gui.app?.dataset?.tab || '', scroll, details };
+    const page = document.scrollingElement || document.documentElement;
+    return {
+      tab: Gui.activeTab,
+      section: Gui.app?.dataset?.section || Gui.sidebarSection,
+      pageTop: Number(page?.scrollTop || 0),
+      pageLeft: Number(page?.scrollLeft || 0),
+      scroll
+    };
   };
 
   const restoreGuiViewportState = state => {
-    if (!state || !Gui.root || (state.tab && state.tab !== Gui.activeTab)) return;
+    if (!state || !Gui.root || state.tab !== Gui.activeTab || state.section !== Gui.sidebarSection) return;
     const apply = () => {
       try {
         for (const selector of GUI_SCROLL_SELECTORS) {
-          const positions = state.scroll?.[selector] || [];
-          Array.from(Gui.root.querySelectorAll(selector)).forEach((node, index) => {
-            const position = positions[index];
-            if (!position) return;
-            node.scrollTop = Number(position.top || 0);
-            node.scrollLeft = Number(position.left || 0);
-          });
+          const node = Gui.root.querySelector(selector);
+          const position = state.scroll?.[selector];
+          if (!node || !position) continue;
+          node.scrollTop = Number(position.top || 0);
+          node.scrollLeft = Number(position.left || 0);
         }
-        Array.from(Gui.root.querySelectorAll('details')).forEach((node, index) => {
-          if (index < (state.details?.length || 0)) node.open = !!state.details[index];
-        });
+        const page = document.scrollingElement || document.documentElement;
+        if (page) { page.scrollTop = Number(state.pageTop || 0); page.scrollLeft = Number(state.pageLeft || 0); }
       } catch (_) {}
     };
-    apply();
     try { requestAnimationFrame(apply); } catch (_) { setTimeout(apply, 0); }
   };
 
-  const bindGuiInteractionGuard = app => {
-    if (typeof Gui.interactionCleanup === 'function') {
-      try { Gui.interactionCleanup(); } catch (_) {}
-      Gui.interactionCleanup = null;
-    }
-    if (!app?.addEventListener) return;
-    const mark = (duration = 420) => { Gui.interactionUntil = Math.max(Number(Gui.interactionUntil || 0), Date.now() + duration); };
-    const onPointer = () => mark(650);
-    const onWheel = () => mark(550);
-    const onScroll = () => mark(360);
-    app.addEventListener('pointerdown', onPointer, true);
-    app.addEventListener('touchstart', onPointer, { capture: true, passive: true });
-    app.addEventListener('wheel', onWheel, { capture: true, passive: true });
-    app.addEventListener('scroll', onScroll, true);
-    Gui.interactionCleanup = () => {
-      app.removeEventListener('pointerdown', onPointer, true);
-      app.removeEventListener('touchstart', onPointer, true);
-      app.removeEventListener('wheel', onWheel, true);
-      app.removeEventListener('scroll', onScroll, true);
-    };
-  };
+
 
   async function renderSettingsGui() {
     if (typeof document === 'undefined') return false;
@@ -9765,21 +10100,15 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
     if (!Gui.root) return false;
     const viewportState = captureGuiViewportState();
     forceTransparentGuiSurface();
-    if (typeof Gui.dragCleanup === 'function') {
-      try { Gui.dragCleanup(); } catch (_) {}
-      Gui.dragCleanup = null;
-    }
     Gui.root.replaceChildren();
     if (!['flow', 'providers'].includes(Gui.activeTab)) Gui.activeTab = 'flow';
     if (!Gui.sidebarSection) Gui.sidebarSection = Gui.activeTab === 'providers' ? 'providers' : 'overview';
-    const app = guiEl('div', { class: 'sga-app', dataset: { tab: Gui.activeTab } });
+    const app = guiEl('div', { class: 'sga-app', dataset: { tab: Gui.activeTab, section: Gui.sidebarSection } });
     Gui.app = app;
-    bindGuiInteractionGuard(app);
-    const topBar = guiEl('header', { class: 'sga-top', title: '빈 공간을 드래그해 GRADIA 창을 이동합니다. 더블클릭하면 중앙으로 돌아옵니다.' }, [
+    const topBar = guiEl('header', { class: 'sga-top' }, [
       guiEl('div', { class: 'sga-brand' }, [
         guiEl('h1', { text: PUBLIC_DISPLAY_NAME }),
-        guiEl('p', { text: `v${PLUGIN_VERSION} · 쉬운 설정과 실제 단계별 분석·초안을 함께 확인하는 RP 제작 파이프라인` }),
-        guiEl('span', { class: 'sga-drag-hint', text: '상단을 드래그해 창 이동 · 더블클릭으로 중앙 정렬' })
+        guiEl('p', { text: `v${PLUGIN_VERSION} · 쉬운 설정과 실제 단계별 분석·초안을 함께 확인하는 RP 제작 파이프라인` })
       ]),
       guiEl('div', { class: 'sga-head-actions' }, [
         guiEl('span', { class: 'sga-dirty', dataset: { dirty: String(Gui.dirty), dirtyBadge: 'true' }, text: Gui.dirty ? '저장되지 않은 변경' : '저장됨' }),
@@ -9798,7 +10127,6 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
         } })
       ])
     ]);
-    bindSettingsPanelDrag(topBar);
     app.appendChild(topBar);
     let activeContent;
     try {
@@ -9830,114 +10158,34 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
         if (Array.isArray(items)) return items;
       }
     } catch (_) {}
-    try {
-      const length = typeof value.length === 'function' ? await value.length() : Number(value.length || 0);
-      const items = [];
-      for (let index = 0; index < length; index += 1) {
-        const item = typeof value.at === 'function' ? await value.at(index) : value[index];
-        if (item) items.push(item);
-      }
-      return items;
-    } catch (_) {
-      return [];
-    }
+    try { return Array.from(value); } catch (_) { return []; }
   };
 
   const setSafeStyles = async (element, styles = {}) => {
-    if (!element || typeof element.setStyle !== 'function') return false;
+    if (!element) return false;
     for (const [property, value] of Object.entries(styles)) {
-      try { await element.setStyle(property, value); } catch (_) {}
+      try {
+        if (typeof element.setStyle === 'function') await element.setStyle(property, value);
+        else if (element.style) element.style[property] = value;
+      } catch (_) {}
     }
     return true;
   };
 
-  const readSafeFrameState = async frame => {
-    if (!frame || typeof frame.getStyle !== 'function') return null;
-    const read = async property => {
-      try { return String(await frame.getStyle(property) || ''); } catch (_) { return ''; }
-    };
-    return {
-      frame,
-      display: (await read('display')).toLowerCase(),
-      position: (await read('position')).toLowerCase(),
-      zIndex: await read('zIndex') || await read('z-index'),
-      top: await read('top'),
-      left: await read('left'),
-      width: await read('width'),
-      height: await read('height')
-    };
-  };
-
-  const snapshotPluginHostFrames = async rootDocument => {
-    if (!rootDocument || typeof rootDocument.querySelectorAll !== 'function') return [];
-    const frames = await safeArrayItems(await rootDocument.querySelectorAll('body > iframe'));
-    const snapshot = [];
+  const findOwnPluginHostIframe = async rootDocument => {
+    if (!rootDocument || typeof rootDocument.querySelectorAll !== 'function') return null;
+    const frames = await safeArrayItems(await rootDocument.querySelectorAll('iframe'));
     for (const frame of frames) {
-      const state = await readSafeFrameState(frame);
-      if (state) snapshot.push(state);
-    }
-    return snapshot;
-  };
-
-  const findKnownPluginHostIframe = async rootDocument => {
-    if (!rootDocument || typeof rootDocument.querySelector !== 'function') return null;
-    const selectors = [
-      `body > iframe[x-gradia-plugin="${PLUGIN_NAME}"]`,
-      'body > iframe[x-gradia-host="true"]'
-    ];
-    for (const selector of selectors) {
       try {
-        const frame = await rootDocument.querySelector(selector);
-        if (frame) return frame;
+        if (frame?.contentDocument === document || frame?.contentWindow === globalThis) return frame;
       } catch (_) {}
     }
     return null;
   };
 
-  const findVisiblePluginHostIframe = async (rootDocument, beforeSnapshot = []) => {
-    if (!rootDocument || typeof rootDocument.querySelectorAll !== 'function') return null;
-    const known = await findKnownPluginHostIframe(rootDocument);
-    if (known) {
-      const state = await readSafeFrameState(known);
-      if (state && state.display !== 'none') return known;
-    }
-
-    const changed = [];
-    for (const before of (Array.isArray(beforeSnapshot) ? beforeSnapshot : [])) {
-      const after = await readSafeFrameState(before?.frame);
-      if (!after || after.display === 'none') continue;
-      const becameVisible = before.display === 'none' && after.display !== 'none';
-      const fullscreenSignature = after.position === 'fixed'
-        && after.zIndex === '1000'
-        && (after.width === '100%' || after.width === '100vw')
-        && (after.height === '100%' || after.height === '100vh');
-      if (becameVisible || fullscreenSignature) changed.push({ frame: after.frame, score: (becameVisible ? 8 : 0) + (fullscreenSignature ? 6 : 0) });
-    }
-    if (changed.length) {
-      changed.sort((a, b) => b.score - a.score);
-      return changed[0].frame;
-    }
-
-    const frames = await safeArrayItems(await rootDocument.querySelectorAll('body > iframe'));
-    let best = null;
-    let bestScore = -1;
-    for (const frame of frames) {
-      const state = await readSafeFrameState(frame);
-      if (!state || state.display === 'none') continue;
-      let score = 0;
-      if (state.position === 'fixed') score += 4;
-      if (state.zIndex === '1000') score += 4;
-      if (state.top === '0px' || state.top === '0') score += 1;
-      if (state.left === '0px' || state.left === '0') score += 1;
-      if (state.width === '100%' || state.width === '100vw') score += 2;
-      if (state.height === '100%' || state.height === '100vh') score += 2;
-      if (score > bestScore) { best = frame; bestScore = score; }
-    }
-    return bestScore >= 8 ? best : null;
-  };
-
   const ensureMainDomPermission = async () => {
     if (Gui.mainDomPermission === true) return true;
+    if (Gui.mainDomPermission === false && Gui.mainDomPermissionRequested) return false;
     if (Gui.mainDomPermissionPromise) return await Gui.mainDomPermissionPromise;
     if (!API || typeof API.requestPluginPermission !== 'function') return false;
     Gui.mainDomPermissionRequested = true;
@@ -9956,348 +10204,38 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
     return await Gui.mainDomPermissionPromise;
   };
 
-  const getSafeClientSize = async element => {
-    if (!element) return null;
-    try {
-      const width = typeof element.clientWidth === 'function' ? Number(await element.clientWidth()) : 0;
-      const height = typeof element.clientHeight === 'function' ? Number(await element.clientHeight()) : 0;
-      if (![width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
-      return { width, height };
-    } catch (_) {
-      return null;
-    }
-  };
-
-  const getSafeRect = async element => {
-    if (!element) return null;
-    try {
-      if (typeof element.getBoundingClientRect === 'function') {
-        const rect = await element.getBoundingClientRect();
-        const left = Number(rect?.left);
-        const top = Number(rect?.top);
-        const width = Number(rect?.width);
-        const height = Number(rect?.height);
-        if ([left, top, width, height].every(Number.isFinite) && width > 0 && height > 0) return { left, top, width, height };
-      }
-    } catch (_) {}
-    const size = await getSafeClientSize(element);
-    return size ? { left: 0, top: 0, ...size } : null;
-  };
-
-  const refreshSettingsPanelGeometry = async () => {
-    if (!Gui.hostIframe || !Gui.rootDocument) return Gui.hostPanelGeometry || null;
-    const [panelRect, rootRect, viewportSize] = await Promise.all([
-      getSafeRect(Gui.hostIframe),
-      getSafeRect(Gui.rootDocument),
-      getSafeClientSize(Gui.rootDocument)
-    ]);
-    if (!panelRect) return Gui.hostPanelGeometry || null;
-    const viewportRect = {
-      left: 0,
-      top: 0,
-      width: Number(viewportSize?.width || rootRect?.width || 0),
-      height: Number(viewportSize?.height || rootRect?.height || 0)
-    };
-    if (viewportRect.width <= 0 || viewportRect.height <= 0) return Gui.hostPanelGeometry || null;
-    Gui.hostPanelGeometry = { panelRect, viewportRect };
-    return Gui.hostPanelGeometry;
-  };
-
-  const getSettingsPanelDragRects = async () => await refreshSettingsPanelGeometry() || Gui.hostPanelGeometry;
-
-  const clampSettingsPanelPosition = (left, top, panelRect, viewportRect) => {
-    const viewportWidth = Math.max(1, Number(viewportRect?.width) || 0);
-    const viewportHeight = Math.max(1, Number(viewportRect?.height) || 0);
-    const panelWidth = Math.max(1, Number(panelRect?.width) || 0);
-    const panelHeight = Math.max(1, Number(panelRect?.height) || 0);
-    if (!viewportWidth || !viewportHeight) return { left, top };
-    const lockX = panelWidth >= viewportWidth - 16;
-    const lockY = panelHeight >= viewportHeight - 16;
-    const minVisibleX = Math.min(180, Math.max(88, panelWidth * 0.18));
-    const minVisibleY = Math.min(72, Math.max(48, panelHeight * 0.08));
-    return {
-      left: lockX ? Math.max(0, (viewportWidth - panelWidth) / 2) : Math.min(viewportWidth - minVisibleX, Math.max(minVisibleX - panelWidth, left)),
-      top: lockY ? Math.max(0, (viewportHeight - panelHeight) / 2) : Math.min(viewportHeight - minVisibleY, Math.max(8, top))
-    };
-  };
-
-  const setSettingsHostPanelPosition = async (left, top) => {
-    if (!Gui.hostIframe) return false;
-    const safeLeft = Math.round(Number(left) || 0);
-    const safeTop = Math.round(Number(top) || 0);
-    await setSafeStyles(Gui.hostIframe, {
-      left: `${safeLeft}px`,
-      top: `${safeTop}px`,
-      right: 'auto',
-      bottom: 'auto',
-      transform: 'none'
-    });
-    Gui.hostPanelPosition = { left: safeLeft, top: safeTop };
-    if (Gui.hostPanelGeometry?.panelRect) {
-      Gui.hostPanelGeometry.panelRect = { ...Gui.hostPanelGeometry.panelRect, left: safeLeft, top: safeTop };
-    }
-    return true;
-  };
-
-  const recenterSettingsHostPanel = async () => {
-    if (!Gui.hostIframe) return false;
-    await setSafeStyles(Gui.hostIframe, {
-      top: '50%',
-      left: '50%',
-      right: 'auto',
-      bottom: 'auto',
-      transform: 'translate(-50%, -50%)'
-    });
-    Gui.hostPanelPosition = null;
-    await refreshSettingsPanelGeometry();
-    return true;
-  };
-
-  const isSettingsDragControl = target => {
-    if (!target || typeof target.closest !== 'function') return false;
-    return !!target.closest('button,input,select,textarea,a,label,summary,[role="button"],[contenteditable="true"]');
-  };
-
-  const createParentDragShield = async rootDocument => {
-    if (!rootDocument || typeof rootDocument.createElement !== 'function') return null;
-    try {
-      const body = await rootDocument.querySelector('body');
-      if (!body) return null;
-      const shield = await rootDocument.createElement('div');
-      if (!shield) return null;
-      try { await shield.setAttribute('x-gradia-drag-shield', 'true'); } catch (_) {}
-      await setSafeStyles(shield, {
-        position: 'fixed',
-        top: '0',
-        left: '0',
-        right: '0',
-        bottom: '0',
-        width: '100%',
-        height: '100%',
-        zIndex: '1002',
-        cursor: 'grabbing',
-        backgroundColor: 'transparent',
-        touchAction: 'none',
-        userSelect: 'none'
-      });
-      await body.appendChild(shield);
-      return shield;
-    } catch (_) {
-      return null;
-    }
-  };
-
-  const bindSettingsPanelDrag = handle => {
-    if (!handle || typeof handle.addEventListener !== 'function') return;
-    const beginDrag = event => {
-      if ((event.button != null && event.button !== 0) || isSettingsDragControl(event.target)) return;
-      if (!Gui.hostPanelReady || !Gui.hostIframe || !Gui.rootDocument) return;
-      event.preventDefault();
-      Gui.interactionUntil = Date.now() + 1200;
-      if (typeof Gui.dragCleanup === 'function') {
-        try { Gui.dragCleanup(); } catch (_) {}
-      }
-
-      const pointerId = event.pointerId;
-      let active = true;
-      let geometry = Gui.hostPanelGeometry;
-      let parentMoveId = '';
-      let parentUpId = '';
-      let parentCancelId = '';
-      let shield = null;
-      let pendingPosition = null;
-      let applying = false;
-      let frameRequested = false;
-      let movementX = 0;
-      let movementY = 0;
-      const startClientX = Number(event.clientX || 0);
-      const startClientY = Number(event.clientY || 0);
-      const startScreenX = Number(event.screenX || 0);
-      const startScreenY = Number(event.screenY || 0);
-      const screenOriginUsable = Math.abs(startScreenX) > 1 || Math.abs(startScreenY) > 1;
-
-      const flushPosition = async () => {
-        frameRequested = false;
-        if (!active || applying || !pendingPosition || !Gui.hostIframe) return;
-        const next = pendingPosition;
-        pendingPosition = null;
-        applying = true;
-        try { await setSettingsHostPanelPosition(next.left, next.top); }
-        finally {
-          applying = false;
-          if (active && pendingPosition && !frameRequested) {
-            frameRequested = true;
-            requestAnimationFrame(() => { void flushPosition(); });
-          }
-        }
-      };
-
-      const queueDelta = (dx, dy) => {
-        if (!active || !geometry?.panelRect || !geometry?.viewportRect) return;
-        const unclampedLeft = geometry.panelRect.left + Number(dx || 0);
-        const unclampedTop = geometry.panelRect.top + Number(dy || 0);
-        pendingPosition = clampSettingsPanelPosition(unclampedLeft, unclampedTop, geometry.panelRect, geometry.viewportRect);
-        if (!frameRequested) {
-          frameRequested = true;
-          requestAnimationFrame(() => { void flushPosition(); });
-        }
-      };
-
-      const removeParentDragResources = async () => {
-        const rootDocument = Gui.rootDocument;
-        try { if (rootDocument && parentMoveId) await rootDocument.removeEventListener('pointermove', parentMoveId, true); } catch (_) {}
-        try { if (rootDocument && parentUpId) await rootDocument.removeEventListener('pointerup', parentUpId, true); } catch (_) {}
-        try { if (rootDocument && parentCancelId) await rootDocument.removeEventListener('pointercancel', parentCancelId, true); } catch (_) {}
-        try { if (shield && typeof shield.remove === 'function') await shield.remove(); } catch (_) {}
-      };
-
-      const cleanup = endEvent => {
-        if (!active) return;
-        if (endEvent?.pointerId != null && pointerId != null && endEvent.pointerId !== pointerId) return;
-        active = false;
-        document.removeEventListener('pointermove', localMove, true);
-        document.removeEventListener('pointerup', cleanup, true);
-        document.removeEventListener('pointercancel', cleanup, true);
-        try { delete document.documentElement.dataset.sgaDragging; } catch (_) {}
-        try { delete document.documentElement.dataset.sgaParentDrag; } catch (_) {}
-        void removeParentDragResources();
-        if (Gui.dragCleanup === cleanup) Gui.dragCleanup = null;
-      };
-
-      const localMove = moveEvent => {
-        if (!active || (moveEvent.pointerId != null && pointerId != null && moveEvent.pointerId !== pointerId)) return;
-        const mx = Number(moveEvent.movementX || 0);
-        const my = Number(moveEvent.movementY || 0);
-        if (Number.isFinite(mx) && Math.abs(mx) < 1000) movementX += mx;
-        if (Number.isFinite(my) && Math.abs(my) < 1000) movementY += my;
-        const sx = Number(moveEvent.screenX || 0);
-        const sy = Number(moveEvent.screenY || 0);
-        const screenUsable = screenOriginUsable && (Math.abs(sx) > 1 || Math.abs(sy) > 1);
-        if (screenUsable) queueDelta(sx - startScreenX, sy - startScreenY);
-        else if (movementX || movementY) queueDelta(movementX, movementY);
-        else queueDelta(Number(moveEvent.clientX || 0) - startClientX, Number(moveEvent.clientY || 0) - startClientY);
-      };
-
-      Gui.dragCleanup = cleanup;
-      document.documentElement.dataset.sgaDragging = 'true';
-      document.addEventListener('pointermove', localMove, true);
-      document.addEventListener('pointerup', cleanup, true);
-      document.addEventListener('pointercancel', cleanup, true);
-
-      void (async () => {
-        geometry = await getSettingsPanelDragRects();
-        if (!active || !geometry) { cleanup(); return; }
-        if (movementX || movementY) queueDelta(movementX, movementY);
-        const startParentX = geometry.panelRect.left + startClientX;
-        const startParentY = geometry.panelRect.top + startClientY;
-        const rootDocument = Gui.rootDocument;
-        if (!rootDocument || typeof rootDocument.addEventListener !== 'function') return;
-        try {
-          parentMoveId = await rootDocument.addEventListener('pointermove', parentEvent => {
-            if (!active) return;
-            const x = Number(parentEvent?.clientX);
-            const y = Number(parentEvent?.clientY);
-            if (Number.isFinite(x) && Number.isFinite(y)) queueDelta(x - startParentX, y - startParentY);
-          }, true);
-          parentUpId = await rootDocument.addEventListener('pointerup', () => cleanup(), true);
-          parentCancelId = await rootDocument.addEventListener('pointercancel', () => cleanup(), true);
-          if (!active) { void removeParentDragResources(); return; }
-          shield = await createParentDragShield(rootDocument);
-          if (!active) {
-            try { if (shield && typeof shield.remove === 'function') await shield.remove(); } catch (_) {}
-            return;
-          }
-          if (shield) document.documentElement.dataset.sgaParentDrag = 'true';
-        } catch (_) {}
-      })();
-    };
-    handle.addEventListener('pointerdown', beginDrag);
-    handle.addEventListener('dblclick', event => {
-      if (isSettingsDragControl(event.target) || !Gui.hostPanelReady) return;
-      event.preventDefault();
-      void recenterSettingsHostPanel();
-    });
-  };
-
-  const bindSettingsPanelViewportSync = () => {
-    if (typeof Gui.resizeCleanup === 'function') {
-      try { Gui.resizeCleanup(); } catch (_) {}
-      Gui.resizeCleanup = null;
-    }
-    if (typeof window === 'undefined') return;
-    let timer = null;
-    const sync = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(async () => {
-        timer = null;
-        if (!Gui.visible || !Gui.hostPanelReady || !Gui.hostIframe) return;
-        const previousPosition = Gui.hostPanelPosition ? { ...Gui.hostPanelPosition } : null;
-        const nextGeometry = await refreshSettingsPanelGeometry();
-        if (!nextGeometry) return;
-        if (previousPosition) {
-          const next = clampSettingsPanelPosition(previousPosition.left, previousPosition.top, nextGeometry.panelRect, nextGeometry.viewportRect);
-          await setSettingsHostPanelPosition(next.left, next.top);
-          await refreshSettingsPanelGeometry();
-        }
-      }, 90);
-    };
-    window.addEventListener('resize', sync, { passive: true });
-    window.addEventListener('orientationchange', sync, { passive: true });
-    try { window.visualViewport?.addEventListener('resize', sync, { passive: true }); } catch (_) {}
-    Gui.resizeCleanup = () => {
-      if (timer) clearTimeout(timer);
-      window.removeEventListener('resize', sync);
-      window.removeEventListener('orientationchange', sync);
-      try { window.visualViewport?.removeEventListener('resize', sync); } catch (_) {}
-    };
-  };
-
   const settingsHostPanelStyles = () => {
     const dynamicViewport = (() => {
       try { return typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('height', '100dvh'); } catch (_) { return false; }
     })();
     const vh = dynamicViewport ? '100dvh' : '100vh';
     return {
-      display: 'block',
-      position: 'fixed',
-      top: '50%',
-      left: '50%',
-      right: 'auto',
-      bottom: 'auto',
-      width: 'min(1280px, calc(100vw - 24px))',
-      height: `min(820px, calc(${vh} - 24px))`,
-      maxWidth: 'calc(100vw - 24px)',
-      maxHeight: `calc(${vh} - 24px)`,
-      transform: 'translate(-50%, -50%)',
-      border: 'none',
-      borderRadius: '22px',
-      overflow: 'hidden',
-      backgroundColor: 'transparent',
-      boxShadow: '0 24px 72px rgba(0, 0, 0, .42)',
-      zIndex: '1000'
+      display: 'block', position: 'fixed', top: '50%', left: '50%', right: 'auto', bottom: 'auto',
+      width: 'min(1280px, calc(100vw - 24px))', height: `min(820px, calc(${vh} - 24px))`,
+      maxWidth: 'calc(100vw - 24px)', maxHeight: `calc(${vh} - 24px)`, transform: 'translate(-50%, -50%)',
+      border: 'none', borderRadius: '22px', overflow: 'hidden', backgroundColor: 'transparent',
+      boxShadow: '0 24px 72px rgba(0, 0, 0, .32)', zIndex: '1000'
     };
   };
 
-  const fitSettingsContainerToOwnArea = async (options = {}) => {
-    if (!API || typeof API.getRootDocument !== 'function' || typeof API.requestPluginPermission !== 'function') return false;
+  const fitSettingsContainerToOwnArea = async () => {
+    if (!API || typeof API.getRootDocument !== 'function') return false;
     try {
       if (!(await ensureMainDomPermission())) return false;
-      const rootDocument = options.rootDocument || await API.getRootDocument();
+      const rootDocument = await API.getRootDocument();
       if (!rootDocument) return false;
-      const frame = options.frame || await findVisiblePluginHostIframe(rootDocument, options.beforeSnapshot || Gui.hostFrameSnapshot || []);
+      const frame = await findOwnPluginHostIframe(rootDocument);
       if (!frame) return false;
-      try { if (typeof frame.setAttribute === 'function') await frame.setAttribute('x-gradia-host', 'true'); } catch (_) {}
-      try { if (typeof frame.setAttribute === 'function') await frame.setAttribute('x-gradia-plugin', PLUGIN_NAME); } catch (_) {}
+      try {
+        if (rootDocument.body && frame.parentElement !== rootDocument.body) rootDocument.body.appendChild(frame);
+      } catch (_) {}
+      try { if (typeof frame.setAttribute === 'function') frame.setAttribute('x-gradia-plugin', PLUGIN_NAME); } catch (_) {}
       await setSafeStyles(frame, settingsHostPanelStyles());
       Gui.rootDocument = rootDocument;
       Gui.hostIframe = frame;
       Gui.hostPanelReady = true;
-      Gui.hostPanelPosition = null;
       const root = document.getElementById('sga-rp-gui-root');
       if (root) root.dataset.hostPanel = 'true';
-      await new Promise(resolve => setTimeout(resolve, 0));
-      await refreshSettingsPanelGeometry();
-      bindSettingsPanelViewportSync();
       return true;
     } catch (error) {
       Gui.hostPanelReady = false;
@@ -10307,51 +10245,19 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
   };
 
   const releaseSettingsContainerArea = async () => {
-    if (typeof Gui.dragCleanup === 'function') {
-      try { Gui.dragCleanup(); } catch (_) {}
-      Gui.dragCleanup = null;
-    }
-    if (typeof Gui.resizeCleanup === 'function') {
-      try { Gui.resizeCleanup(); } catch (_) {}
-      Gui.resizeCleanup = null;
-    }
-    if (typeof Gui.interactionCleanup === 'function') {
-      try { Gui.interactionCleanup(); } catch (_) {}
-      Gui.interactionCleanup = null;
-    }
     const frame = Gui.hostIframe;
-    if (frame) {
-      await setSafeStyles(frame, {
-        display: 'none',
-        position: 'fixed',
-        top: '0',
-        left: '0',
-        right: 'auto',
-        bottom: 'auto',
-        width: '100%',
-        height: '100%',
-        maxWidth: 'none',
-        maxHeight: 'none',
-        transform: 'none',
-        border: 'none',
-        borderRadius: '0',
-        overflow: 'hidden',
-        boxShadow: 'none',
-        zIndex: '1000'
-      });
-    }
+    if (frame) await setSafeStyles(frame, { display: 'none' });
     Gui.hostIframe = null;
     Gui.rootDocument = null;
     Gui.hostPanelReady = false;
-    Gui.hostPanelPosition = null;
-    Gui.hostPanelGeometry = null;
-    Gui.hostFrameSnapshot = null;
     const root = typeof document !== 'undefined' ? document.getElementById('sga-rp-gui-root') : null;
     if (root?.dataset) delete root.dataset.hostPanel;
   };
 
   const hideSettingsGui = async () => {
     Gui.visible = false;
+    if (Gui.refreshTimer) { clearTimeout(Gui.refreshTimer); Gui.refreshTimer = null; }
+    if (Gui.inputRenderTimer) { clearTimeout(Gui.inputRenderTimer); Gui.inputRenderTimer = null; }
     try { if (typeof API?.hideContainer === 'function') await API.hideContainer(); } catch (_) {}
     try { await releaseSettingsContainerArea(); } catch (_) {}
     return true;
@@ -10387,7 +10293,6 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
     try {
       const body = await waitForDocumentBody();
       if (!body) return false;
-      await loadSettings();
       injectGuiStyle();
       const oldRoot = document.getElementById('sga-rp-gui-root');
       if (oldRoot) {
@@ -10399,7 +10304,6 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
       body.appendChild(root);
       Gui.root = root;
       forceTransparentGuiSurface();
-      await ensureGuiState(true);
       return true;
     } catch (error) {
       warn('settings_gui_init_failed', error);
@@ -10408,62 +10312,47 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
   };
 
   const showSettingsGui = async () => {
-    // Ask before any plugin surface becomes visible. PocketRisu uses the same
-    // global alert layer for permission confirmation, so a fullscreen iframe
-    // must not be allowed to cover it.
+    // Permission is requested before displaying any plugin surface so the host alert
+    // cannot be hidden behind the plugin iframe.
     const mainDomGranted = await ensureMainDomPermission();
-    let rootDocument = null;
-    let knownFrame = null;
-    let beforeSnapshot = [];
-    if (mainDomGranted && typeof API.getRootDocument === 'function') {
-      try {
-        rootDocument = await API.getRootDocument();
-        knownFrame = rootDocument ? await findKnownPluginHostIframe(rootDocument) : null;
-        if (!knownFrame && rootDocument) beforeSnapshot = await snapshotPluginHostFrames(rootDocument);
-      } catch (_) {}
-    }
-    Gui.hostFrameSnapshot = beforeSnapshot;
-
-    await loadSettings();
     Gui.visible = true;
     if (!Gui.root || !document.getElementById('sga-rp-gui-root')) await initSettingsGui();
     await ensureGuiState(true);
     await renderSettingsGui();
 
     let fitted = false;
-    // Once the exact iframe has been marked, reopen it directly at panel size.
-    // This avoids PocketRisu briefly flashing the container at fullscreen.
-    if (mainDomGranted && rootDocument && knownFrame) {
-      fitted = await fitSettingsContainerToOwnArea({ rootDocument, frame: knownFrame });
-    }
-
+    if (mainDomGranted) fitted = await fitSettingsContainerToOwnArea();
     if (!fitted) {
       try {
         if (typeof API.showContainer === 'function') await API.showContainer('fullscreen');
       } catch (error) {
         warn('settings_gui_show_failed', error);
       }
-      if (mainDomGranted) {
-        fitted = await fitSettingsContainerToOwnArea({ rootDocument, beforeSnapshot });
-      }
+      if (mainDomGranted) fitted = await fitSettingsContainerToOwnArea();
     }
-
     forceTransparentGuiSurface();
     return true;
   };
 
+  const readGuiEnabledForRegistration = async () => {
+    try {
+      const runtime = await readRuntimeSettings();
+      if (Object.prototype.hasOwnProperty.call(runtime, 'enable_gui')) return asBool(runtime.enable_gui, true);
+    } catch (_) {}
+    return asBool(await getArgument('enable_gui', 'true'), true);
+  };
+
   const registerPluginUi = async () => {
     try {
-      const settings = await loadSettings();
       const open = async () => { await showSettingsGui(); };
       const icon = '⚙️';
       if (!registered.setting && typeof API.registerSetting === 'function') {
-        registered.setting = await API.registerSetting(`${PUBLIC_DISPLAY_NAME} 설정`, open, icon, 'html');
-        Runtime.hookStatus.setting = true;
+        registered.setting = await API.registerSetting(`${PUBLIC_DISPLAY_NAME} 설정`, open, icon, 'html', `${SETTINGS_UI_ID}-menu`);
+        Runtime.hookStatus.setting = !!registered.setting;
       }
-      if (settings.guiEnabled && !registered.button && typeof API.registerButton === 'function') {
-        registered.button = await API.registerButton({ name: `${PUBLIC_DISPLAY_NAME} 설정`, icon, iconType: 'html', location: 'hamburger' }, open);
-        Runtime.hookStatus.button = true;
+      if (await readGuiEnabledForRegistration() && !registered.button && typeof API.registerButton === 'function') {
+        registered.button = await API.registerButton({ name: `${PUBLIC_DISPLAY_NAME} 설정`, icon, iconType: 'html', location: 'hamburger', id: `${SETTINGS_UI_ID}-button` }, open);
+        Runtime.hookStatus.button = !!registered.button;
       }
       return true;
     } catch (error) {
@@ -10506,21 +10395,27 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
       const value = settings || {};
       if (value.runtime || value.agentSlots || value.promptOverrides) {
         const results = [];
-        if (value.runtime) results.push(await writeRuntimeSettings(value.runtime));
+        if (value.runtime) {
+          const backend = normalizeBackendHostingConfig(value.runtime.backendHosting || value.runtime);
+          if (backend.token || Object.prototype.hasOwnProperty.call(value.runtime, 'backend_hosting_token')) results.push(await writeBackendHostingToken(backend.token));
+          results.push(await writeRuntimeSettings(value.runtime));
+        }
         if (value.agentSlots) results.push(await writeAgentSlots(value.agentSlots));
         if (value.promptOverrides) results.push(await writePromptOverrides(value.promptOverrides));
         Runtime.settings = null;
+        Runtime.settingsLoadedAt = 0;
+        clearRequestReuseCache();
         return results.length ? results.every(Boolean) : true;
       }
       return await writeStoredSettings(value);
     },
     async resetGuiSettings() { return await removeStoredSettings(); },
     async getAgentSlots() { return await readAgentSlots(); },
-    async saveAgentSlots(value) { Runtime.settings=null; return await writeAgentSlots(value || {}); },
+    async saveAgentSlots(value) { Runtime.settings=null; Runtime.settingsLoadedAt=0; clearRequestReuseCache(); return await writeAgentSlots(value || {}); },
     async getPromptOverrides() { return await readPromptOverrides(); },
-    async savePromptOverrides(value) { Runtime.settings=null; return await writePromptOverrides(value || {}); },
+    async savePromptOverrides(value) { Runtime.settings=null; Runtime.settingsLoadedAt=0; clearRequestReuseCache(); return await writePromptOverrides(value || {}); },
     async getRuntimeSettings() { return await readRuntimeSettings(); },
-    async saveRuntimeSettings(value) { Runtime.settings=null; return await writeRuntimeSettings(value || {}); },
+    async saveRuntimeSettings(value) { const backend=normalizeBackendHostingConfig(value?.backendHosting || value || {}); if(backend.token || Object.prototype.hasOwnProperty.call(value || {}, 'backend_hosting_token')) await writeBackendHostingToken(backend.token); Runtime.settings=null; Runtime.settingsLoadedAt=0; clearRequestReuseCache(); return await writeRuntimeSettings(value || {}); },
     async listProviderPresets() { const settings=await loadSettings(); return JSON.parse(JSON.stringify(settings.presets || {})); },
     async listProviderModels(presetOrName = 'default', options = {}) {
       let preset = presetOrName;
@@ -10531,11 +10426,11 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
       return await listProviderModels(preset || {}, options || {});
     },
     resetProviderModelCache() { ProviderModelCache.clear(); return true; },
-    async saveProviderPreset(name,preset) { const key=String(name||'').trim(); if(!key) throw new Error('프리셋 이름이 필요합니다.'); const bank=await readStoredPresetBank(); bank[key]=sanitizePreset(preset||{}); if(!await writeStoredPresetBank(bank)) throw new Error('프리셋 저장 실패'); Runtime.settings=null; return JSON.parse(JSON.stringify(bank[key])); },
-    async deleteProviderPreset(name) { const key=String(name||'').trim(); const bank=await readStoredPresetBank(); delete bank[key]; Runtime.settings=null; return await writeStoredPresetBank(bank); },
+    async saveProviderPreset(name,preset) { const key=String(name||'').trim(); if(!key) throw new Error('프리셋 이름이 필요합니다.'); const bank=await readStoredPresetBank(); bank[key]=sanitizePreset(preset||{}); if(!await writeStoredPresetBank(bank)) throw new Error('프리셋 저장 실패'); Runtime.settings=null; Runtime.settingsLoadedAt=0; clearRequestReuseCache(); return JSON.parse(JSON.stringify(bank[key])); },
+    async deleteProviderPreset(name) { const key=String(name||'').trim(); const bank=await readStoredPresetBank(); delete bank[key]; Runtime.settings=null; Runtime.settingsLoadedAt=0; clearRequestReuseCache(); return await writeStoredPresetBank(bank); },
     async listPresets() { const settings=await loadSettings(); return JSON.parse(JSON.stringify(settings.presets || {})); },
-    async savePreset(name,preset) { const key=String(name||'').trim(); if(!key) throw new Error('프리셋 이름이 필요합니다.'); const bank=await readStoredPresetBank(); bank[key]=sanitizePreset(preset||{}); if(!await writeStoredPresetBank(bank)) throw new Error('프리셋 저장 실패'); Runtime.settings=null; return JSON.parse(JSON.stringify(bank[key])); },
-    async deletePreset(name) { const key=String(name||'').trim(); const bank=await readStoredPresetBank(); delete bank[key]; Runtime.settings=null; return await writeStoredPresetBank(bank); },
+    async savePreset(name,preset) { const key=String(name||'').trim(); if(!key) throw new Error('프리셋 이름이 필요합니다.'); const bank=await readStoredPresetBank(); bank[key]=sanitizePreset(preset||{}); if(!await writeStoredPresetBank(bank)) throw new Error('프리셋 저장 실패'); Runtime.settings=null; Runtime.settingsLoadedAt=0; clearRequestReuseCache(); return JSON.parse(JSON.stringify(bank[key])); },
+    async deletePreset(name) { const key=String(name||'').trim(); const bank=await readStoredPresetBank(); delete bank[key]; Runtime.settings=null; Runtime.settingsLoadedAt=0; clearRequestReuseCache(); return await writeStoredPresetBank(bank); },
     getStageTrace() { return JSON.parse(JSON.stringify(Runtime.stageTrace || [])); },
     getProviderDebug() { return JSON.parse(JSON.stringify({ request: Runtime.lastProviderRequest, response: Runtime.lastProviderResponse, error: Runtime.lastProviderError, backendBridge: Runtime.lastBackendBridge })); },
     getLastInjection() { return Runtime.lastInjection || ''; },
@@ -10572,6 +10467,33 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
         terminalPrefillIndex: resolved.terminalPrefillIndex
       }));
     },
+    sanitizePrivateStageMessage(role = 'assistant', value = '') {
+      return sanitizeMessageContentForHistory(role, value);
+    },
+    sanitizePrivateStageDraft(value = '') {
+      return normalizeDraftCandidateText(value);
+    },
+    verifyHayakuTransport(messages = [], injectionPosition = 'first_system') {
+      const marker = `[GRADIA DEBUG TRANSPORT ${Date.now()}]`;
+      const injected = injectSystemMessage(messages, marker, {
+        injectionPosition: normalizeChoice(injectionPosition, ['first_system', 'last_system', 'before_last_user'], 'first_system'),
+        maxInjectionChars: 2000,
+        currentTurnResolution: resolveSgaCurrentTurn(messages)
+      });
+      const retained = injected.filter(message => !(message?.role === 'system' && message?.content === marker));
+      let preserved = false;
+      try { preserved = JSON.stringify(retained) === JSON.stringify(messages); } catch (_) { preserved = false; }
+      return JSON.parse(JSON.stringify({
+        preserved,
+        originalCount: Array.isArray(messages) ? messages.length : 0,
+        outgoingCount: injected.length,
+        originalHayakuSignals: countHayakuTransportSignals(messages),
+        retainedHayakuSignals: countHayakuTransportSignals(retained)
+      }));
+    },
+    getRequestReuseStats() { return JSON.parse(JSON.stringify({ ...Runtime.requestReuse, size: RequestReuseCache.size })); },
+    clearRequestReuseCache() { clearRequestReuseCache(); return true; },
+    fingerprintRequest(messages = [], type = 'model') { const settings = Runtime.settings || {}; const current = resolveSgaCurrentTurn(messages); return requestFingerprint(messages, type, settings, current); },
     getAideOrderPlan(value = null) {
       const order = normalizeAideStageOrder(value || Runtime.settings?.aideStageOrder || DEFAULT_AIDE_STAGE_ORDER);
       return JSON.parse(JSON.stringify({ fullOrder: ['shadow_act', ...order], label: `SHADOW ACT → ${aideOrderLabel(order)}` }));
@@ -10582,22 +10504,57 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
       return providerConfigurationIssues(presets[presetName] || presets.default || {});
     },
     resetMigrationRetry() { migrationPromise = null; return true; },
-    async clearStoredPresets() { await RisuCompat.removeItem(STORAGE_PROVIDER_PRESETS_KEY); await RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY); Runtime.settings=null; return true; }
+    async clearStoredPresets() { await RisuCompat.removeItem(STORAGE_PROVIDER_PRESETS_KEY); await RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY); Runtime.settings=null; Runtime.settingsLoadedAt=0; clearRequestReuseCache(); return true; }
   });
 
   try {
-    if (typeof API.addRisuReplacer === 'function') {
-      registered.before = beforeRequest;
-      await API.addRisuReplacer('beforeRequest', beforeRequest);
-      Runtime.hookStatus.beforeRequest = true;
-    } else {
-      throw new Error('RisuAI addRisuReplacer API is unavailable.');
-    }
+    const registerBeforeRequestHook = async () => {
+      if (typeof API.addRisuReplacer !== 'function') {
+        Runtime.hookStatus.beforeRequest = false;
+        Runtime.hookStatus.replacerPermission = 'unavailable';
+        warn('RisuAI addRisuReplacer API is unavailable.');
+        return false;
+      }
+      let granted = true;
+      if (typeof API.requestPluginPermission === 'function') {
+        try { granted = await API.requestPluginPermission('replacer'); }
+        catch (_) { granted = false; }
+      }
+      Runtime.hookStatus.replacerPermission = granted === true ? 'granted' : 'denied';
+      if (!granted) {
+        Runtime.hookStatus.beforeRequest = false;
+        warn('GRADIA replacer permission was denied. The GUI remains available, but the RP pipeline is inactive.');
+        return false;
+      }
+      try {
+        registered.before = beforeRequest;
+        await API.addRisuReplacer('beforeRequest', beforeRequest);
+        Runtime.hookStatus.beforeRequest = true;
+      } catch (error) {
+        registered.before = null;
+        Runtime.hookStatus.beforeRequest = false;
+        warn('GRADIA beforeRequest hook registration failed.', error);
+        return false;
+      }
+      try {
+        registered.after = afterRequestReuseCleanup;
+        await API.addRisuReplacer('afterRequest', afterRequestReuseCleanup);
+        Runtime.hookStatus.afterRequest = true;
+      } catch (error) {
+        registered.after = null;
+        Runtime.hookStatus.afterRequest = false;
+        warn('GRADIA afterRequest retry-cache cleanup hook registration failed.', error);
+      }
+      return true;
+    };
+    await registerBeforeRequestHook();
 
     const unload = async () => {
       try {
         if (registered.before && typeof API.removeRisuReplacer === 'function') await API.removeRisuReplacer('beforeRequest', registered.before);
+        if (registered.after && typeof API.removeRisuReplacer === 'function') await API.removeRisuReplacer('afterRequest', registered.after);
         Runtime.hookStatus.beforeRequest = false;
+        Runtime.hookStatus.afterRequest = false;
       } catch (_) {}
       try {
         if (registered.setting && typeof API.unregisterUIPart === 'function') await API.unregisterUIPart(registered.setting.id || registered.setting);
@@ -10608,6 +10565,9 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
         Runtime.hookStatus.button = false;
       } catch (_) {}
       Runtime.hookStatus.unload = false;
+      clearRequestReuseCache();
+      clearArgumentCache();
+      try { if (Gui.hostIframe) await releaseSettingsContainerArea(); } catch (_) {}
     };
     try {
       if (typeof API.onUnload === 'function') { await API.onUnload(unload); Runtime.hookStatus.unload = true; }
@@ -10616,7 +10576,6 @@ html[data-sga-parent-drag="true"],html[data-sga-parent-drag="true"] body{pointer
 
     try { globalThis.__SerialGradationAgentsForRP = publicApi; } catch (_) {}
     try { globalThis.__ShadowActSerialAIDE = publicApi; } catch (_) {} // legacy alias
-    await initSettingsGui();
     await registerPluginUi();
 
     console.log(`${PUBLIC_LOG_PREFIX} ${PUBLIC_DISPLAY_NAME} v${PLUGIN_VERSION} loaded. Internal code: ${INTERNAL_CODE_NAME}`);
