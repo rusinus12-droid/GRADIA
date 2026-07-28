@@ -1,5 +1,5 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA
+//@display-name GRADIA GRADIA v0.23.8
 //@api 3.0
 //@version 0.23.8
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/GRADIA/main/GRADIA.js
