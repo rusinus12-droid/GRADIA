@@ -1,7 +1,7 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.51
+//@display-name GRADIA v0.25.54
 //@api 3.0
-//@version 0.25.51
+//@version 0.25.54
 
 /* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
 //@allowed-ipc flashback_hayaku_bridge
@@ -41,7 +41,6 @@
 //@arg input_assist_scope string full_pipeline|standalone
 //@arg input_assist_target_chars string 300|500|800|1000|omakase
 //@arg input_assist_confirmation_mode string direct|confirm
-//@arg input_assist_always_translate_english string true|false
 //@arg input_assist_lore_activation_mode string risu_key|gradia_extended — independent Input Assist lore selector; defaults to RisuAI-style activation keys
 //@arg information_transfer_mode string draft_only|draft_and_analysis
 //@arg nsfw_mode string off|soft|direct|explicit — shared mature-scene guidance for SHADOW ACT and all three AIDEs
@@ -821,6 +820,9 @@
  * v0.25.48 merges the button-only Input Writer branch into the current canonical storage/RE:TRACE line. The chat action is now “GRADIA로 인풋 작성하기”: an empty composer runs scene continuation, non-empty text runs Input Assist expansion, RP/Novel keep their existing choice flows, and the completed input can be sent directly or copied for manual send. The legacy automatic RisuAI input hook is kept in code but is no longer registered, so ordinary RisuAI sends never trigger Input Assist automatically.
  * v0.25.49 defines the missing canUseInputAssistConfirmationGui capability probe used by the explicit composer and delivery picker. It fails soft to promptInput/direct delivery when the plugin container GUI is unavailable, instead of throwing ReferenceError before Input Assist starts.
  * v0.25.50 separates the explicit Input Writer composer and delivery picker from the full-size confirmation layout. Compact modal surfaces now size to their actual content instead of inheriting the 760px choice-review canvas, while RP/Novel multi-choice review keeps the large comparison workspace.
+ * v0.25.52 stabilizes Story Arc identity and foreground maintenance. Arc scope no longer depends on chat title/live index, compatible legacy arcs are recovered by exact canonical-prefix hash without reanalysis, normal generation never launches a full-history Arc rebuild, and missed/bootstrap boundaries use one bounded latest-five rebase call. Manual full rebuild remains available. It also repairs the legacy lore reranker Top-K=1 regression once (then respects later user changes) and removes button-only Input Assist calls from normal pipeline call estimates.
+ * v0.25.53 adds editable English/Korean/Japanese review to every RP/Novel Input Writer choice and to the final delivery picker. Explicitly selected translations override automatic-English delivery, and final delivery identity/static-handoff state is now recorded from the exact edited text that is copied or sent.
+ * v0.25.54 removes the Input Manager's always-translate-to-English setting and every implicit translation branch/call estimate. English, Korean, and Japanese remain available only as explicit review actions in the choice and final-delivery editors.
  * v0.25.51 fixes copy/manual-send clipboard delivery in iframe/WebView runtimes. The copy action now runs inside the originating button click before any modal restore/hide await can consume transient user activation; it tries synchronous selection/execCommand first, then navigator.clipboard, records the method for diagnostics, and keeps the dialog open with the generated text selected when browser policy blocks automated copying.
  *
  * v0.25.23 hardens those contracts after review: unavailable or cross-chat Arc state now
@@ -909,7 +911,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.51';
+  const PLUGIN_VERSION = '0.25.54';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -1059,6 +1061,7 @@
   });
   const STAGE_LORE_RERANKER_VERSION = 'gradia_stage_lore_reranker_v1';
   const DEFAULT_STAGE_LORE_RERANK_TOP_K = 8;
+  const LORE_RERANK_TOP_K_REPAIR_VERSION = 1;
   const STAGE_LORE_RERANKER_CACHE_MAX = 768;
   const StageLoreRerankerFeatureCache = new Map();
   const setStageLoreRerankerCache = (key, value) => {
@@ -3232,8 +3235,7 @@
     'shadow_act_preset', 'character_aide_preset', 'world_aide_preset', 'plot_aide_preset',
     'arc_director_enabled', 'arc_director_preset', 'arc_horizon_turns', 'arc_auto_replan', 'arc_novelty_level',
     'input_assist_preset', 'user_intent_ooc_preset', 'input_assist_mode', 'input_assist_scope',
-    'input_assist_target_chars', 'input_assist_confirmation_mode',
-    'input_assist_always_translate_english', 'input_assist_lore_activation_mode',
+    'input_assist_target_chars', 'input_assist_confirmation_mode', 'input_assist_lore_activation_mode',
     'information_transfer_mode', 'nsfw_mode', 'nsfw_guidance_enabled', 'lore_activation_mode',
     'lore_reranker_top_k', 'skill_router_enabled', 'skill_router_top_k',
     'skill_router_references', 'selected_module_lore_ids', 'excluded_character_lore_ids',
@@ -4923,7 +4925,7 @@ const narrativeEmbeddingStableHash = value => {
       maxInjectionChars: 'max_injection_chars', injectionPosition: 'injection_position', failureMode: 'failure_mode',
       stageTimeoutMs: 'stage_timeout_ms', defaultPresetName: 'default_preset', aideStageOrder: 'aide_stage_order', quickProfile: 'quick_profile', multiPipelineMode: 'multi_pipeline_mode', writingMode: 'writing_mode', shadowDraftMode: 'shadow_draft_mode', novelShadowDraftMode: 'novel_shadow_draft_mode',
       gradationMode: 'gradation_mode', outputMode: 'output_mode', internalDraftLanguage: 'internal_draft_language', builtInStylePreset: 'built_in_style_preset', debugLog: 'debug_log', enableShadowRisuContext: 'shadow_include_risu_context', shadowRisuContextMaxChars: 'shadow_risu_context_max_chars', twoCallAide: 'two_call_aide', targetDraftMinChars: 'target_draft_min_chars', targetDraftMaxChars: 'target_draft_max_chars', guiEnabled: 'enable_gui',
-      inputAssistMode: 'input_assist_mode', inputAssistScope: 'input_assist_scope', inputAssistTargetChars: 'input_assist_target_chars', inputAssistConfirmationMode: 'input_assist_confirmation_mode', inputAssistAlwaysTranslateEnglish: 'input_assist_always_translate_english', inputAssistLoreActivationMode: 'input_assist_lore_activation_mode', novelInputAssistMode: 'novel_input_assist_mode', rpInputAssistMode: 'rp_input_assist_mode', novelInputAssistScope: 'novel_input_assist_scope', novelInputAssistConfirmationMode: 'novel_input_assist_confirmation_mode', informationTransferMode: 'information_transfer_mode',
+      inputAssistMode: 'input_assist_mode', inputAssistScope: 'input_assist_scope', inputAssistTargetChars: 'input_assist_target_chars', inputAssistConfirmationMode: 'input_assist_confirmation_mode', inputAssistLoreActivationMode: 'input_assist_lore_activation_mode', novelInputAssistMode: 'novel_input_assist_mode', rpInputAssistMode: 'rp_input_assist_mode', novelInputAssistScope: 'novel_input_assist_scope', novelInputAssistConfirmationMode: 'novel_input_assist_confirmation_mode', informationTransferMode: 'information_transfer_mode',
       nsfwMode: 'nsfw_mode', nsfwGuidanceEnabled: 'nsfw_guidance_enabled',
       responseImprovementProfile: 'response_improvement_profile', responseImprovementToggles: 'response_improvement_toggles',
       backendHosting: 'backendHosting', backendHostingMode: 'backend_hosting_mode', backendHostingUrl: 'backend_hosting_url', backendHostingToken: 'backend_hosting_token', backendHostingAutoDetected: 'backend_hosting_auto_detected', backendHostingLastDetectedAt: 'backend_hosting_last_detected_at', backendHostingLastManifest: 'backend_hosting_last_manifest',
@@ -4936,6 +4938,8 @@ const narrativeEmbeddingStableHash = value => {
     };
     const out = {};
     for (const [key, value] of Object.entries(source || {})) out[aliases[key] || key] = value;
+    delete out.input_assist_always_translate_english;
+    delete out.inputAssistAlwaysTranslateEnglish;
     if (text(out.mode).trim().toLowerCase() === 'full') out.mode = 'normal';
     if (Object.prototype.hasOwnProperty.call(out, 'aide_stage_order')) out.aide_stage_order = normalizeAideStageOrder(out.aide_stage_order);
     return out;
@@ -5579,6 +5583,45 @@ const writeNarrativeArchiveStore = async scopes => {
   });
 };
 
+const aliasNarrativeArchiveScopeForArcRecovery = async (sourceScopeKeyValue = '', targetScopeKeyValue = '') => {
+  const sourceScopeKey = text(sourceScopeKeyValue || '').trim();
+  const targetScopeKey = text(targetScopeKeyValue || '').trim();
+  if (!sourceScopeKey || !targetScopeKey || sourceScopeKey === targetScopeKey) return { ok: true, changed: false, reason: 'archive_scope_alias_not_needed' };
+  const store = await readNarrativeArchiveStore({ hydrateShared: false });
+  const source = normalizeNarrativeArchiveScope(store[sourceScopeKey], sourceScopeKey);
+  const target = normalizeNarrativeArchiveScope(store[targetScopeKey], targetScopeKey);
+  const targetHasData = !!normalizeNarrativeSharedArchiveRef(target.archiveRef) || target.entries.length > 0;
+  if (targetHasData) return { ok: true, changed: false, reason: 'archive_target_already_populated', entries: target.entries.length };
+  const sourceRef = normalizeNarrativeSharedArchiveRef(source.archiveRef);
+  if (!sourceRef && !source.entries.length) return { ok: true, changed: false, reason: 'archive_source_absent' };
+  // Copy only lightweight scope metadata/entry descriptors. Dense vectors remain referenced by the
+  // same SafeLocalPluginStorage keys; shared immutable history remains referenced by the same archiveRef.
+  // The source scope is never removed, so recovery is fail-soft and does not mutate another branch.
+  const aliasedEntries = source.entries.map(entry => ({
+    ...entry,
+    scopeKey: targetScopeKey,
+    recoveredFromScopeKey: sourceScopeKey,
+    recoveredScopeAlias: true
+  }));
+  store[targetScopeKey] = {
+    ...source,
+    scopeKey: targetScopeKey,
+    archiveRef: sourceRef,
+    createdAt: Number(source.createdAt || Date.now()),
+    updatedAt: Date.now(),
+    entries: aliasedEntries
+  };
+  if (!await writeNarrativeArchiveStore(store)) throw new Error('GRADIA Narrative Archive scope alias save failed.');
+  const verifiedStore = await readNarrativeArchiveStore({ hydrateShared: false });
+  const verified = normalizeNarrativeArchiveScope(verifiedStore[targetScopeKey], targetScopeKey);
+  const verifiedRef = normalizeNarrativeSharedArchiveRef(verified.archiveRef);
+  if (verified.entries.length !== aliasedEntries.length
+    || text(verifiedRef?.archiveId || '') !== text(sourceRef?.archiveId || '')) {
+    throw new Error('GRADIA Narrative Archive scope alias durable readback failed.');
+  }
+  return { ok: true, changed: true, reason: 'archive_scope_aliased_without_reembedding', entries: verified.entries.length, archiveId: verifiedRef?.archiveId || '' };
+};
+
 const ensureGradiaSharedNarrativeArchive = async (sourceArchive, sourceScopeKey = '') => {
   const source = normalizeNarrativeArchiveScope(sourceArchive, text(sourceArchive?.scopeKey || sourceScopeKey));
   const existingRef = normalizeNarrativeSharedArchiveRef(source.archiveRef);
@@ -5894,12 +5937,36 @@ const cosineNarrativeVectors = (left, right) => {
   return dot / Math.sqrt(ln * rn);
 };
 
-  const arcDirectorScopeKey = snapshot => {
+  const arcStableIdentityValue = (value = {}, kind = '') => {
+    const source = value && typeof value === 'object' ? value : {};
+    const ids = kind === 'chat'
+      ? [source.chatId, source.id, source._id, source.uid, source.uuid, source.key, source.__collectionKey]
+      : [source.characterId, source.charId, source.id, source._id, source.uid, source.uuid, source.key, source.__collectionKey];
+    const stable = ids.map(item => text(item || '').trim()).find(Boolean);
+    if (stable) return stable;
+    return kind === 'chat'
+      ? firstFilled(source.name, source.title, source.chatName, source.filename, 'chat')
+      : firstFilled(source.name, source.displayName, source.nickname, 'character');
+  };
+
+  const arcDirectorLegacyScopeKey = snapshot => {
     const character = snapshot?.character || snapshot?.characterInfo?.character || {};
     const chat = snapshot?.chatInfo?.chat || {};
     const stableScope = loreContinuityScopeKey(character, chat);
     const liveIdentity = text(snapshot?.chatInfo?.identity || '').trim();
     return `arc:${createTextHasher().update(stableScope || 'scope').update(liveIdentity || 'no-live-index').digest()}`;
+  };
+
+  const arcDirectorScopeKey = snapshot => {
+    const character = snapshot?.character || snapshot?.characterInfo?.character || {};
+    const chat = snapshot?.chatInfo?.chat || {};
+    const characterIdentity = arcStableIdentityValue(character, 'character');
+    const chatIdentity = arcStableIdentityValue(chat, 'chat');
+    return `arc:${createTextHasher()
+      .update('gradia_story_arc_scope_v2')
+      .update(characterIdentity || 'character')
+      .update(chatIdentity || 'chat')
+      .digest()}`;
   };
 
   const normalizeArcImportance = value => normalizeChoice(
@@ -6454,11 +6521,40 @@ const cosineNarrativeVectors = (left, right) => {
       const chunks = chunkArcTurns(turns);
       return chunks.length > 1 ? chunks.length + 1 : 1;
     })();
-    if (options.forceFullRebuild === true || options.canonicalHistoryRewritten === true || !arc) return fullBuildCalls;
+    if (options.forceFullRebuild === true) return fullBuildCalls;
+    const boundedForeground = options.allowFullFallback === false;
+    if (options.canonicalHistoryRewritten === true || !arc) return boundedForeground ? 1 : fullBuildCalls;
     const previousThrough = Math.max(0, Number(arc?.basis?.throughTurn || 0));
     if (completedTurnCount === previousThrough) return 0;
     if (completedTurnCount - previousThrough === ARC_DIRECTOR_UPDATE_INTERVAL) return 1;
-    return fullBuildCalls;
+    return boundedForeground ? 1 : fullBuildCalls;
+  };
+
+  const findCompatibleStoryArcStoreEntry = (store = {}, turns = [], targetScopeKey = '', preferredScopeKeys = []) => {
+    if (!Array.isArray(turns) || !turns.length) return null;
+    const preferred = new Set((preferredScopeKeys || []).map(value => text(value || '').trim()).filter(Boolean));
+    const candidates = [];
+    for (const [storeKey, raw] of Object.entries(store || {})) {
+      if (!storeKey || storeKey === targetScopeKey || !raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const arc = normalizeStoryArcPackage(raw, raw);
+      const issue = storyArcPackageIssue(arc, ARC_DIRECTOR_UPDATE_INTERVAL);
+      if (issue) continue;
+      const throughTurn = Math.max(0, Number(arc?.basis?.throughTurn || 0));
+      if (throughTurn <= 0 || throughTurn > turns.length) continue;
+      const expectedHash = text(arc?.basis?.chatHash || '').trim();
+      if (!expectedHash || expectedHash !== arcCanonicalChatHash(turns.slice(0, throughTurn))) continue;
+      candidates.push({
+        storeKey,
+        arc,
+        throughTurn,
+        preferred: preferred.has(storeKey),
+        updatedAt: Number(arc.updatedAt || arc.createdAt || 0)
+      });
+    }
+    candidates.sort((a, b) => Number(b.preferred) - Number(a.preferred)
+      || b.throughTurn - a.throughTurn
+      || b.updatedAt - a.updatedAt);
+    return candidates[0] || null;
   };
 
   const remainingArcBoundaryLogicalCalls = (plannedCalls = 0, outcome = {}) => (
@@ -7218,6 +7314,115 @@ const rebuildNarrativeArchiveVectors = async (scopeKey = Runtime.arcDirector?.sc
     return { ok: true, reason, arc, turns, rebuilt: true };
   };
 
+  const runArcDirectorBoundedRebase = async (snapshot, settings, previousArc = null, reason = 'bounded_five_turn_rebase') => {
+    const turns = arcCanonicalCompletedTurns(snapshot);
+    if (!turns.length || turns.length % ARC_DIRECTOR_UPDATE_INTERVAL !== 0) {
+      return { ok: false, reason: 'bounded_rebase_requires_five_turn_boundary', arc: previousArc || null, turns, updated: false };
+    }
+    const window = turns.slice(-ARC_DIRECTOR_UPDATE_INTERVAL);
+    if (window.length !== ARC_DIRECTOR_UPDATE_INTERVAL) {
+      return { ok: false, reason: `bounded_rebase_window_invalid:${window.length}`, arc: previousArc || null, turns, updated: false };
+    }
+    const previousThrough = Math.max(0, Number(previousArc?.basis?.throughTurn || 0));
+    const skippedGap = previousArc ? Math.max(0, turns.length - previousThrough - ARC_DIRECTOR_UPDATE_INTERVAL) : Math.max(0, turns.length - ARC_DIRECTOR_UPDATE_INTERVAL);
+    const archiveRecall = previousArc
+      ? await recallNarrativeArchiveForBoundary(previousArc, snapshot, window)
+      : { ok: true, active: false, entries: [], promptBlock: '', reason: 'archive_unavailable_without_previous_arc' };
+    const variationBlock = arcControlledVariationPromptBlock(settings, [arcCanonicalChatHash(turns), previousArc?.revision || 0, turns.length, 'bounded_rebase'].join('|'));
+    const userPrompt = [
+      `[BOUNDED REBASE REASON] ${reason}`,
+      `[COMPLETED CANONICAL TURN COUNT] ${turns.length}`,
+      `[ANALYZED FOREGROUND WINDOW] T${window[0]?.turn || 0}-T${window[window.length - 1]?.turn || 0}`,
+      skippedGap > 0 ? `[UNREAD FOREGROUND GAP] ${skippedGap} older completed turn(s) are intentionally NOT reread during normal response generation. Never invent their details. Treat the latest canonical five-turn window as current-state authority and use only still-compatible previous DB/archive continuity as background.` : '',
+      previousArc ? `[PREVIOUS STORY ARC DB — advisory only; discard any field contradicted by the latest canonical window]
+${compact(JSON.stringify(previousArc), 16000)}` : '',
+      previousArc?.destination?.locked === true ? `[LOCKED ARC DESTINATION — preserve exactly unless literal impossibility must be reported as a warning]
+${JSON.stringify(previousArc.destination)}` : '',
+      archiveRecall.promptBlock || '',
+      variationBlock,
+      '',
+      '[LATEST CANONICAL FIVE-TURN WINDOW]',
+      window.map(arcTurnBlock).join('\n\n'),
+      '',
+      '[TASK]',
+      `Re-establish the Story Arc DB at canonical turn ${turns.length} from the ACTUAL latest five completed U+A turns without rereading the full chat. Refresh the current narrative continuity_state and generate exactly five soft beats for T${turns.length + 1}-T${turns.length + ARC_DIRECTOR_UPDATE_INTERVAL}.`,
+      'Do not reconstruct unseen older turns. Do not preserve obsolete old beat mechanisms merely because they exist in the previous DB. Preserve only background continuity that remains compatible with the latest canonical evidence.'
+    ].filter(Boolean).join('\n\n');
+    const systemPrompt = previousArc
+      ? arcDirectorFiveTurnUpdateSystemPrompt(ARC_DIRECTOR_UPDATE_INTERVAL, settings)
+      : arcDirectorPlanningSystemPrompt(ARC_DIRECTOR_UPDATE_INTERVAL, settings);
+    const call = await runArcDirectorJsonCall(settings, systemPrompt, userPrompt, { maxTokens: previousArc ? 5800 : 6400, temp: previousArc ? 0.22 : 0.3 });
+    Runtime.arcDirector.reconcileCalls = Number(Runtime.arcDirector.reconcileCalls || 0) + 1;
+    if (!call.result?.ok || !call.parsed) {
+      const failReason = call.result?.reason || 'arc_bounded_rebase_json_invalid';
+      recordStageTrace({
+        stage: ARC_DIRECTOR_STAGE_ID, ok: false, reason: failReason,
+        provider: call.result?.provider || '', presetName: call.result?.presetName || '', model: call.result?.model || '', elapsedMs: call.elapsedMs,
+        systemPrompt, userPrompt, rawResponse: call.result?.content || call.result?.raw || '',
+        parsed: { kind: 'arc_bounded_rebase_failed', reason: failReason, previousThrough, observedThrough: turns.length, skippedGap }
+      });
+      return { ok: false, reason: failReason, arc: previousArc || null, turns, updated: false };
+    }
+    const history = Array.isArray(previousArc?.revisionHistory) ? previousArc.revisionHistory.slice() : [];
+    if (previousArc) history.push({
+      revision: previousArc.revision,
+      at: Date.now(),
+      status: 'FIVE_TURN_BOUNDED_REBASE',
+      throughTurn: previousThrough,
+      summary: previousArc.summary || ''
+    });
+    const returnedLedger = normalizeArcBeatLedgerPayload(
+      call.parsed.beat_ledger || call.parsed.beatLedger || call.parsed.completed_beats || call.parsed.completedBeats || [],
+      { fallbackThroughTurn: turns.length }
+    );
+    call.parsed.beat_ledger = returnedLedger;
+    const candidateLedger = mergeArcBeatLedger(previousArc?.beatLedger || [], returnedLedger);
+    const arc = normalizeStoryArcPackage(call.parsed, {
+      revision: Math.max(1, Number(previousArc?.revision || 0) + 1),
+      createdAt: previousArc?.createdAt || Date.now(),
+      updatedAt: Date.now(),
+      // Recovered Story Arc/Narrative Archive scopes are aliased to the stable target key before this call.
+      scopeKey: previousArc?.scopeKey || arcDirectorScopeKey(snapshot),
+      throughTurn: turns.length,
+      analyzedTurns: Math.min(turns.length, Math.max(0, Number(previousArc?.basis?.analyzedTurns || 0)) + window.length),
+      windowStart: window[0]?.turn || Math.max(1, turns.length - ARC_DIRECTOR_UPDATE_INTERVAL + 1),
+      windowEnd: turns.length,
+      nextWindowStart: turns.length + 1,
+      nextWindowEnd: turns.length + ARC_DIRECTOR_UPDATE_INTERVAL,
+      chatHash: arcCanonicalChatHash(turns),
+      beatLedger: candidateLedger,
+      continuityStateFallback: previousArc?.continuityState || {},
+      destinationFallback: previousArc?.destination || {},
+      revisionHistory: history.slice(-ARC_DIRECTOR_HISTORY_MAX),
+      lastReconciliation: {
+        status: previousArc ? 'FIVE_TURN_BOUNDED_REBASE' : 'FIVE_TURN_BOUNDED_BOOTSTRAP',
+        reason,
+        throughTurn: turns.length,
+        consumedBeatIds: [],
+        transformedBeatIds: [],
+        branchOrigin: previousArc ? 'bounded_latest_window_rebase' : 'bounded_latest_window_bootstrap'
+      }
+    });
+    enforceGeneratedArcVariationPolicy(arc, settings, [arcCanonicalChatHash(turns), previousArc?.revision || 0, turns.length, 'bounded_rebase'].join('|'));
+    const arcIssue = storyArcPackageIssue(arc, ARC_DIRECTOR_UPDATE_INTERVAL);
+    if (arcIssue) {
+      recordStageTrace({
+        stage: ARC_DIRECTOR_STAGE_ID, ok: false, reason: arcIssue,
+        provider: call.result?.provider || '', presetName: call.result?.presetName || '', model: call.result?.model || '', elapsedMs: call.elapsedMs,
+        systemPrompt, userPrompt, rawResponse: call.result?.content || '',
+        parsed: { kind: 'arc_bounded_rebase_invalid', issue: arcIssue, arc }
+      });
+      return { ok: false, reason: arcIssue, arc: previousArc || null, turns, updated: false };
+    }
+    recordStageTrace({
+      stage: ARC_DIRECTOR_STAGE_ID, ok: true, reason,
+      provider: call.result?.provider || '', presetName: call.result?.presetName || '', model: call.result?.model || '', elapsedMs: call.elapsedMs,
+      systemPrompt, userPrompt, rawResponse: call.result?.content || '',
+      parsed: { kind: 'arc_bounded_rebase', previousThrough, observedThrough: turns.length, skippedGap, analyzedWindow: [window[0]?.turn || 0, window[window.length - 1]?.turn || 0], archiveRecall: { reason: archiveRecall.reason, count: archiveRecall.entries?.length || 0 }, arc }
+    });
+    return { ok: true, reason, arc, turns, updated: true, boundedRebase: true, skippedGap };
+  };
+
   const runArcDirectorFiveTurnUpdate = async (existingArc, snapshot, settings, reason = 'five_turn_boundary') => {
     const turns = arcCanonicalCompletedTurns(snapshot);
     const previousThrough = Math.max(0, Number(existingArc?.basis?.throughTurn || 0));
@@ -7605,14 +7810,61 @@ const rebuildNarrativeArchiveVectors = async (scopeKey = Runtime.arcDirector?.sc
     let observedBoundaryCalls = 0;
     try {
       const store = await readStoryArcStore();
-      const rawExisting = store[scopeKey];
+      const turns = arcCanonicalCompletedTurns(snapshot);
+      const completedTurnCount = turns.length;
+      let rawExisting = store[scopeKey];
+      let recoveredFromScopeKey = '';
+      let recoveryReason = '';
+      if (!rawExisting && turns.length) {
+        const legacyScopeKey = arcDirectorLegacyScopeKey(snapshot);
+        const directLegacy = legacyScopeKey && legacyScopeKey !== scopeKey && store[legacyScopeKey]
+          ? { storeKey: legacyScopeKey, arc: normalizeStoryArcPackage(store[legacyScopeKey], store[legacyScopeKey]), preferred: true }
+          : null;
+        const directLegacyValid = directLegacy
+          && !storyArcPackageIssue(directLegacy.arc, ARC_DIRECTOR_UPDATE_INTERVAL)
+          && Math.max(0, Number(directLegacy.arc?.basis?.throughTurn || 0)) <= turns.length
+          && text(directLegacy.arc?.basis?.chatHash || '').trim()
+          && text(directLegacy.arc?.basis?.chatHash || '').trim() === arcCanonicalChatHash(turns.slice(0, Math.max(0, Number(directLegacy.arc?.basis?.throughTurn || 0))));
+        const recovered = directLegacyValid
+          ? directLegacy
+          : findCompatibleStoryArcStoreEntry(store, turns, scopeKey, [legacyScopeKey]);
+        if (recovered?.arc) {
+          // Store a lightweight alias under the stable v2 scope key. Keep the original entry intact
+          // until normal retention prunes it; Narrative Archive scope metadata is aliased separately
+          // without re-embedding or deleting the source scope.
+          recoveredFromScopeKey = text(recovered.storeKey || '').trim();
+          const recoveredArcSourceScopeKey = text(recovered.arc?.scopeKey || recoveredFromScopeKey || '').trim();
+          let archiveAlias = null;
+          try {
+            archiveAlias = await aliasNarrativeArchiveScopeForArcRecovery(recoveredArcSourceScopeKey, scopeKey);
+          } catch (archiveAliasError) {
+            const warning = compact(archiveAliasError?.message || archiveAliasError, 500);
+            Runtime.warnings.push({ at: Date.now(), msg: `story_arc_scope_recovery_archive_alias_fail_soft:${warning}` });
+            if (Runtime.warnings.length > 60) Runtime.warnings.shift();
+          }
+          rawExisting = normalizeStoryArcPackage(recovered.arc, { ...recovered.arc, scopeKey, updatedAt: Date.now() });
+          store[scopeKey] = rawExisting;
+          await writeStoryArcStore(store);
+          recoveryReason = directLegacyValid ? 'legacy_scope_exact_prefix_recovered' : 'canonical_prefix_scope_recovered';
+          Runtime.arcDirector = {
+            ...Runtime.arcDirector,
+            lastScopeRecovery: {
+              at: Date.now(),
+              fromScopeKey: recoveredFromScopeKey,
+              toScopeKey: scopeKey,
+              reason: recoveryReason,
+              archiveAlias: archiveAlias || null,
+              reembedded: false
+            }
+          };
+        }
+      }
       const existingCandidate = rawExisting ? normalizeStoryArcPackage(rawExisting, rawExisting) : null;
       const existingIssue = existingCandidate ? storyArcPackageIssue(existingCandidate, ARC_DIRECTOR_UPDATE_INTERVAL) : '';
       // Never reuse a malformed stored arc between boundaries. Keep it reachable as
-      // storedArc for inspection/deletion, but only a fresh 5-turn rebuild may restore it.
+      // storedArc for inspection/deletion, but only a bounded 5-turn rebase (normal flow)
+      // or an explicit manual full rebuild may restore it.
       const existing = existingIssue ? null : existingCandidate;
-      const turns = arcCanonicalCompletedTurns(snapshot);
-      const completedTurnCount = turns.length;
       const atBoundary = completedTurnCount > 0 && completedTurnCount % ARC_DIRECTOR_UPDATE_INTERVAL === 0;
       observedCompletedTurnCount = completedTurnCount;
       observedAtBoundary = atBoundary;
@@ -7630,7 +7882,8 @@ const rebuildNarrativeArchiveVectors = async (scopeKey = Runtime.arcDirector?.sc
       );
       const plannedBoundaryCalls = expectedArcBoundaryLogicalCalls(turns, existing, {
         forceFullRebuild: options.forceFullRebuild === true,
-        canonicalHistoryRewritten
+        canonicalHistoryRewritten,
+        allowFullFallback: options.allowFullFallback
       });
       observedBoundaryCalls = plannedBoundaryCalls;
       const boundaryAlreadyAttemptedThisRun = plannedBoundaryCalls > 0
@@ -7644,26 +7897,38 @@ const rebuildNarrativeArchiveVectors = async (scopeKey = Runtime.arcDirector?.sc
       } else if (options.forceFullRebuild === true && !atBoundary) {
         outcome = { ok: false, reason: 'arc_manual_rebuild_requires_five_turn_boundary', arc: existing, turns, updated: false };
       } else if (atBoundary) {
-        if (options.forceFullRebuild === true || !existing || canonicalHistoryRewritten) {
-          const rebuildReason = options.forceFullRebuild === true
-            ? (options.reason || 'manual_five_turn_rebuild')
-            : existingIssue
-              ? `stored_story_arc_invalid_rebuild:${existingIssue}`
-              : !existing
-              ? 'five_turn_bootstrap'
-              : 'canonical_history_rebased_at_five_turn_boundary';
-          outcome = await runArcDirectorFullBuild(snapshot, { ...settings, arcHorizonTurns: ARC_DIRECTOR_UPDATE_INTERVAL }, existing, rebuildReason);
+        const boundedForeground = options.allowFullFallback === false && options.forceFullRebuild !== true;
+        if (options.forceFullRebuild === true) {
+          outcome = await runArcDirectorFullBuild(
+            snapshot,
+            { ...settings, arcHorizonTurns: ARC_DIRECTOR_UPDATE_INTERVAL },
+            existing,
+            options.reason || 'manual_five_turn_rebuild'
+          );
+          stale = !outcome.ok;
+        } else if (!existing || canonicalHistoryRewritten) {
+          const rebuildReason = existingIssue
+            ? `stored_story_arc_invalid_rebase:${existingIssue}`
+            : !existing
+              ? 'five_turn_bounded_bootstrap'
+              : 'canonical_history_bounded_rebase_at_five_turn_boundary';
+          outcome = boundedForeground
+            ? await runArcDirectorBoundedRebase(snapshot, { ...settings, arcHorizonTurns: ARC_DIRECTOR_UPDATE_INTERVAL }, existingCandidate || existing, rebuildReason)
+            : await runArcDirectorFullBuild(snapshot, { ...settings, arcHorizonTurns: ARC_DIRECTOR_UPDATE_INTERVAL }, existing, rebuildReason);
           stale = !outcome.ok;
         } else if (completedTurnCount === previousThrough) {
-          outcome = { ok: true, reason: 'arc_boundary_already_processed', arc: existing, turns, updated: false };
+          outcome = { ok: true, reason: recoveryReason || 'arc_boundary_already_processed', arc: existing, turns, updated: false };
           stale = false;
         } else if (completedTurnCount - previousThrough === ARC_DIRECTOR_UPDATE_INTERVAL) {
           outcome = await runArcDirectorFiveTurnUpdate(existing, snapshot, { ...settings, arcHorizonTurns: ARC_DIRECTOR_UPDATE_INTERVAL }, options.reason || 'automatic_five_turn_update');
           stale = !outcome.ok;
         } else {
-          // A boundary was missed (for example Arc Director was disabled) or the stored DB is too old.
-          // Rebase from canonical history only now, at the allowed 5-turn boundary.
-          outcome = await runArcDirectorFullBuild(snapshot, { ...settings, arcHorizonTurns: ARC_DIRECTOR_UPDATE_INTERVAL }, existing, 'missed_five_turn_boundary_rebase');
+          // A missed boundary must never turn a normal user request into an O(history) LLM job.
+          // Foreground generation rebases from only the latest canonical five-turn window in one call.
+          // Full historical reconstruction remains an explicit manual maintenance operation.
+          outcome = boundedForeground
+            ? await runArcDirectorBoundedRebase(snapshot, { ...settings, arcHorizonTurns: ARC_DIRECTOR_UPDATE_INTERVAL }, existing, 'missed_five_turn_boundary_bounded_rebase')
+            : await runArcDirectorFullBuild(snapshot, { ...settings, arcHorizonTurns: ARC_DIRECTOR_UPDATE_INTERVAL }, existing, 'missed_five_turn_boundary_rebase');
           stale = !outcome.ok;
         }
       } else if (existingIssue) {
@@ -7718,7 +7983,9 @@ const rebuildNarrativeArchiveVectors = async (scopeKey = Runtime.arcDirector?.sc
         boundaryCallDue: remainingBoundaryCalls > 0,
         expectedBoundaryCalls: remainingBoundaryCalls,
         reused: outcome.ok === true && !updated && !!usableArc,
-        refreshed: updated
+        refreshed: updated,
+        recoveredFromScopeKey,
+        scopeRecoveryReason: recoveryReason
       };
       Runtime.arcDirector = control;
       retainTelemetryArcCallPlan(settings, plannedBoundaryCalls);
@@ -8308,7 +8575,6 @@ const rebuildNarrativeArchiveVectors = async (scopeKey = Runtime.arcDirector?.sc
       writingMode === 'rp' ? 'direct' : inputAssistConfirmationModeRaw
     ), INPUT_ASSIST_CONFIRMATION_MODES, 'direct');
     const inputAssistConfirmationMode = writingMode === 'rp' ? (rpInputAssistMode === 'off' ? 'direct' : 'confirm') : inputAssistConfirmationModeRaw;
-    const inputAssistAlwaysTranslateEnglish = asBool(await runtimeCfg('input_assist_always_translate_english', 'false'), false);
     const inputAssistLoreActivationMode = normalizeInputAssistLoreActivationMode(
       await runtimeCfg('input_assist_lore_activation_mode', DEFAULT_INPUT_ASSIST_LORE_ACTIVATION_MODE)
     );
@@ -8320,7 +8586,21 @@ const rebuildNarrativeArchiveVectors = async (scopeKey = Runtime.arcDirector?.sc
     const arcAutoReplan = true;
     const arcNoveltyLevel = normalizeChoice(await runtimeCfg('arc_novelty_level', 'medium'), ARC_NOVELTY_LEVELS, 'medium');
     const loreActivationMode = normalizeLoreActivationMode(await runtimeCfg('lore_activation_mode', DEFAULT_LORE_ACTIVATION_MODE));
-    const loreRerankerTopK = clampInt(await runtimeCfg('lore_reranker_top_k', DEFAULT_STAGE_LORE_RERANK_TOP_K), 1, 32, DEFAULT_STAGE_LORE_RERANK_TOP_K);
+    const rawLoreRerankerTopK = clampInt(await runtimeCfg('lore_reranker_top_k', DEFAULT_STAGE_LORE_RERANK_TOP_K), 1, 32, DEFAULT_STAGE_LORE_RERANK_TOP_K);
+    const loreTopKRepairVersion = Math.max(0, Number(runtimeStored.lore_reranker_top_k_repair_v1 || 0) || 0);
+    let loreRerankerTopK = rawLoreRerankerTopK;
+    if (loreTopKRepairVersion < LORE_RERANK_TOP_K_REPAIR_VERSION && rawLoreRerankerTopK === 1) {
+      // v0.25.51-era settings could surface Top-K=1 even though the product default is 8.
+      // Repair that legacy value exactly once. After the marker is stored, an explicit user
+      // choice of 1 is respected on later loads.
+      loreRerankerTopK = DEFAULT_STAGE_LORE_RERANK_TOP_K;
+      runtimeStored.lore_reranker_top_k = String(loreRerankerTopK);
+      runtimeStored.lore_reranker_top_k_repair_v1 = LORE_RERANK_TOP_K_REPAIR_VERSION;
+      try { await writeRuntimeSettings(runtimeStored); } catch (_) {}
+    } else if (loreTopKRepairVersion < LORE_RERANK_TOP_K_REPAIR_VERSION) {
+      runtimeStored.lore_reranker_top_k_repair_v1 = LORE_RERANK_TOP_K_REPAIR_VERSION;
+      try { await writeRuntimeSettings(runtimeStored); } catch (_) {}
+    }
     const skillRouterEnabled = asBool(await runtimeCfg('skill_router_enabled', DEFAULT_SKILL_ROUTER_ENABLED ? 'true' : 'false'), DEFAULT_SKILL_ROUTER_ENABLED);
     const skillRouterTopK = clampInt(await runtimeCfg('skill_router_top_k', DEFAULT_SKILL_ROUTER_TOP_K), 1, MAX_SKILL_ROUTER_TOP_K, DEFAULT_SKILL_ROUTER_TOP_K);
     const skillRouterReferences = asBool(await runtimeCfg('skill_router_references', 'true'), true);
@@ -8395,7 +8675,6 @@ const rebuildNarrativeArchiveVectors = async (scopeKey = Runtime.arcDirector?.sc
       rpInputAssistMode,
       novelInputAssistScope,
       novelInputAssistConfirmationMode,
-      inputAssistAlwaysTranslateEnglish,
       inputAssistLoreActivationMode,
       informationTransferMode,
       nsfwMode,
@@ -19626,15 +19905,15 @@ function mergeAgentCbsWarnings(...warningLists) {
 
   const expectedTotalCallPlan = (settings = {}, options = {}) => {
     const inputAssistEnabled = normalizeChoice(settings.inputAssistMode || 'off', INPUT_ASSIST_MODES, 'off') !== 'off';
-    const inputAssistStandalone = inputAssistEnabled
+    const includeInputAssist = options.includeInputAssist === true;
+    const inputAssistStandalone = includeInputAssist && inputAssistEnabled
       && normalizeChoice(settings.inputAssistScope || 'full_pipeline', INPUT_ASSIST_SCOPES, 'full_pipeline') === 'standalone';
     const stagePlan = inputAssistStandalone ? [] : pipelineWorkStagePlan(settings);
     const risuEngineCalls = stagePlan.includes(RISU_ENGINE_STAGE) ? 1 : 0;
     const draftStages = stagePlan.filter(stage => stage !== RISU_ENGINE_STAGE);
     const callsPerDraftStage = normalizeMultiPipelineMode(settings.multiPipelineMode) === 'heavyweight' ? 2 : 1;
     const baseDraftCalls = draftStages.length * callsPerDraftStage;
-    const inputAssistCalls = inputAssistEnabled ? 1 : 0;
-    const translationCalls = inputAssistCalls && settings.inputAssistAlwaysTranslateEnglish === true ? 1 : 0;
+    const inputAssistCalls = includeInputAssist && inputAssistEnabled ? 1 : 0;
     const explicitArcCallCount = Object.prototype.hasOwnProperty.call(options || {}, 'arcBoundaryCalls')
       ? Math.max(0, Number(options.arcBoundaryCalls || 0))
       : null;
@@ -19653,7 +19932,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       && settings.enableArcDirector !== false
       ? plannedArcCalls
       : 0;
-    const internalLogicalCalls = baseDraftCalls + inputAssistCalls + translationCalls + arcBoundaryCalls + risuEngineCalls;
+    const internalLogicalCalls = baseDraftCalls + inputAssistCalls + arcBoundaryCalls + risuEngineCalls;
     return {
       schema: 'gradia_total_call_plan_v1',
       mode: normalizeMultiPipelineMode(settings.multiPipelineMode),
@@ -19661,7 +19940,6 @@ function mergeAgentCbsWarnings(...warningLists) {
       callsPerDraftStage,
       baseDraftCalls,
       inputAssistCalls,
-      translationCalls,
       arcBoundaryCalls,
       risuEngineCalls,
       internalLogicalCalls,
@@ -19689,7 +19967,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     pinnedToDeliveryCycle: pinnedToDeliveryCycle === true,
     startedAt: Date.now(),
     completedAt: 0,
-    expected: expectedTotalCallPlan(settings),
+    expected: expectedTotalCallPlan(settings, { includeInputAssist: /input_assist/i.test(text(source || '')) }),
     actualLogicalCalls: 0,
     providerAttempts: 0,
     recoveryLogicalCalls: 0,
@@ -21029,10 +21307,6 @@ function mergeAgentCbsWarnings(...warningLists) {
     return translated;
   };
 
-  const translateInputAssistReviewTextToEnglish = async (value, settings) => (
-    await translateInputAssistReviewText(value, settings, 'english')
-  );
-
   const resolveInputAssistDeliveryPlan = (originalValue, rewrittenValue, settings, lastResult = Runtime.lastInputAssist) => {
     const original = text(originalValue || '');
     const rewritten = text(rewrittenValue || '');
@@ -21048,7 +21322,6 @@ function mergeAgentCbsWarnings(...warningLists) {
       fallbackUsed,
       fallbackReason: fallbackUsed ? text(lastResult?.reason || 'input_assist_failed') : '',
       deliveryBase,
-      shouldTranslate: enabled && !bypassed && settings?.inputAssistAlwaysTranslateEnglish === true && !!deliveryBase.trim(),
       shouldConfirm: enabled && !bypassed
         && normalizeChoice(settings?.inputAssistConfirmationMode || 'direct', INPUT_ASSIST_CONFIRMATION_MODES, 'direct') === 'confirm'
         && !!deliveryBase.trim()
@@ -21158,29 +21431,6 @@ function mergeAgentCbsWarnings(...warningLists) {
       };
     }
     return mismatch ? null : handoff.staticSnapshot;
-  };
-
-  const prepareInputAssistExpandedForDelivery = async (value, settings, options = {}) => {
-    const source = text(value || '').trim();
-    if (!source || settings?.inputAssistAlwaysTranslateEnglish !== true) return source;
-    const translated = await translateInputAssistReviewTextToEnglish(source, settings);
-    if (Runtime.lastInputAssist) {
-      Runtime.lastInputAssist.preTranslationRewritten = source;
-      Runtime.lastInputAssist.rewritten = translated;
-      Runtime.lastInputAssist.outputChars = translated.length;
-      Runtime.lastInputAssist.autoTranslatedEnglish = true;
-      Runtime.lastInputAssist.deliveryFallback = options.fallbackUsed === true;
-      Runtime.lastInputAssist.deliveryFallbackReason = options.fallbackReason || '';
-      if (Runtime.lastInputAssist.trace?.parsed) {
-        Runtime.lastInputAssist.trace.parsed.preTranslationRewritten = compact(source, 8000);
-        Runtime.lastInputAssist.trace.parsed.rewrittenInput = compact(translated, 8000);
-        Runtime.lastInputAssist.trace.parsed.outputChars = translated.length;
-        Runtime.lastInputAssist.trace.parsed.autoTranslatedEnglish = true;
-        Runtime.lastInputAssist.trace.parsed.deliveryFallback = options.fallbackUsed === true;
-        Runtime.lastInputAssist.trace.parsed.deliveryFallbackReason = options.fallbackReason || '';
-      }
-    }
-    return translated;
   };
 
   const copyInputAssistTextToClipboard = async value => {
@@ -21629,11 +21879,24 @@ function mergeAgentCbsWarnings(...warningLists) {
     });
   };
 
-  const showInputAssistDeliveryPicker = async generated => {
+  const showInputAssistDeliveryPicker = async (generated, { onTranslate = null } = {}) => {
     const body = text(generated || '').trim();
-    if (!body) return 'cancelled';
+    const cancelledResult = { action: 'cancelled', content: '', edited: false, translationLanguage: '' };
+    if (!body) return cancelledResult;
     const guiReady = await canUseInputAssistConfirmationGui();
-    if (!guiReady) return 'direct';
+    if (!guiReady) {
+      Runtime.inputAssistConfirmation = {
+        ...(Runtime.inputAssistConfirmation || {}),
+        open: false,
+        source: 'explicit_input_writer_delivery_headless',
+        decision: 'direct',
+        selected: body,
+        edited: false,
+        sourceEdited: false,
+        translationLanguage: ''
+      };
+      return { action: 'direct', content: body, edited: false, translationLanguage: '' };
+    }
     const settingsWasVisible = Gui.visible === true;
     try {
       const guiApi = getLiveApi(['showContainer']);
@@ -21650,6 +21913,23 @@ function mergeAgentCbsWarnings(...warningLists) {
     clearRoot();
     return await new Promise(resolve => {
       let settled = false;
+      let busy = false;
+      let currentSource = body;
+      let displayedValue = body;
+      let translationView = 'source';
+      let sourceEdited = false;
+      const translated = { english: '', korean: '', japanese: '' };
+      const translatedEdited = { english: false, korean: false, japanese: false };
+      const languageDefs = [['english', '영어'], ['korean', '한국어'], ['japanese', '일본어']];
+      Runtime.inputAssistConfirmation = {
+        ...(Runtime.inputAssistConfirmation || {}),
+        open: true,
+        source: 'explicit_input_writer_delivery',
+        expanded: body,
+        edited: false,
+        decision: '',
+        selected: ''
+      };
       const restore = async () => {
         Gui.confirmationVisible = false;
         Gui.app = null;
@@ -21668,45 +21948,146 @@ function mergeAgentCbsWarnings(...warningLists) {
           } catch (_) {}
         }
       };
-      const finish = async decision => {
-        if (settled) return;
-        settled = true;
-        await restore();
-        resolve(decision);
-      };
       const preview = guiEl('textarea', {
-        class: 'sga-textarea',
-        value: body,
-        readonly: true,
-        style: { width: '100%', minHeight: '180px', maxHeight: '360px', padding: '12px', borderRadius: '10px', resize: 'vertical', background: 'rgba(5,9,17,.58)' }
+        class: 'sga-textarea sga-input-confirm-text editable',
+        value: displayedValue,
+        spellcheck: true,
+        dataset: { inputDeliveryEditor: '' },
+        'aria-label': '최종 전송 인풋 편집',
+        style: { width: '100%', minHeight: '180px', maxHeight: '420px', padding: '12px', borderRadius: '10px', resize: 'vertical', background: 'rgba(5,9,17,.58)' }
       });
       const copyStatus = guiEl('div', {
         class: 'sga-note',
-        text: '',
+        text: '현재 인풋을 직접 수정하거나 다른 언어로 번역한 뒤 전송할 수 있습니다.',
         style: { minHeight: '18px', margin: '0', color: 'var(--sga-muted)' }
       });
+      const countNode = guiEl('span', { class: 'sga-note', text: `${displayedValue.length.toLocaleString('ko-KR')}자` });
       let copyButton = null;
+      let directButton = null;
+      let cancelButton = null;
+      const languageButtons = Object.fromEntries(languageDefs.map(([language, label]) => [language, guiEl('button', {
+        class: 'sga-input-confirm-translate',
+        text: `${label}로 번역`,
+        disabled: typeof onTranslate !== 'function',
+        dataset: { inputDeliveryTranslate: language }
+      })]));
+      const updateLanguageLabels = () => {
+        for (const [language, label] of languageDefs) {
+          languageButtons[language].textContent = translationView === language ? '원문 보기' : `${label}로 번역`;
+          languageButtons[language].disabled = busy || typeof onTranslate !== 'function' || !currentSource.trim();
+        }
+      };
+      const setBusy = (next, message = '') => {
+        busy = !!next;
+        preview.disabled = busy;
+        if (copyButton) copyButton.disabled = busy;
+        if (directButton) directButton.disabled = busy || !displayedValue.trim();
+        if (cancelButton) cancelButton.disabled = busy;
+        updateLanguageLabels();
+        if (message) {
+          copyStatus.textContent = message;
+          copyStatus.style.color = 'var(--sga-muted)';
+        }
+      };
+      const captureEditor = (markEdited = true) => {
+        const next = text(preview.value || '');
+        const changed = next !== displayedValue;
+        displayedValue = next;
+        if (translationView === 'source') {
+          currentSource = displayedValue;
+          if (markEdited && changed) sourceEdited = currentSource !== body;
+          translated.english = '';
+          translated.korean = '';
+          translated.japanese = '';
+          translatedEdited.english = false;
+          translatedEdited.korean = false;
+          translatedEdited.japanese = false;
+        } else {
+          translated[translationView] = displayedValue;
+          if (markEdited && changed) translatedEdited[translationView] = true;
+        }
+        countNode.textContent = `${displayedValue.length.toLocaleString('ko-KR')}자`;
+        if (directButton) directButton.disabled = busy || !displayedValue.trim();
+        updateLanguageLabels();
+      };
+      const reviewResult = action => {
+        captureEditor(true);
+        return {
+          action,
+          content: displayedValue.trim(),
+          edited: sourceEdited || (translationView !== 'source' && translatedEdited[translationView]),
+          translationLanguage: translationView === 'source' ? '' : translationView
+        };
+      };
+      const finish = async result => {
+        if (settled || busy) return;
+        settled = true;
+        document.removeEventListener('keydown', keyHandler);
+        const finalResult = result && typeof result === 'object' ? result : cancelledResult;
+        Runtime.inputAssistConfirmation = {
+          ...(Runtime.inputAssistConfirmation || {}),
+          open: false,
+          decision: finalResult.action || '',
+          selected: text(finalResult.content || ''),
+          edited: finalResult.edited === true,
+          sourceEdited,
+          translationLanguage: text(finalResult.translationLanguage || '')
+        };
+        await restore();
+        resolve(finalResult);
+      };
+      const toggleTranslation = async targetLanguage => {
+        if (busy || typeof onTranslate !== 'function') return;
+        const language = normalizeChoice(targetLanguage, ['english', 'korean', 'japanese'], 'english');
+        const languageLabel = language === 'korean' ? '한국어' : language === 'japanese' ? '일본어' : '영어';
+        if (translationView === language) {
+          translationView = 'source';
+          displayedValue = currentSource;
+          preview.value = displayedValue;
+          countNode.textContent = `${displayedValue.length.toLocaleString('ko-KR')}자`;
+          copyStatus.textContent = '최종 인풋을 원래 언어로 표시합니다.';
+          copyStatus.style.color = 'var(--sga-muted)';
+          updateLanguageLabels();
+          return;
+        }
+        if (!currentSource.trim()) return;
+        setBusy(true, `최종 인풋을 ${languageLabel}로 번역하고 있습니다…`);
+        try {
+          let next = translated[language];
+          if (!next) next = text(await onTranslate(currentSource, language)).trim();
+          if (!next) throw new Error(`${languageLabel} 번역 결과가 비어 있습니다.`);
+          translated[language] = next;
+          translationView = language;
+          displayedValue = next;
+          preview.value = displayedValue;
+          countNode.textContent = `${displayedValue.length.toLocaleString('ko-KR')}자`;
+          copyStatus.textContent = `${languageLabel} 번역본입니다. 이 번역본도 직접 수정한 뒤 전송할 수 있습니다.`;
+          copyStatus.style.color = 'var(--sga-muted)';
+        } catch (error) {
+          copyStatus.textContent = `${languageLabel} 번역 실패: ${compact(error?.message || error, 500)}`;
+          copyStatus.style.color = '#ff9aa7';
+        } finally {
+          setBusy(false);
+        }
+      };
       const onCopy = async () => {
-        if (settled || copyButton?.disabled) return;
-        if (copyButton) copyButton.disabled = true;
+        if (settled || busy || copyButton?.disabled) return;
+        const result = reviewResult('copy');
+        if (!result.content) return;
+        copyButton.disabled = true;
         copyStatus.textContent = '클립보드에 복사하고 있습니다…';
         copyStatus.style.color = 'var(--sga-muted)';
 
-        // IMPORTANT: perform the clipboard action before restore()/hideContainer().
-        // Clipboard APIs commonly require the transient activation from this click.
-        const copied = await copyInputAssistTextToClipboard(body);
+        // Keep the clipboard call inside the originating click's transient activation.
+        const copied = await copyInputAssistTextToClipboard(result.content);
         if (copied?.ok) {
           if (Runtime.lastInputAssist) {
             Runtime.lastInputAssist.clipboardCopyMethod = copied.method || '';
             Runtime.lastInputAssist.clipboardUserActivation = copied.userActivation;
           }
-          copyStatus.textContent = copied.method === 'execCommand'
-            ? '복사 완료 · 호환 복사 방식을 사용했습니다.'
-            : '복사 완료 · 클립보드 API를 사용했습니다.';
-          await finish('copy');
+          await finish(result);
           return;
         }
-
         const activationNote = copied?.userActivation === false ? ' 클릭 권한이 이미 소진된 상태였습니다.' : '';
         copyStatus.textContent = `자동 복사가 차단되었습니다.${activationNote} 아래 인풋 전체를 선택해 Ctrl/Cmd+C로 복사해 주세요.`;
         copyStatus.style.color = '#ff9aa7';
@@ -21716,21 +22097,39 @@ function mergeAgentCbsWarnings(...warningLists) {
           if (typeof preview.setSelectionRange === 'function') preview.setSelectionRange(0, preview.value.length);
         } catch (_) {}
         warn('input_assist_clipboard_copy_unavailable', copied?.error || 'unknown');
-        if (copyButton) copyButton.disabled = false;
+        copyButton.disabled = false;
       };
+      preview.addEventListener('input', () => captureEditor(true));
+      for (const [language] of languageDefs) {
+        languageButtons[language].addEventListener('click', () => { void toggleTranslation(language); });
+      }
       copyButton = guiEl('button', { class: 'sga-btn ghost', text: '복사 후 직접 전송', onClick: () => { void onCopy(); } });
+      cancelButton = guiEl('button', { class: 'sga-btn ghost', text: '취소', onClick: () => { void finish(cancelledResult); } });
+      directButton = guiEl('button', { class: 'sga-btn primary', text: '바로 전송', onClick: () => { void finish(reviewResult('direct')); } });
+      const keyHandler = event => {
+        if (event?.key === 'Escape') {
+          event.preventDefault?.();
+          void finish(cancelledResult);
+        }
+      };
+      document.addEventListener('keydown', keyHandler);
       const app = guiEl('div', { class: 'sga-input-compact-app wide' });
       const card = guiEl('section', { class: 'sga-card wide', style: { width: '100%', margin: '0', padding: '18px', display: 'grid', gap: '14px' } }, [
         guiEl('div', {}, [
-          guiEl('h2', { text: '작성된 인풋 전송 방식' }),
-          guiEl('p', { class: 'sga-note', text: '작성된 인풋을 바로 전송하거나, 클립보드에 복사한 뒤 직접 입력창에서 전송할 수 있습니다.' })
+          guiEl('h2', { text: '작성된 인풋 최종 확인' }),
+          guiEl('p', { class: 'sga-note', text: '현재 내용을 직접 수정하거나 영어·한국어·일본어로 번역한 뒤, 그대로 전송하거나 복사할 수 있습니다.' })
         ]),
+        guiEl('div', { style: { display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center' } }, [
+          guiEl('span', { class: 'sga-input-confirm-edit-badge', text: '편집 가능' }),
+          countNode
+        ]),
+        guiEl('div', { class: 'sga-input-confirm-translation-row', style: { padding: '0' } }, languageDefs.map(([language]) => languageButtons[language])),
         preview,
         copyStatus,
         guiEl('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' } }, [
-          guiEl('button', { class: 'sga-btn ghost', text: '취소', onClick: () => { void finish('cancelled'); } }),
+          cancelButton,
           copyButton,
-          guiEl('button', { class: 'sga-btn primary', text: '바로 전송', onClick: () => { void finish('direct'); } })
+          directButton
         ])
       ]);
       app.appendChild(card);
@@ -21777,6 +22176,10 @@ function mergeAgentCbsWarnings(...warningLists) {
         telemetryNewCycle: true
       });
       if (inputAssistContinueCancelled(requestId)) throw inputAssistContinueCancellationError();
+      let choiceEdited = false;
+      let choiceSourceEdited = false;
+      let choiceTranslationLanguage = '';
+      let choiceAction = '';
       const authorChoiceAssist = isAuthorDirectedDraftMode(settings)
         && normalizeChoice(settings.inputAssistMode || 'off', INPUT_ASSIST_MODES, 'off') !== 'off';
       if (authorChoiceAssist) {
@@ -21791,10 +22194,17 @@ function mergeAgentCbsWarnings(...warningLists) {
           onRegenerate: async () => {
             await runInputAssistForContent(originalInput, settings, { source: continuationMode ? 'explicit_continue_author_choice_regenerate' : 'explicit_input_writer_author_choice_regenerate' });
             return Array.isArray(Runtime.lastInputAssist?.authorChoices) ? Runtime.lastInputAssist.authorChoices : [];
-          }
+          },
+          onTranslate: async (value, targetLanguage) => (
+            await translateInputAssistReviewText(value, settings, targetLanguage)
+          )
         });
         if (reviewed.action === 'cancelled' || !text(reviewed.content).trim()) throw inputAssistContinueCancellationError();
         generated = text(reviewed.content).trim();
+        choiceAction = text(reviewed.action || '');
+        choiceEdited = reviewed.edited === true;
+        choiceSourceEdited = reviewed.sourceEdited === true;
+        choiceTranslationLanguage = text(reviewed.translationLanguage || '');
       } else {
         const choices = Array.isArray(Runtime.lastInputAssist?.novelChoices) ? Runtime.lastInputAssist.novelChoices : [];
         if (Runtime.lastInputAssist?.ok !== true || choices.length !== NOVEL_INPUT_CHOICE_TARGET) throw new Error(Runtime.lastInputAssist?.reason || '소설 모드의 세 작가 관점 선택지를 모두 만들지 못했습니다.');
@@ -21807,20 +22217,59 @@ function mergeAgentCbsWarnings(...warningLists) {
           onRegenerate: async () => {
             await runInputAssistForContent(originalInput, settings, { source: continuationMode ? 'explicit_continue_novel_choice_regenerate' : 'explicit_input_writer_novel_choice_regenerate' });
             return Array.isArray(Runtime.lastInputAssist?.novelChoices) ? Runtime.lastInputAssist.novelChoices : [];
-          }
+          },
+          onTranslate: async (value, targetLanguage) => (
+            await translateInputAssistReviewText(value, settings, targetLanguage)
+          )
         });
         if (reviewed.action === 'cancelled' || !text(reviewed.content).trim()) throw inputAssistContinueCancellationError();
         generated = text(reviewed.content).trim();
+        choiceAction = text(reviewed.action || '');
+        choiceEdited = reviewed.edited === true;
+        choiceSourceEdited = reviewed.sourceEdited === true;
+        choiceTranslationLanguage = text(reviewed.translationLanguage || '');
       }
-      if (settings.inputAssistAlwaysTranslateEnglish === true && generated) {
-        generated = await translateInputAssistReviewTextToEnglish(generated, settings);
-        if (Runtime.lastInputAssist) Runtime.lastInputAssist.autoTranslatedEnglish = true;
+      Runtime.inputAssistSend = { ...Runtime.inputAssistSend, phase: 'reviewing', generated };
+      const delivery = await showInputAssistDeliveryPicker(generated, {
+        onTranslate: async (value, targetLanguage) => (
+          await translateInputAssistReviewText(value, settings, targetLanguage)
+        )
+      });
+      if (delivery.action === 'cancelled' || !text(delivery.content).trim()) throw inputAssistContinueCancellationError();
+      generated = text(delivery.content).trim();
+      const baseDeliverySource = continuationMode ? 'explicit_writer_continue' : 'explicit_writer_expand';
+      const deliverySource = [
+        baseDeliverySource,
+        choiceAction,
+        choiceTranslationLanguage ? `choice_translated_${choiceTranslationLanguage}` : '',
+        choiceEdited ? 'choice_edited' : '',
+        delivery.translationLanguage ? `final_translated_${delivery.translationLanguage}` : '',
+        delivery.edited ? 'final_edited' : '',
+        delivery.action
+      ].filter(Boolean).join('_');
+      if (Runtime.lastInputAssist) {
+        Runtime.lastInputAssist.confirmedInput = generated;
+        Runtime.lastInputAssist.finalDeliveryDecision = delivery.action;
+        Runtime.lastInputAssist.finalDeliveryEdited = delivery.edited === true;
+        Runtime.lastInputAssist.finalDeliverySourceEdited = Runtime.inputAssistConfirmation?.sourceEdited === true;
+        Runtime.lastInputAssist.finalDeliveryTranslationLanguage = text(delivery.translationLanguage || '');
+        Runtime.lastInputAssist.choiceEdited = choiceEdited;
+        Runtime.lastInputAssist.choiceSourceEdited = choiceSourceEdited;
+        Runtime.lastInputAssist.choiceTranslationLanguage = choiceTranslationLanguage;
+        if (Runtime.lastInputAssist.trace?.parsed) {
+          Runtime.lastInputAssist.trace.parsed.confirmedInput = compact(generated, 8000);
+          Runtime.lastInputAssist.trace.parsed.finalDeliveryDecision = delivery.action;
+          Runtime.lastInputAssist.trace.parsed.finalDeliveryEdited = delivery.edited === true;
+          Runtime.lastInputAssist.trace.parsed.finalDeliverySourceEdited = Runtime.inputAssistConfirmation?.sourceEdited === true;
+          Runtime.lastInputAssist.trace.parsed.finalDeliveryTranslationLanguage = text(delivery.translationLanguage || '');
+          Runtime.lastInputAssist.trace.parsed.choiceEdited = choiceEdited;
+          Runtime.lastInputAssist.trace.parsed.choiceSourceEdited = choiceSourceEdited;
+          Runtime.lastInputAssist.trace.parsed.choiceTranslationLanguage = choiceTranslationLanguage;
+        }
       }
-      generated = finalizeInputAssistDelivery(generated, continuationMode ? 'explicit_writer_continue' : 'explicit_writer_expand', settings).trim();
+      generated = finalizeInputAssistDelivery(generated, deliverySource, settings).trim();
       Runtime.inputAssistSend = { ...Runtime.inputAssistSend, phase: 'ready', generated };
-      const delivery = await showInputAssistDeliveryPicker(generated);
-      if (delivery === 'cancelled') throw inputAssistContinueCancellationError();
-      if (delivery === 'copy') {
+      if (delivery.action === 'copy') {
         Runtime.inputAssistSend = { ...Runtime.inputAssistSend, busy: false, phase: 'copied', ok: true, reason: 'manual_copy', lastAt: Date.now() };
         await setInputAssistContinuePanel('인풋을 복사했습니다. RisuAI 입력창에 붙여넣어 직접 전송하세요.', 'done', 6000);
         finishCallTelemetry('explicit_input_writer_copied');
@@ -21843,12 +22292,14 @@ function mergeAgentCbsWarnings(...warningLists) {
       return true;
     } catch (error) {
       if (error?.code === 'input_assist_send_cancelled' || inputAssistContinueCancelled(requestId)) {
+        clearInputAssistStaticHandoff('explicit_input_writer_cancelled');
         Runtime.inputAssistSend = { ...Runtime.inputAssistSend, busy: false, phase: 'cancelled', requestId, cancelRequested: false, cancelled: true, lastAt: Date.now(), ok: false, reason: 'user_cancelled' };
         await setInputAssistContinuePanel('GRADIA 인풋 작성을 취소했습니다.', 'cancelled', 3500);
         finishCallTelemetry('explicit_input_writer_cancelled');
         return false;
       }
       const reason = compact(error?.message || error, 1000);
+      clearInputAssistStaticHandoff('explicit_input_writer_failed');
       Runtime.inputAssistSend = { ...Runtime.inputAssistSend, busy: false, phase: 'error', requestId, cancelRequested: false, cancelled: false, lastAt: Date.now(), ok: false, reason };
       await notifyInputAssistContinueError(reason);
       finishCallTelemetry('explicit_input_writer_failed');
@@ -27685,7 +28136,6 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       inputAssistScope: settings?.inputAssistScope,
       inputAssistTargetChars: settings?.inputAssistTargetChars,
       inputAssistConfirmationMode: settings?.inputAssistConfirmationMode,
-      inputAssistAlwaysTranslateEnglish: settings?.inputAssistAlwaysTranslateEnglish,
       inputAssistLoreActivationMode: normalizeInputAssistLoreActivationMode(settings?.inputAssistLoreActivationMode),
       informationTransferMode: settings?.informationTransferMode,
       arcDirectorEnabled: settings?.arcDirectorEnabled === true,
@@ -27874,6 +28324,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     const pipelineStartedAt = Date.now();
     const callTelemetry = ensureCallTelemetry(settings, 'pipeline');
     callTelemetry.expected = expectedTotalCallPlan(settings, {
+      includeInputAssist: false,
       arcBoundaryCalls: Math.max(
         Number(callTelemetry.plannedArcBoundaryCalls || 0),
         Number(Runtime.arcDirector?.expectedBoundaryCalls || 0)
@@ -29095,7 +29546,6 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     rpInputAssistMode: normalizeChoice(settings.rpInputAssistMode || (settings.writingMode === 'rp' ? settings.inputAssistMode : 'user_focus') || 'user_focus', ['off', 'user_focus'], 'user_focus'),
     novelInputAssistScope: normalizeChoice(settings.novelInputAssistScope || (settings.writingMode === 'rp' ? 'full_pipeline' : settings.inputAssistScope) || 'full_pipeline', INPUT_ASSIST_SCOPES, 'full_pipeline'),
     novelInputAssistConfirmationMode: normalizeChoice(settings.novelInputAssistConfirmationMode || (settings.writingMode === 'rp' ? 'direct' : settings.inputAssistConfirmationMode) || 'direct', INPUT_ASSIST_CONFIRMATION_MODES, 'direct'),
-    inputAssistAlwaysTranslateEnglish: settings.inputAssistAlwaysTranslateEnglish === true,
     inputAssistLoreActivationMode: normalizeInputAssistLoreActivationMode(settings.inputAssistLoreActivationMode),
     informationTransferMode: normalizeChoice(settings.informationTransferMode || 'draft_only', INFORMATION_TRANSFER_MODES, 'draft_only'),
     nsfwMode: normalizeNsfwMode(settings.nsfwMode),
@@ -29509,18 +29959,50 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       });
       throw error;
     }
-    const raw = store[scopeKey];
+    const canonicalTurns = arcCanonicalCompletedTurns(snapshot);
+    let raw = store[scopeKey];
+    let guiRecoveredFromScopeKey = '';
+    let guiRecoveryReason = '';
+    if (!raw && canonicalTurns.length) {
+      const legacyScopeKey = arcDirectorLegacyScopeKey(snapshot);
+      const directLegacy = legacyScopeKey && legacyScopeKey !== scopeKey && store[legacyScopeKey]
+        ? { storeKey: legacyScopeKey, arc: normalizeStoryArcPackage(store[legacyScopeKey], store[legacyScopeKey]) }
+        : null;
+      const directThrough = Math.max(0, Number(directLegacy?.arc?.basis?.throughTurn || 0));
+      const directLegacyValid = directLegacy
+        && !storyArcPackageIssue(directLegacy.arc, ARC_DIRECTOR_UPDATE_INTERVAL)
+        && directThrough > 0
+        && directThrough <= canonicalTurns.length
+        && text(directLegacy.arc?.basis?.chatHash || '').trim() === arcCanonicalChatHash(canonicalTurns.slice(0, directThrough));
+      const recovered = directLegacyValid
+        ? directLegacy
+        : findCompatibleStoryArcStoreEntry(store, canonicalTurns, scopeKey, [legacyScopeKey]);
+      if (recovered?.arc) {
+        guiRecoveredFromScopeKey = text(recovered.storeKey || '').trim();
+        const sourceArchiveScope = text(recovered.arc?.scopeKey || guiRecoveredFromScopeKey || '').trim();
+        try { await aliasNarrativeArchiveScopeForArcRecovery(sourceArchiveScope, scopeKey); }
+        catch (error) {
+          const warning = compact(error?.message || error, 500);
+          Runtime.warnings.push({ at: Date.now(), msg: `gui_story_arc_scope_recovery_archive_alias_fail_soft:${warning}` });
+          if (Runtime.warnings.length > 60) Runtime.warnings.shift();
+        }
+        raw = normalizeStoryArcPackage(recovered.arc, { ...recovered.arc, scopeKey, updatedAt: Date.now() });
+        store[scopeKey] = raw;
+        await writeStoryArcStore(store);
+        guiRecoveryReason = directLegacyValid ? 'gui_legacy_scope_exact_prefix_recovered' : 'gui_canonical_prefix_scope_recovered';
+      }
+    }
     const storedArc = raw ? normalizeStoryArcPackage(raw, raw) : null;
     const storedIssue = storedArc ? storyArcPackageIssue(storedArc, ARC_DIRECTOR_UPDATE_INTERVAL) : '';
     const arc = storedIssue ? null : storedArc;
-    const canonicalTurns = arcCanonicalCompletedTurns(snapshot);
     const completedTurnCount = canonicalTurns.length;
     const previousThrough = Math.max(0, Number(arc?.basis?.throughTurn || 0));
     const stale = !!storedIssue || (!!arc && (completedTurnCount < previousThrough || (previousThrough > 0 && completedTurnCount >= previousThrough && arcCanonicalChatHash(canonicalTurns.slice(0, previousThrough)) !== text(arc?.basis?.chatHash || ''))));
     const atBoundary = completedTurnCount > 0 && completedTurnCount % ARC_DIRECTOR_UPDATE_INTERVAL === 0;
     const nextBoundaryTurn = Math.max(ARC_DIRECTOR_UPDATE_INTERVAL, Math.ceil(Math.max(1, completedTurnCount + (atBoundary ? 1 : 0)) / ARC_DIRECTOR_UPDATE_INTERVAL) * ARC_DIRECTOR_UPDATE_INTERVAL);
     const expectedBoundaryCalls = expectedArcBoundaryLogicalCalls(canonicalTurns, stale ? null : arc, {
-      canonicalHistoryRewritten: stale
+      canonicalHistoryRewritten: stale,
+      allowFullFallback: false
     });
     const usableArc = stale ? null : arc;
     Runtime.arcDirector = {
@@ -29543,10 +30025,12 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         slotState: slot.slotState
       })),
       currentBrief: buildArcDirectorCurrentBrief(usableArc, '', completedTurnCount),
-      lastReason: storedIssue ? `gui_arc_invalid_waiting_for_boundary:${storedIssue}` : stale ? 'gui_arc_stale_waiting_for_boundary' : raw ? 'gui_arc_hydrated' : 'arc_not_created',
+      lastReason: storedIssue ? `gui_arc_invalid_waiting_for_boundary:${storedIssue}` : stale ? 'gui_arc_stale_waiting_for_boundary' : guiRecoveryReason || (raw ? 'gui_arc_hydrated' : 'arc_not_created'),
       lastError: '',
       lastAt: Date.now(),
-      lastReconcileStatus: storedArc?.lastReconciliation?.status || ''
+      lastReconcileStatus: storedArc?.lastReconciliation?.status || '',
+      recoveredFromScopeKey: guiRecoveredFromScopeKey,
+      scopeRecoveryReason: guiRecoveryReason
     };
     try { await inspectNarrativeArchiveScope(scopeKey); }
     catch (error) { Runtime.narrativeArchive = { ...Runtime.narrativeArchive, scopeKey, lastError: compact(error?.message || error, 500) }; }
@@ -29939,7 +30423,6 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         rp_input_assist_mode: normalizeChoice(runtime.rpInputAssistMode || (runtime.writingMode === 'rp' ? runtime.inputAssistMode : 'user_focus') || 'user_focus', ['off', 'user_focus'], 'user_focus'),
         novel_input_assist_scope: normalizeChoice(runtime.novelInputAssistScope || 'full_pipeline', INPUT_ASSIST_SCOPES, 'full_pipeline'),
         novel_input_assist_confirmation_mode: normalizeChoice(runtime.novelInputAssistConfirmationMode || 'direct', INPUT_ASSIST_CONFIRMATION_MODES, 'direct'),
-        input_assist_always_translate_english: String(runtime.inputAssistAlwaysTranslateEnglish === true),
         input_assist_lore_activation_mode: normalizeInputAssistLoreActivationMode(runtime.inputAssistLoreActivationMode),
         information_transfer_mode: normalizeChoice(runtime.informationTransferMode || 'draft_only', INFORMATION_TRANSFER_MODES, 'draft_only'),
         nsfw_mode: normalizeNsfwMode(runtime.nsfwMode),
@@ -30426,7 +30909,153 @@ html,body{width:100%;height:100%;overflow:hidden}
     }
   };
 
-  const recordAuthorDirectedChoiceDecision = (decision, selected, choice = null) => {
+  const createEditableInputAssistChoiceCard = ({
+    choice = null,
+    index = 0,
+    sourceValue = '',
+    title = '',
+    badge = '',
+    summary = '',
+    actionLabel = '이 입력을 선택',
+    onTranslate = null,
+    statusNode = null,
+    isBusy = () => false,
+    setBusy = () => {},
+    onSelect = () => {}
+  } = {}) => {
+    const initialSource = text(sourceValue || '').trim();
+    let currentSource = initialSource;
+    let displayedValue = initialSource;
+    let translationView = 'source';
+    let sourceEdited = false;
+    const translated = { english: '', korean: '', japanese: '' };
+    const translatedEdited = { english: false, korean: false, japanese: false };
+    const languageDefs = [
+      ['english', '영어'],
+      ['korean', '한국어'],
+      ['japanese', '일본어']
+    ];
+    const card = guiEl('section', {
+      dataset: { inputChoiceCard: String(choice?.id || choice?.perspective || index + 1) },
+      style: { padding: '13px', border: '1px solid rgba(139,92,255,.32)', borderRadius: '14px', background: 'rgba(10,12,24,.80)', display: 'grid', gap: '8px' }
+    });
+    const editor = guiEl('textarea', {
+      class: 'sga-input-confirm-text editable',
+      value: displayedValue,
+      spellcheck: true,
+      dataset: { inputChoiceEditor: '' },
+      'aria-label': `${title || `선택지 ${index + 1}`} 편집`,
+      style: { maxHeight: '240px', minHeight: '120px', padding: '10px', borderRadius: '10px', background: 'rgba(5,9,17,.58)' }
+    });
+    const countNode = guiEl('span', { class: 'sga-note', text: `${displayedValue.length.toLocaleString('ko-KR')}자` });
+    const selectButton = guiEl('button', { class: 'sga-btn primary', text: actionLabel, disabled: !displayedValue.trim() });
+    const languageButtons = Object.fromEntries(languageDefs.map(([language, label]) => [language, guiEl('button', {
+      class: 'sga-input-confirm-translate',
+      text: `${label}로 번역`,
+      disabled: typeof onTranslate !== 'function' || !currentSource.trim(),
+      dataset: { inputChoiceTranslate: language }
+    })]));
+    const updateLanguageLabels = () => {
+      for (const [language, label] of languageDefs) {
+        languageButtons[language].textContent = translationView === language ? '원문 보기' : `${label}로 번역`;
+        languageButtons[language].disabled = typeof onTranslate !== 'function' || !currentSource.trim();
+      }
+    };
+    const syncEditor = (markEdited = true) => {
+      const next = text(editor.value || '');
+      const changed = next !== displayedValue;
+      displayedValue = next;
+      if (translationView === 'source') {
+        currentSource = displayedValue;
+        if (markEdited && changed) sourceEdited = currentSource !== initialSource;
+        translated.english = '';
+        translated.korean = '';
+        translated.japanese = '';
+        translatedEdited.english = false;
+        translatedEdited.korean = false;
+        translatedEdited.japanese = false;
+      } else {
+        translated[translationView] = displayedValue;
+        if (markEdited && changed) translatedEdited[translationView] = true;
+      }
+      countNode.textContent = `${displayedValue.length.toLocaleString('ko-KR')}자`;
+      selectButton.disabled = !displayedValue.trim();
+      updateLanguageLabels();
+    };
+    const toggleTranslation = async targetLanguage => {
+      if (isBusy() || typeof onTranslate !== 'function') return;
+      const language = normalizeChoice(targetLanguage, ['english', 'korean', 'japanese'], 'english');
+      const languageLabel = language === 'korean' ? '한국어' : language === 'japanese' ? '일본어' : '영어';
+      if (translationView === language) {
+        translationView = 'source';
+        displayedValue = currentSource;
+        editor.value = displayedValue;
+        countNode.textContent = `${displayedValue.length.toLocaleString('ko-KR')}자`;
+        selectButton.disabled = !displayedValue.trim();
+        updateLanguageLabels();
+        if (statusNode) {
+          statusNode.textContent = '선택지를 원래 언어로 표시합니다.';
+          statusNode.classList.remove('err');
+        }
+        return;
+      }
+      if (!currentSource.trim()) return;
+      setBusy(true, `선택지를 ${languageLabel}로 번역하고 있습니다…`);
+      try {
+        let next = translated[language];
+        if (!next) next = text(await onTranslate(currentSource, language)).trim();
+        if (!next) throw new Error(`${languageLabel} 번역 결과가 비어 있습니다.`);
+        translated[language] = next;
+        translationView = language;
+        displayedValue = next;
+        editor.value = displayedValue;
+        countNode.textContent = `${displayedValue.length.toLocaleString('ko-KR')}자`;
+        selectButton.disabled = false;
+        updateLanguageLabels();
+        if (statusNode) {
+          statusNode.textContent = `${languageLabel} 번역본을 표시하고 있습니다. 이 번역본도 직접 수정한 뒤 선택할 수 있습니다.`;
+          statusNode.classList.remove('err');
+        }
+      } catch (error) {
+        if (statusNode) {
+          statusNode.textContent = `${languageLabel} 번역 실패: ${compact(error?.message || error, 500)}`;
+          statusNode.classList.add('err');
+        }
+      } finally {
+        setBusy(false);
+      }
+    };
+    editor.addEventListener('input', () => syncEditor(true));
+    for (const [language] of languageDefs) {
+      languageButtons[language].addEventListener('click', () => { void toggleTranslation(language); });
+    }
+    selectButton.addEventListener('click', () => {
+      syncEditor(false);
+      const selected = displayedValue.trim();
+      if (!selected) return;
+      onSelect({
+        content: selected,
+        edited: sourceEdited || (translationView !== 'source' && translatedEdited[translationView]),
+        sourceEdited,
+        translationLanguage: translationView === 'source' ? '' : translationView
+      });
+    });
+    card.appendChild(guiEl('div', { style: { display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center' } }, [
+      guiEl('strong', { text: title || `${index + 1}. 선택지 ${index + 1}` }),
+      guiEl('div', { style: { display: 'flex', alignItems: 'center', gap: '7px' } }, [
+        guiEl('span', { class: 'sga-input-confirm-edit-badge', text: '편집 가능' }),
+        badge ? guiEl('span', { class: 'sga-badge', text: badge }) : null,
+        countNode
+      ])
+    ]));
+    if (summary) card.appendChild(guiEl('div', { class: 'sga-note', text: summary }));
+    card.appendChild(guiEl('div', { class: 'sga-input-confirm-translation-row', style: { padding: '0' } }, languageDefs.map(([language]) => languageButtons[language])));
+    card.appendChild(editor);
+    card.appendChild(selectButton);
+    return card;
+  };
+
+  const recordAuthorDirectedChoiceDecision = (decision, selected, choice = null, review = {}) => {
     const selectedText = text(selected || '');
     const choiceId = text(choice?.id || '').trim();
     Runtime.inputAssistConfirmation = {
@@ -30435,7 +31064,10 @@ html,body{width:100%;height:100%;overflow:hidden}
       regenerating: false,
       decision: decision || '',
       selected: selectedText,
-      authorChoiceId: choiceId
+      authorChoiceId: choiceId,
+      edited: review.edited === true,
+      sourceEdited: review.sourceEdited === true,
+      translationLanguage: text(review.translationLanguage || '')
     };
     if (Runtime.lastInputAssist) {
       Runtime.lastInputAssist.confirmationMode = 'author_choice';
@@ -30443,12 +31075,18 @@ html,body{width:100%;height:100%;overflow:hidden}
       Runtime.lastInputAssist.authorChoiceSelectedId = choiceId;
       Runtime.lastInputAssist.authorChoiceSelectedTitle = text(choice?.title || '');
       Runtime.lastInputAssist.confirmedInput = selectedText;
+      Runtime.lastInputAssist.confirmationEdited = review.edited === true;
+      Runtime.lastInputAssist.confirmationSourceEdited = review.sourceEdited === true;
+      Runtime.lastInputAssist.confirmationTranslationLanguage = text(review.translationLanguage || '');
       if (Runtime.lastInputAssist.trace?.parsed) {
         Runtime.lastInputAssist.trace.parsed.confirmationMode = 'author_choice';
         Runtime.lastInputAssist.trace.parsed.confirmationDecision = decision || '';
         Runtime.lastInputAssist.trace.parsed.authorChoiceSelectedId = choiceId;
         Runtime.lastInputAssist.trace.parsed.authorChoiceSelectedTitle = text(choice?.title || '');
         Runtime.lastInputAssist.trace.parsed.confirmedInput = compact(selectedText, 8000);
+        Runtime.lastInputAssist.trace.parsed.confirmationEdited = review.edited === true;
+        Runtime.lastInputAssist.trace.parsed.confirmationSourceEdited = review.sourceEdited === true;
+        Runtime.lastInputAssist.trace.parsed.confirmationTranslationLanguage = text(review.translationLanguage || '');
       }
     }
   };
@@ -30457,7 +31095,8 @@ html,body{width:100%;height:100%;overflow:hidden}
     original = '',
     choices = [],
     source = 'normal_input',
-    onRegenerate = null
+    onRegenerate = null,
+    onTranslate = null
   } = {}) => {
     const initialOriginal = text(original || '').trim();
     let currentChoices = Array.isArray(choices) ? choices.map(item => ({ ...item })).filter(item => text(item?.brief).trim()) : [];
@@ -30534,14 +31173,21 @@ html,body{width:100%;height:100%;overflow:hidden}
           if (typeof guiApi?.hideContainer === 'function') await guiApi.hideContainer();
         } catch (_) {}
       };
-      const finish = async (action, content, choice = null) => {
+      const finish = async (action, content, choice = null, review = {}) => {
         if (settled || busy) return;
         settled = true;
         document.removeEventListener('keydown', keyHandler);
         const selected = text(content || '').trim();
-        recordAuthorDirectedChoiceDecision(action, selected, choice);
+        recordAuthorDirectedChoiceDecision(action, selected, choice, review);
         await restoreSurface();
-        resolve({ action, content: selected, choice: choice ? { ...choice } : null });
+        resolve({
+          action,
+          content: selected,
+          choice: choice ? { ...choice } : null,
+          edited: review.edited === true,
+          sourceEdited: review.sourceEdited === true,
+          translationLanguage: text(review.translationLanguage || '')
+        });
       };
       const close = async () => {
         if (sourceIsExplicitContinue || !initialOriginal) return await finish('cancelled', '', null);
@@ -30551,6 +31197,18 @@ html,body{width:100%;height:100%;overflow:hidden}
         if (event?.key === 'Escape') {
           event.preventDefault?.();
           void close();
+        }
+      };
+      const setBusy = (next, message = '') => {
+        busy = !!next;
+        app.classList.toggle('busy', busy);
+        for (const editor of Array.from(app.querySelectorAll('[data-input-choice-editor]'))) editor.disabled = busy;
+        regenerateButton.disabled = busy || typeof onRegenerate !== 'function';
+        closeButton.disabled = busy;
+        Runtime.inputAssistConfirmation = { ...(Runtime.inputAssistConfirmation || {}), regenerating: busy };
+        if (message) {
+          statusNode.textContent = message;
+          statusNode.classList.remove('err');
         }
       };
       const renderCards = () => {
@@ -30572,28 +31230,27 @@ html,body{width:100%;height:100%;overflow:hidden}
         currentChoices.forEach((choice, index) => {
           const brief = text(choice?.brief || '').trim();
           if (!brief) return;
-          const card = guiEl('section', {
-            style: { padding: '13px', border: '1px solid rgba(139,92,255,.32)', borderRadius: '14px', background: 'rgba(10,12,24,.80)', display: 'grid', gap: '8px' }
-          }, [
-            guiEl('div', { style: { display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center' } }, [
-              guiEl('strong', { text: `${index + 1}. ${choice.title || `선택지 ${index + 1}`}` }),
-              guiEl('span', { class: 'sga-badge', text: '제안' })
-            ]),
-            choice.summary ? guiEl('div', { class: 'sga-note', text: choice.summary }) : null,
-            guiEl('pre', { class: 'sga-input-confirm-text', text: brief, style: { maxHeight: '180px', minHeight: '0', padding: '10px', borderRadius: '10px', background: 'rgba(5,9,17,.58)' } }),
-            guiEl('button', { class: 'sga-btn primary', text: '이 행동을 선택', onClick: () => { void finish(`rp_action_choice_${choice.id || index + 1}`, brief, choice); } })
-          ]);
+          const card = createEditableInputAssistChoiceCard({
+            choice,
+            index,
+            sourceValue: brief,
+            title: `${index + 1}. ${choice.title || `선택지 ${index + 1}`}`,
+            badge: '제안',
+            summary: choice.summary || '',
+            actionLabel: '이 행동을 선택',
+            onTranslate,
+            statusNode,
+            isBusy: () => busy,
+            setBusy,
+            onSelect: review => { void finish(`rp_action_choice_${choice.id || index + 1}`, review.content, choice, review); }
+          });
           bodyNode.appendChild(card);
         });
         if (!currentChoices.length) bodyNode.appendChild(guiEl('div', { class: 'sga-callout', text: '유효한 행동 선택지를 만들지 못했습니다. 원본 입력을 사용하거나 선택지를 다시 요청하세요.' }));
       };
       regenerateButton.addEventListener('click', async () => {
         if (busy || typeof onRegenerate !== 'function') return;
-        busy = true;
-        regenerateButton.disabled = true;
-        statusNode.textContent = '현재 장면과 사용자 제약을 유지한 채 다른 유저 행동 선택지를 제안하고 있습니다…';
-        statusNode.classList.remove('err');
-        Runtime.inputAssistConfirmation = { ...(Runtime.inputAssistConfirmation || {}), regenerating: true };
+        setBusy(true, '현재 장면과 사용자 제약을 유지한 채 다른 유저 행동 선택지를 제안하고 있습니다…');
         try {
           const next = await onRegenerate();
           const nextChoices = Array.isArray(next) ? next.filter(item => text(item?.brief).trim()) : [];
@@ -30606,9 +31263,7 @@ html,body{width:100%;height:100%;overflow:hidden}
           statusNode.textContent = `선택지 재생성 실패: ${compact(error?.message || error, 500)}`;
           statusNode.classList.add('err');
         } finally {
-          busy = false;
-          regenerateButton.disabled = typeof onRegenerate !== 'function';
-          Runtime.inputAssistConfirmation = { ...(Runtime.inputAssistConfirmation || {}), regenerating: false };
+          setBusy(false);
         }
       });
       if (typeof onRegenerate !== 'function') regenerateButton.disabled = true;
@@ -30629,7 +31284,7 @@ html,body{width:100%;height:100%;overflow:hidden}
     });
   };
 
-  const recordNovelInputChoiceDecision = (decision, selected, choice = null) => {
+  const recordNovelInputChoiceDecision = (decision, selected, choice = null, review = {}) => {
     const selectedText = text(selected || '');
     const perspective = normalizeNovelInputChoicePerspective(choice?.perspective || choice?.id || '');
     Runtime.inputAssistConfirmation = {
@@ -30638,7 +31293,10 @@ html,body{width:100%;height:100%;overflow:hidden}
       regenerating: false,
       decision: decision || '',
       selected: selectedText,
-      novelChoicePerspective: perspective
+      novelChoicePerspective: perspective,
+      edited: review.edited === true,
+      sourceEdited: review.sourceEdited === true,
+      translationLanguage: text(review.translationLanguage || '')
     };
     if (Runtime.lastInputAssist) {
       Runtime.lastInputAssist.confirmationMode = 'novel_choice';
@@ -30646,12 +31304,18 @@ html,body{width:100%;height:100%;overflow:hidden}
       Runtime.lastInputAssist.novelChoiceSelectedPerspective = perspective;
       Runtime.lastInputAssist.novelChoiceSelectedTitle = text(choice?.title || '');
       Runtime.lastInputAssist.confirmedInput = selectedText;
+      Runtime.lastInputAssist.confirmationEdited = review.edited === true;
+      Runtime.lastInputAssist.confirmationSourceEdited = review.sourceEdited === true;
+      Runtime.lastInputAssist.confirmationTranslationLanguage = text(review.translationLanguage || '');
       if (Runtime.lastInputAssist.trace?.parsed) {
         Runtime.lastInputAssist.trace.parsed.confirmationMode = 'novel_choice';
         Runtime.lastInputAssist.trace.parsed.confirmationDecision = decision || '';
         Runtime.lastInputAssist.trace.parsed.novelChoiceSelectedPerspective = perspective;
         Runtime.lastInputAssist.trace.parsed.novelChoiceSelectedTitle = text(choice?.title || '');
         Runtime.lastInputAssist.trace.parsed.confirmedInput = compact(selectedText, 8000);
+        Runtime.lastInputAssist.trace.parsed.confirmationEdited = review.edited === true;
+        Runtime.lastInputAssist.trace.parsed.confirmationSourceEdited = review.sourceEdited === true;
+        Runtime.lastInputAssist.trace.parsed.confirmationTranslationLanguage = text(review.translationLanguage || '');
       }
     }
   };
@@ -30660,7 +31324,8 @@ html,body{width:100%;height:100%;overflow:hidden}
     original = '',
     choices = [],
     source = 'normal_input',
-    onRegenerate = null
+    onRegenerate = null,
+    onTranslate = null
   } = {}) => {
     const initialOriginal = text(original || '').trim();
     let currentChoices = Array.isArray(choices)
@@ -30738,14 +31403,21 @@ html,body{width:100%;height:100%;overflow:hidden}
           if (typeof guiApi?.hideContainer === 'function') await guiApi.hideContainer();
         } catch (_) {}
       };
-      const finish = async (action, content, choice = null) => {
+      const finish = async (action, content, choice = null, review = {}) => {
         if (settled || busy) return;
         settled = true;
         document.removeEventListener('keydown', keyHandler);
         const selected = text(content || '').trim();
-        recordNovelInputChoiceDecision(action, selected, choice);
+        recordNovelInputChoiceDecision(action, selected, choice, review);
         await restoreSurface();
-        resolve({ action, content: selected, choice: choice ? { ...choice } : null });
+        resolve({
+          action,
+          content: selected,
+          choice: choice ? { ...choice } : null,
+          edited: review.edited === true,
+          sourceEdited: review.sourceEdited === true,
+          translationLanguage: text(review.translationLanguage || '')
+        });
       };
       const close = async () => {
         if (sourceIsExplicitContinue || !initialOriginal) return await finish('cancelled', '', null);
@@ -30755,6 +31427,18 @@ html,body{width:100%;height:100%;overflow:hidden}
         if (event?.key === 'Escape') {
           event.preventDefault?.();
           void close();
+        }
+      };
+      const setBusy = (next, message = '') => {
+        busy = !!next;
+        app.classList.toggle('busy', busy);
+        for (const editor of Array.from(app.querySelectorAll('[data-input-choice-editor]'))) editor.disabled = busy;
+        regenerateButton.disabled = busy || typeof onRegenerate !== 'function';
+        closeButton.disabled = busy;
+        Runtime.inputAssistConfirmation = { ...(Runtime.inputAssistConfirmation || {}), regenerating: busy };
+        if (message) {
+          statusNode.textContent = message;
+          statusNode.classList.remove('err');
         }
       };
       const renderCards = () => {
@@ -30778,17 +31462,20 @@ html,body{width:100%;height:100%;overflow:hidden}
           if (!input) return;
           const perspective = normalizeNovelInputChoicePerspective(choice?.perspective || choice?.id || '');
           const def = NOVEL_INPUT_CHOICE_PERSPECTIVE_DEFS[perspective] || {};
-          const card = guiEl('section', {
-            style: { padding: '13px', border: '1px solid rgba(139,92,255,.32)', borderRadius: '14px', background: 'rgba(10,12,24,.80)', display: 'grid', gap: '8px' }
-          }, [
-            guiEl('div', { style: { display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center' } }, [
-              guiEl('strong', { text: `${index + 1}. ${choice.title || def.label || `선택지 ${index + 1}`}` }),
-              guiEl('span', { class: 'sga-badge', text: def.label || '관점' })
-            ]),
-            choice.summary ? guiEl('div', { class: 'sga-note', text: choice.summary }) : null,
-            guiEl('pre', { class: 'sga-input-confirm-text', text: input, style: { maxHeight: '180px', minHeight: '0', padding: '10px', borderRadius: '10px', background: 'rgba(5,9,17,.58)' } }),
-            guiEl('button', { class: 'sga-btn primary', text: '이 입력을 선택', onClick: () => { void finish(`novel_choice_${perspective || index + 1}`, input, choice); } })
-          ]);
+          const card = createEditableInputAssistChoiceCard({
+            choice,
+            index,
+            sourceValue: input,
+            title: `${index + 1}. ${choice.title || def.label || `선택지 ${index + 1}`}`,
+            badge: def.label || '관점',
+            summary: choice.summary || '',
+            actionLabel: '이 입력을 선택',
+            onTranslate,
+            statusNode,
+            isBusy: () => busy,
+            setBusy,
+            onSelect: review => { void finish(`novel_choice_${perspective || index + 1}`, review.content, choice, review); }
+          });
           bodyNode.appendChild(card);
         });
         if (currentChoices.length !== NOVEL_INPUT_CHOICE_TARGET) {
@@ -30797,11 +31484,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       };
       regenerateButton.addEventListener('click', async () => {
         if (busy || typeof onRegenerate !== 'function') return;
-        busy = true;
-        regenerateButton.disabled = true;
-        statusNode.textContent = '핵심 작가 의도와 명시적으로 고정한 사건·경계를 유지한 채 세 작가 관점 입력을 다시 만들고 있습니다…';
-        statusNode.classList.remove('err');
-        Runtime.inputAssistConfirmation = { ...(Runtime.inputAssistConfirmation || {}), regenerating: true };
+        setBusy(true, '핵심 작가 의도와 명시적으로 고정한 사건·경계를 유지한 채 세 작가 관점 입력을 다시 만들고 있습니다…');
         try {
           const next = await onRegenerate();
           const nextChoices = Array.isArray(next) ? next.filter(item => text(item?.input).trim()) : [];
@@ -30814,9 +31497,7 @@ html,body{width:100%;height:100%;overflow:hidden}
           statusNode.textContent = `선택지 재생성 실패: ${compact(error?.message || error, 500)}`;
           statusNode.classList.add('err');
         } finally {
-          busy = false;
-          regenerateButton.disabled = typeof onRegenerate !== 'function';
-          Runtime.inputAssistConfirmation = { ...(Runtime.inputAssistConfirmation || {}), regenerating: false };
+          setBusy(false);
         }
       });
       if (typeof onRegenerate !== 'function') regenerateButton.disabled = true;
@@ -32217,9 +32898,6 @@ html,body{width:100%;height:100%;overflow:hidden}
         continuation_created: parsed.continuationCreated ?? Runtime.lastInputAssist?.continuationCreated ?? false,
         delivery_fallback: parsed.deliveryFallback ?? Runtime.lastInputAssist?.deliveryFallback ?? false,
         delivery_fallback_reason: parsed.deliveryFallbackReason || Runtime.lastInputAssist?.deliveryFallbackReason || '',
-        auto_translated_english: parsed.autoTranslatedEnglish ?? Runtime.lastInputAssist?.autoTranslatedEnglish ?? false,
-        delivery_translation_failed: Runtime.lastInputAssist?.deliveryTranslationFailed ?? false,
-        delivery_translation_error: Runtime.lastInputAssist?.deliveryTranslationError || '',
         bypassed: parsed.bypassed ?? Runtime.lastInputAssist?.bypassed ?? false,
         existing_turn_kind: parsed.existingTurnKind || Runtime.lastInputAssist?.existingTurnKind || '',
         existing_assistant_after: parsed.existingAssistantAfter ?? Runtime.lastInputAssist?.existingAssistantAfter ?? false,
@@ -32770,13 +33448,6 @@ html,body{width:100%;height:100%;overflow:hidden}
     queueGuiRender(0);
   };
 
-  const applyInputAssistAlwaysTranslateEnglishToGui = value => {
-    const runtime = Gui.state.runtime || (Gui.state.runtime = {});
-    runtime.inputAssistAlwaysTranslateEnglish = asBool(value, false);
-    markGuiDirty();
-    queueGuiRender(0);
-  };
-
   const applyInputAssistLoreActivationModeToGui = mode => {
     const runtime = Gui.state.runtime || (Gui.state.runtime = {});
     runtime.inputAssistLoreActivationMode = normalizeInputAssistLoreActivationMode(mode);
@@ -32931,7 +33602,6 @@ html,body{width:100%;height:100%;overflow:hidden}
     runtime.inputAssistScope = 'full_pipeline';
     runtime.inputAssistTargetChars = DEFAULT_INPUT_ASSIST_TARGET_CHARS;
     runtime.inputAssistConfirmationMode = 'direct';
-    runtime.inputAssistAlwaysTranslateEnglish = false;
     runtime.inputAssistLoreActivationMode = DEFAULT_INPUT_ASSIST_LORE_ACTIVATION_MODE;
     runtime.informationTransferMode = 'draft_only';
     runtime.loreActivationMode = DEFAULT_LORE_ACTIVATION_MODE;
@@ -33520,7 +34190,6 @@ html,body{width:100%;height:100%;overflow:hidden}
     const mode = normalizeChoice(runtime.inputAssistMode || 'off', INPUT_ASSIST_MODES, 'off');
     const scope = normalizeChoice(runtime.inputAssistScope || 'full_pipeline', INPUT_ASSIST_SCOPES, 'full_pipeline');
     const targetChoice = inputAssistTargetChoice(runtime.inputAssistTargetChars);
-    const alwaysTranslateEnglish = runtime.inputAssistAlwaysTranslateEnglish === true;
     const loreActivationMode = normalizeInputAssistLoreActivationMode(runtime.inputAssistLoreActivationMode);
     const shadowDraftMode = normalizeShadowDraftMode(runtime.shadowDraftMode);
     const playerControlled = normalizeWritingMode(runtime.writingMode, writingModeFromDraftMode(shadowDraftMode)) === 'rp';
@@ -33572,14 +34241,6 @@ html,body{width:100%;height:100%;overflow:hidden}
               badge: '고정'
             })])
           : guiEl('div', { class: 'sga-callout', style: { marginTop: '14px' }, text: playerControlled ? '직접 입력 모드입니다. GRADIA는 유저 행동을 제안하거나 다시 쓰지 않습니다.' : '인풋 관리자가 꺼져 있어 별도 선택창을 사용하지 않습니다.' }),
-        guiEl('div', { style: { marginTop: '14px' } }, [
-          fieldNode('항상 영어로 번역', selectNode(alwaysTranslateEnglish ? 'true' : 'false', [
-            ['false', '사용 안 함'],
-            ['true', playerControlled ? '선택한 행동 후보를 영어로 번역' : '선택한 3관점 후보를 영어로 번역']
-          ], next => applyInputAssistAlwaysTranslateEnglishToGui(next)), alwaysTranslateEnglish
-            ? (playerControlled ? 'AI 행동 후보를 고른 경우 그 유저 입력만 영어로 번역합니다. 원본 입력을 고르면 실제 원문을 유지합니다.' : '세 작가 관점 후보 중 AI 후보를 선택한 경우 그 입력만 영어로 번역합니다. 원본 입력을 고르면 실제 원문을 유지합니다.')
-            : (playerControlled ? '행동 후보는 현재 대화 언어로 제안됩니다.' : '세 작가 관점 후보는 현재 대화 언어로 제안되며, 원본 입력도 별도 선택지로 유지됩니다.'))
-        ])
       ]),
       guiEl('div', { class: 'sga-card wide' }, [
         guiEl('div', { class: 'sga-agent-head' }, [
@@ -34431,7 +35092,6 @@ html,body{width:100%;height:100%;overflow:hidden}
       inputAssistScope: normalizeChoice(pick('input_assist_scope', 'inputAssistScope', current.inputAssistScope || 'full_pipeline'), INPUT_ASSIST_SCOPES, 'full_pipeline'),
       inputAssistTargetChars: normalizeInputAssistTargetChars(pick('input_assist_target_chars', 'inputAssistTargetChars', current.inputAssistTargetChars || DEFAULT_INPUT_ASSIST_TARGET_CHARS)),
       inputAssistConfirmationMode: normalizeChoice(pick('input_assist_confirmation_mode', 'inputAssistConfirmationMode', current.inputAssistConfirmationMode || 'direct'), INPUT_ASSIST_CONFIRMATION_MODES, 'direct'),
-      inputAssistAlwaysTranslateEnglish: asBool(pick('input_assist_always_translate_english', 'inputAssistAlwaysTranslateEnglish', current.inputAssistAlwaysTranslateEnglish), false),
       inputAssistLoreActivationMode: normalizeInputAssistLoreActivationMode(pick('input_assist_lore_activation_mode', 'inputAssistLoreActivationMode', current.inputAssistLoreActivationMode || DEFAULT_INPUT_ASSIST_LORE_ACTIVATION_MODE)),
       informationTransferMode: normalizeChoice(pick('information_transfer_mode', 'informationTransferMode', current.informationTransferMode || 'draft_only'), INFORMATION_TRANSFER_MODES, 'draft_only'),
       nsfwMode: normalizeNsfwMode(pick('nsfw_mode', 'nsfwMode', current.nsfwMode || DEFAULT_NSFW_MODE)),
@@ -34702,9 +35362,6 @@ html,body{width:100%;height:100%;overflow:hidden}
       recentTurns: Runtime.lastInputAssist.recentTurns || 0,
       deliveryFallback: Runtime.lastInputAssist.deliveryFallback === true,
       deliveryFallbackReason: Runtime.lastInputAssist.deliveryFallbackReason || '',
-      autoTranslatedEnglish: Runtime.lastInputAssist.autoTranslatedEnglish === true,
-      deliveryTranslationFailed: Runtime.lastInputAssist.deliveryTranslationFailed === true,
-      deliveryTranslationError: Runtime.lastInputAssist.deliveryTranslationError || '',
       originalPreview: compact(Runtime.lastInputAssist.original, 1200),
       rewrittenPreview: compact(Runtime.lastInputAssist.rewritten, 2400),
       deliveredInputPreview: compact(Runtime.lastInputAssist.deliveredInput, 2400),
@@ -35082,7 +35739,7 @@ html,body{width:100%;height:100%;overflow:hidden}
         guiEl('div', { class: 'sga-glance-card accent-blue' }, [guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '활성 단계' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Stages' })]), guiEl('div', { class: 'sga-glance-value', text: `${beforeEnabled}/4` }), guiEl('div', { class: 'sga-glance-label', text: '활성화된 주요 직렬 단계 수' })]),
         guiEl('div', { class: 'sga-glance-card' }, [guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '최대 대기 시간' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Wait' })]), guiEl('div', { class: 'sga-glance-value', text: `${Math.round(shadowSlot.timeoutMs / 1000)}초` }), guiEl('div', { class: 'sga-glance-label', text: 'SHADOW ACT 기준' })]),
         guiEl('div', { class: 'sga-glance-card accent-green' }, [guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '출력 방식' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Output' })]), guiEl('div', { class: 'sga-glance-value', text: runtime.outputMode === 'risu_engine' ? '확장' : '일반' }), guiEl('div', { class: 'sga-glance-label', text: '최종 응답 마무리 방식' })]),
-        guiEl('div', { class: 'sga-glance-card accent-purple' }, [guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '예상 호출' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Calls' })]), guiEl('div', { class: 'sga-glance-value', text: `${guiCallPlan.internalLogicalCalls} + 1` }), guiEl('div', { class: 'sga-glance-label', text: `초안 ${guiCallPlan.baseDraftCalls} · Input ${guiCallPlan.inputAssistCalls} · 번역 ${guiCallPlan.translationCalls} · Arc ${guiCallPlan.arcBoundaryCalls} · Engine ${guiCallPlan.risuEngineCalls} · 외부 메인 +1` })]),
+        guiEl('div', { class: 'sga-glance-card accent-purple' }, [guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: '예상 호출' }), guiEl('span', { class: 'sga-glance-kicker', text: 'Calls' })]), guiEl('div', { class: 'sga-glance-value', text: `${guiCallPlan.internalLogicalCalls} + 1` }), guiEl('div', { class: 'sga-glance-label', text: `초안 ${guiCallPlan.baseDraftCalls} · Input ${guiCallPlan.inputAssistCalls} · Arc ${guiCallPlan.arcBoundaryCalls} · Engine ${guiCallPlan.risuEngineCalls} · 외부 메인 +1` })]),
         guiEl('div', { class: 'sga-glance-card accent-amber' }, [guiEl('div', { class: 'sga-glance-top' }, [guiEl('span', { class: 'sga-glance-title', text: 'AI 연결' }), guiEl('span', { class: 'sga-glance-kicker', text: 'AI' })]), guiEl('div', { class: 'sga-glance-value', text: `${configuredProviders}/${providerNames.length}` }), guiEl('div', { class: 'sga-glance-label', text: '즉시 사용 가능한 프리셋' })])
       ]),
       guiEl('div', { class: 'sga-card wide' }, [
@@ -35187,7 +35844,7 @@ html,body{width:100%;height:100%;overflow:hidden}
         guiEl('div', { class: 'sga-glance-card accent-blue' }, [guiEl('div', { class: 'sga-glance-title', text: '속도와 품질' }), guiEl('div', { class: 'sga-glance-value', text: QUICK_PROFILE_DEFS[profile]?.label || '직접 조정' }), guiEl('div', { class: 'sga-glance-label', text: simpleProfileSummary(profile) })]),
         guiEl('div', { class: 'sga-glance-card accent-green' }, [guiEl('div', { class: 'sga-glance-title', text: '목표 분량' }), guiEl('div', { class: 'sga-glance-value', text: simpleLengthLabelForRuntime(runtime) }), guiEl('div', { class: 'sga-glance-label', text: 'SHADOW ACT 작성 목표' })]),
         guiEl('div', { class: 'sga-glance-card accent-amber' }, [guiEl('div', { class: 'sga-glance-title', text: 'AI 연결' }), guiEl('div', { class: 'sga-glance-value', text: `${configured}/${providerTotal}` }), guiEl('div', { class: 'sga-glance-label', text: '즉시 사용 가능한 연결' })]),
-        guiEl('div', { class: 'sga-glance-card accent-purple' }, [guiEl('div', { class: 'sga-glance-title', text: '예상 호출' }), guiEl('div', { class: 'sga-glance-value', text: `${callPlan.internalLogicalCalls} + 1` }), guiEl('div', { class: 'sga-glance-label', text: `초안 ${callPlan.baseDraftCalls} · Input ${callPlan.inputAssistCalls} · 번역 ${callPlan.translationCalls} · Arc ${callPlan.arcBoundaryCalls} · Engine ${callPlan.risuEngineCalls} · 외부 메인 +1` })])
+        guiEl('div', { class: 'sga-glance-card accent-purple' }, [guiEl('div', { class: 'sga-glance-title', text: '예상 호출' }), guiEl('div', { class: 'sga-glance-value', text: `${callPlan.internalLogicalCalls} + 1` }), guiEl('div', { class: 'sga-glance-label', text: `초안 ${callPlan.baseDraftCalls} · Input ${callPlan.inputAssistCalls} · Arc ${callPlan.arcBoundaryCalls} · Engine ${callPlan.risuEngineCalls} · 외부 메인 +1` })])
       ]),
       guiEl('div', { class: 'sga-card wide' }, [
         guiEl('div', { class: 'sga-agent-head' }, [guiEl('div', {}, [guiEl('h3', { text: '현재 처리 흐름' }), guiEl('div', { class: 'sga-note', text: '실제 실행 순서와 단계별 연결을 간결하게 표시합니다.' })]), guiEl('span', { class: `sga-badge ${Runtime.inFlight ? 'warn' : 'good'}`, dataset: { runtimePipeline: 'true' }, text: Runtime.inFlight ? '실행 중' : '대기 중' })]),
@@ -37496,8 +38153,6 @@ const buildNarrativeArchiveViewerPage = () => {
         terminalLockRequired: Runtime.lastInputAssist.terminalLockRequired === true,
         deliveryFallback: Runtime.lastInputAssist.deliveryFallback === true,
         deliveryFallbackReason: Runtime.lastInputAssist.deliveryFallbackReason || '',
-        deliveryTranslationFailed: Runtime.lastInputAssist.deliveryTranslationFailed === true,
-        deliveryTranslationError: Runtime.lastInputAssist.deliveryTranslationError || '',
         continuationCue: Runtime.lastInputAssist.continuationCue === true,
         continuationCueKind: Runtime.lastInputAssist.continuationCueKind || '',
         continuationCreated: Runtime.lastInputAssist.continuationCreated === true,
@@ -37509,8 +38164,6 @@ const buildNarrativeArchiveViewerPage = () => {
         deliverySource: Runtime.lastInputAssist.deliverySource || '',
         deliveredGenerated: Runtime.lastInputAssist.deliveredGenerated === true,
         staticSnapshotReuse: Runtime.lastInputAssist.staticSnapshotReuse || null,
-        autoTranslatedEnglish: Runtime.lastInputAssist.autoTranslatedEnglish === true,
-        preTranslationRewritten: Runtime.lastInputAssist.preTranslationRewritten || '',
         references: Runtime.lastInputAssist.references,
         risuContextAvailable: Runtime.lastInputAssist.risuContextAvailable,
         risuContextChars: Runtime.lastInputAssist.risuContextChars,
@@ -37559,11 +38212,31 @@ const buildNarrativeArchiveViewerPage = () => {
         canUseOriginal: source !== 'explicit_continue_button'
       })));
     },
+    async debugAuthorDirectedInputChoicePicker(original = 'original', choices = []) {
+      return JSON.parse(JSON.stringify(await showAuthorDirectedInputChoicePicker({
+        original,
+        choices,
+        source: 'debug_author_choice',
+        onTranslate: async (value, targetLanguage) => `[${targetLanguage}] ${text(value)}`
+      })));
+    },
+    async debugNovelInputChoicePicker(original = 'original', choices = []) {
+      return JSON.parse(JSON.stringify(await showNovelInputChoicePicker({
+        original,
+        choices,
+        source: 'debug_novel_choice',
+        onTranslate: async (value, targetLanguage) => `[${targetLanguage}] ${text(value)}`
+      })));
+    },
+    async debugInputAssistDeliveryPicker(generated = 'generated input') {
+      return JSON.parse(JSON.stringify(await showInputAssistDeliveryPicker(generated, {
+        onTranslate: async (value, targetLanguage) => `[${targetLanguage}] ${text(value)}`
+      })));
+    },
     debugInputAssistDeliverySettings(value = {}) {
       const normalized = normalizeRuntimeRecord(value || {});
       return {
-        confirmationMode: normalizeChoice(normalized.input_assist_confirmation_mode || 'direct', INPUT_ASSIST_CONFIRMATION_MODES, 'direct'),
-        alwaysTranslateEnglish: asBool(normalized.input_assist_always_translate_english, false)
+        confirmationMode: normalizeChoice(normalized.input_assist_confirmation_mode || 'direct', INPUT_ASSIST_CONFIRMATION_MODES, 'direct')
       };
     },
     debugResolveInputAssistDeliveryPlan(original = '', rewritten = '', settings = {}, lastResult = null) {
@@ -38949,20 +39622,13 @@ const buildNarrativeArchiveViewerPage = () => {
                 onRegenerate: async () => {
                   await runInputAssistForContent(content, settings, { source: 'normal_input_author_choice_regenerate' });
                   return Array.isArray(Runtime.lastInputAssist?.authorChoices) ? Runtime.lastInputAssist.authorChoices : [];
-                }
+                },
+                onTranslate: async (value, targetLanguage) => (
+                  await translateInputAssistReviewText(value, settings, targetLanguage)
+                )
               });
               rewritten = text(reviewed.content || '');
-              let deliverySource = reviewed.action || 'author_choice_unknown';
-              const selectedAiProposal = !!reviewed.choice;
-              if (selectedAiProposal && settings.inputAssistAlwaysTranslateEnglish === true && rewritten.trim()) {
-                await updatePipelineWorkPanel('선택한 유저 행동 입력을 영어로 번역하고 있습니다…', 'input_assist_translation');
-                try {
-                  rewritten = await translateInputAssistReviewTextToEnglish(rewritten, settings);
-                  deliverySource = `${deliverySource}_translated`;
-                } catch (translationError) {
-                  warn('author_choice_translation_failed', translationError);
-                }
-              }
+              const deliverySource = reviewed.action || 'author_choice_unknown';
               rewritten = finalizeInputAssistDelivery(rewritten, deliverySource, settings);
               await updatePipelineWorkPanel(
                 reviewed.choice ? '유저 행동 선택 완료 · 그 행동 이후 NPC·세계 반응 파이프라인을 시작합니다.' : '원본 유저 입력 유지 · 그 행동 이후 NPC·세계 반응 파이프라인을 시작합니다.',
@@ -38992,20 +39658,13 @@ const buildNarrativeArchiveViewerPage = () => {
                 onRegenerate: async () => {
                   await runInputAssistForContent(content, settings, { source: 'normal_input_novel_choice_regenerate' });
                   return Array.isArray(Runtime.lastInputAssist?.novelChoices) ? Runtime.lastInputAssist.novelChoices : [];
-                }
+                },
+                onTranslate: async (value, targetLanguage) => (
+                  await translateInputAssistReviewText(value, settings, targetLanguage)
+                )
               });
               rewritten = text(reviewed.content || '');
-              let deliverySource = reviewed.action || 'novel_choice_unknown';
-              const selectedAiProposal = !!reviewed.choice;
-              if (selectedAiProposal && settings.inputAssistAlwaysTranslateEnglish === true && rewritten.trim()) {
-                await updatePipelineWorkPanel('선택한 인풋을 영어로 번역하고 있습니다…', 'input_assist_translation');
-                try {
-                  rewritten = await translateInputAssistReviewTextToEnglish(rewritten, settings);
-                  deliverySource = `${deliverySource}_translated`;
-                } catch (translationError) {
-                  warn('novel_input_choice_translation_failed', translationError);
-                }
-              }
+              const deliverySource = reviewed.action || 'novel_choice_unknown';
               rewritten = finalizeInputAssistDelivery(rewritten, deliverySource, settings);
               await updatePipelineWorkPanel(
                 reviewed.choice ? `인풋 선택 완료 · ${NOVEL_INPUT_CHOICE_PERSPECTIVE_DEFS[reviewed.choice.perspective]?.label || '선택한 관점'}으로 초안 파이프라인을 시작합니다.` : '원본 입력 유지 · 초안 파이프라인을 시작합니다.',
@@ -39033,27 +39692,6 @@ const buildNarrativeArchiveViewerPage = () => {
               Runtime.lastInputAssist.trace.parsed.outputChars = text(rewritten).length;
             }
           }
-          let deliveryTranslationError = '';
-          if (deliveryPlan.shouldTranslate) {
-            await updatePipelineWorkPanel(
-              deliveryPlan.fallbackUsed
-                ? '인풋 확장 실패 · 원본 폴백을 영어로 번역하고 있습니다…'
-                : '확장된 인풋을 영어로 번역하고 있습니다…',
-              'input_assist_translation'
-            );
-            try {
-              rewritten = await prepareInputAssistExpandedForDelivery(rewritten, settings, deliveryPlan);
-              deliverySource = deliveryPlan.fallbackUsed ? 'fallback_translated' : 'generated_translated';
-            } catch (translationError) {
-              deliveryTranslationError = compact(translationError?.message || translationError, 500);
-              warn('input_assist_delivery_translation_failed', deliveryTranslationError);
-              if (Runtime.lastInputAssist) {
-                Runtime.lastInputAssist.deliveryTranslationFailed = true;
-                Runtime.lastInputAssist.deliveryTranslationError = deliveryTranslationError;
-              }
-              rewritten = deliveryPlan.deliveryBase;
-            }
-          }
           if (deliveryPlan.shouldConfirm && !!text(rewritten).trim()) {
             await updatePipelineWorkPanel(
               deliveryPlan.fallbackUsed
@@ -39062,7 +39700,7 @@ const buildNarrativeArchiveViewerPage = () => {
               'input_assist_confirmation'
             );
             const fallbackNotice = deliveryPlan.fallbackUsed
-              ? `인풋 확장에 실패하여 원본을 폴백 후보로 준비했습니다.${deliveryPlan.shouldTranslate && !deliveryTranslationError ? ' 오른쪽 폴백 메시지는 영어로 번역되었습니다.' : ''}${deliveryTranslationError ? ` 영어 번역도 실패했습니다: ${deliveryTranslationError}` : ''} 자동 전송하지 않으므로 원하는 쪽을 선택하거나 재생성하세요. 확장 실패 원인: ${compact(deliveryPlan.fallbackReason, 320)}`
+              ? `인풋 확장에 실패하여 원본을 폴백 후보로 준비했습니다. 자동 전송하지 않으므로 원하는 쪽을 선택하거나 재생성하세요. 확장 실패 원인: ${compact(deliveryPlan.fallbackReason, 320)}`
               : '';
             const reviewed = await showInputAssistConfirmation({
               original: content,
@@ -39070,16 +39708,14 @@ const buildNarrativeArchiveViewerPage = () => {
               source: 'normal_input',
               canUseOriginal: true,
               notice: fallbackNotice,
-              expandedTitle: deliveryPlan.fallbackUsed
-                ? (deliveryPlan.shouldTranslate && !deliveryTranslationError ? '폴백 메시지 · 영어 번역' : '폴백 메시지')
-                : '확장 메시지',
+              expandedTitle: deliveryPlan.fallbackUsed ? '폴백 메시지' : '확장 메시지',
               expandedActionLabel: deliveryPlan.fallbackUsed ? '폴백 메시지 보내기' : '확장 메시지 보내기',
               onRegenerate: async () => {
                 const next = await runInputAssistForContent(content, settings, {
                   source: 'normal_input_regenerate'
                 });
                 const nextPlan = resolveInputAssistDeliveryPlan(content, next, settings);
-                return await prepareInputAssistExpandedForDelivery(nextPlan.deliveryBase, settings, nextPlan);
+                return nextPlan.deliveryBase;
               },
               onTranslate: async (value, targetLanguage) => (
                 await translateInputAssistReviewText(value, settings, targetLanguage)
@@ -39265,6 +39901,12 @@ const buildNarrativeArchiveViewerPage = () => {
       StageLoreRerankerFeatureCache.clear();
       SkillRouterScoreCache.clear();
       Runtime.skillRoutes = {};
+      try {
+        if (globalThis.__SerialGradationAgentsForRP === publicApi) delete globalThis.__SerialGradationAgentsForRP;
+      } catch (_) {}
+      try {
+        if (globalThis.__ShadowActSerialAIDE === publicApi) delete globalThis.__ShadowActSerialAIDE;
+      } catch (_) {}
     };
     try {
       if (typeof API.onUnload === 'function') { await API.onUnload(unload); Runtime.hookStatus.unload = true; }
