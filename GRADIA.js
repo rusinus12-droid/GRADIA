@@ -1,9 +1,9 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.47
+//@display-name GRADIA v0.25.51
 //@api 3.0
-//@version 0.25.47
+//@version 0.25.51
 
-/* v0.25.47 preserves RE:TRACE includePayload=false through the public runtime fallback so failed IPC discovery cannot hydrate the full Story Arc/Writer/Narrative Archive payload; v0.25.46 keeps Narrative Archive documents and compact vector sketches in pluginStorage while moving rebuildable full Float32 vectors into SafeLocalPluginStorage for lazy candidate-only loading. */
+/* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
 //@allowed-ipc flashback_hayaku_bridge
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/GRADIA/main/GRADIA.js
 //@arg mode string off|lite|normal
@@ -818,6 +818,10 @@
  * v0.25.42 simplifies the Story Arc next-five beat editor without changing its storage schema or Arc Director logic. User-facing cards now use plain Korean labels, show only the core scene plan by default, translate internal enum values into readable descriptions, and move seed/completion/variation/regeneration controls into a collapsed detail section.
  * v0.25.43 fixes the Story Arc controlled-variation editor's non-reactive checkbox. Toggling variation now immediately enables/disables the variation-kind selector and shows/hides its rationale field without rebuilding the settings GUI; newly enabled empty variation kinds default to minor_complication while draft values stay intact during the edit session.
  * v0.25.44 adds a dedicated Narrative Archive viewer under Reference Materials and turns the actual-story Beat Ledger into an inspectable, recoverable data layer. Archive entries expose their five-turn narrative snapshots, vector/recall state, and evidence without exposing vector payloads. Beat Ledger output now has an explicit object schema, string responses are salvaged instead of erased, new empty history-N placeholders are rejected, and a manual canonical-history repair rebuilds only historical ledger/compressed-history data while preserving the current destination, continuity state, and next-five plan; changed Archive ledger sections are repaired and their vectors marked for manual regeneration.
+ * v0.25.48 merges the button-only Input Writer branch into the current canonical storage/RE:TRACE line. The chat action is now “GRADIA로 인풋 작성하기”: an empty composer runs scene continuation, non-empty text runs Input Assist expansion, RP/Novel keep their existing choice flows, and the completed input can be sent directly or copied for manual send. The legacy automatic RisuAI input hook is kept in code but is no longer registered, so ordinary RisuAI sends never trigger Input Assist automatically.
+ * v0.25.49 defines the missing canUseInputAssistConfirmationGui capability probe used by the explicit composer and delivery picker. It fails soft to promptInput/direct delivery when the plugin container GUI is unavailable, instead of throwing ReferenceError before Input Assist starts.
+ * v0.25.50 separates the explicit Input Writer composer and delivery picker from the full-size confirmation layout. Compact modal surfaces now size to their actual content instead of inheriting the 760px choice-review canvas, while RP/Novel multi-choice review keeps the large comparison workspace.
+ * v0.25.51 fixes copy/manual-send clipboard delivery in iframe/WebView runtimes. The copy action now runs inside the originating button click before any modal restore/hide await can consume transient user activation; it tries synchronous selection/execCommand first, then navigator.clipboard, records the method for diagnostics, and keeps the dialog open with the generated text selected when browser policy blocks automated copying.
  *
  * v0.25.23 hardens those contracts after review: unavailable or cross-chat Arc state now
  * fails closed, Arc call estimates distinguish a due boundary from an already-processed
@@ -905,7 +909,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.47';
+  const PLUGIN_VERSION = '0.25.51';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -21179,6 +21183,63 @@ function mergeAgentCbsWarnings(...warningLists) {
     return translated;
   };
 
+  const copyInputAssistTextToClipboard = async value => {
+    const body = text(value || '').trim();
+    if (!body) throw new Error('복사할 인풋이 비어 있습니다.');
+    const userActivation = (() => {
+      try { return typeof navigator !== 'undefined' && navigator.userActivation ? navigator.userActivation.isActive === true : null; }
+      catch (_) { return null; }
+    })();
+    let lastError = '';
+
+    // This function is called directly from the delivery button click. Keep a
+    // synchronous copy path first so iframe/WebView runtimes can use the click's
+    // transient user activation before any asynchronous browser work consumes it.
+    if (typeof document !== 'undefined' && document.body) {
+      const area = document.createElement('textarea');
+      area.value = body;
+      area.setAttribute('readonly', 'readonly');
+      area.setAttribute('aria-hidden', 'true');
+      area.style.position = 'fixed';
+      area.style.left = '-9999px';
+      area.style.top = '0';
+      area.style.width = '1px';
+      area.style.height = '1px';
+      document.body.appendChild(area);
+      try {
+        area.focus();
+        area.select();
+        if (typeof area.setSelectionRange === 'function') area.setSelectionRange(0, area.value.length);
+        const copied = typeof document.execCommand === 'function' && document.execCommand('copy') === true;
+        if (copied) {
+          try { area.remove(); } catch (_) { if (area.parentNode) area.parentNode.removeChild(area); }
+          return { ok: true, method: 'execCommand', userActivation };
+        }
+      } catch (error) {
+        lastError = error?.message || String(error);
+        warn('input_assist_execcommand_copy_failed', error);
+      }
+      try { area.remove(); } catch (_) { if (area.parentNode) area.parentNode.removeChild(area); }
+    }
+
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function') {
+        await navigator.clipboard.writeText(body);
+        return { ok: true, method: 'clipboard', userActivation };
+      }
+    } catch (error) {
+      lastError = lastError || error?.message || String(error);
+      warn('input_assist_clipboard_api_failed', error);
+    }
+
+    return {
+      ok: false,
+      method: '',
+      userActivation,
+      error: lastError || 'Clipboard API is unavailable or blocked by this iframe/WebView policy.'
+    };
+  };
+
   let InputAssistContinuePanelTimer = null;
   let InputAssistContinuePanelEpoch = 0;
   let InputAssistContinueCancelBinding = null;
@@ -21448,184 +21509,349 @@ function mergeAgentCbsWarnings(...warningLists) {
     }
   };
 
+  const canUseInputAssistConfirmationGui = async () => {
+    try {
+      if (typeof document === 'undefined') return false;
+      if (!document.documentElement) return false;
+      if (!document.body) {
+        await new Promise(resolve => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            try { document.removeEventListener?.('DOMContentLoaded', finish); } catch (_) {}
+            resolve();
+          };
+          try {
+            if (document.readyState === 'loading') document.addEventListener?.('DOMContentLoaded', finish, { once: true });
+            else finish();
+          } catch (_) { finish(); }
+          setTimeout(finish, 250);
+        });
+      }
+      if (!document.body) return false;
+      const guiApi = getLiveApi(['showContainer']);
+      if (typeof guiApi?.showContainer !== 'function') return false;
+      return true;
+    } catch (error) {
+      warn('input_assist_confirmation_gui_probe_failed', error);
+      return false;
+    }
+  };
+
+  const setCompactInputAssistModalSurface = (enabled = true) => {
+    try {
+      const root = document?.getElementById?.('sga-rp-gui-root') || Gui.root;
+      if (!root?.classList) return false;
+      root.classList.toggle('sga-compact-modal-root', enabled === true);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const showInputAssistComposer = async () => {
+    const guiReady = await canUseInputAssistConfirmationGui();
+    if (!guiReady) {
+      const promptApi = getLiveApi(['promptInput']);
+      if (typeof promptApi?.promptInput === 'function') {
+        const value = await promptApi.promptInput('GRADIA로 인풋 작성하기', '비워 두면 직전 상황 이어가기, 내용을 입력하면 인풋 확장으로 작동합니다.', '');
+        return value === null || value === undefined ? null : text(value);
+      }
+      throw new Error('GRADIA 인풋 작성창을 표시할 수 없습니다.');
+    }
+    const settingsWasVisible = Gui.visible === true;
+    try {
+      const guiApi = getLiveApi(['showContainer']);
+      if (typeof guiApi?.showContainer === 'function') await guiApi.showContainer('fullscreen');
+    } catch (_) {}
+    if (!Gui.root || !document.getElementById('sga-rp-gui-root')) await initSettingsGui();
+    setCompactInputAssistModalSurface(true);
+    Gui.visible = true;
+    Gui.confirmationVisible = true;
+    const clearRoot = () => {
+      if (typeof Gui.root.replaceChildren === 'function') Gui.root.replaceChildren();
+      else while (Gui.root.firstChild) Gui.root.removeChild(Gui.root.firstChild);
+    };
+    clearRoot();
+    return await new Promise(resolve => {
+      let settled = false;
+      const app = guiEl('div', { class: 'sga-input-compact-app' });
+      const card = guiEl('section', { class: 'sga-card wide', style: { width: '100%', margin: '0', padding: '18px', display: 'grid', gap: '14px' } });
+      const textarea = guiEl('textarea', {
+        placeholder: '비워 두면 직전 상황 이어가기\n내용을 입력하면 해당 인풋을 확장합니다.',
+        style: { width: '100%', minHeight: '180px', resize: 'vertical', boxSizing: 'border-box', padding: '14px', borderRadius: '12px', font: 'inherit' }
+      });
+      const restore = async () => {
+        Gui.confirmationVisible = false;
+        Gui.app = null;
+        setCompactInputAssistModalSurface(false);
+        clearRoot();
+        if (settingsWasVisible) {
+          Gui.visible = true;
+          await ensureGuiState(true);
+          await renderSettingsGui();
+          forceTransparentGuiSurface();
+        } else {
+          Gui.visible = false;
+          try {
+            const guiApi = getLiveApi(['hideContainer']);
+            if (typeof guiApi?.hideContainer === 'function') await guiApi.hideContainer();
+          } catch (_) {}
+        }
+      };
+      const finish = async value => {
+        if (settled) return;
+        settled = true;
+        document.removeEventListener('keydown', keyHandler);
+        await restore();
+        resolve(value);
+      };
+      const keyHandler = event => {
+        if (event?.key === 'Escape') { event.preventDefault?.(); void finish(null); }
+        if ((event?.ctrlKey || event?.metaKey) && event?.key === 'Enter') { event.preventDefault?.(); void finish(textarea.value || ''); }
+      };
+      document.addEventListener('keydown', keyHandler);
+      card.appendChild(guiEl('div', {}, [
+        guiEl('h2', { text: 'GRADIA로 인풋 작성하기' }),
+        guiEl('p', { class: 'sga-note', text: '아무것도 입력하지 않고 진행하면 직전 상황 이어가기, 내용을 입력하면 인풋 확장으로 작동합니다.' })
+      ]));
+      card.appendChild(textarea);
+      card.appendChild(guiEl('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' } }, [
+        guiEl('button', { class: 'sga-btn ghost', text: '취소', onClick: () => { void finish(null); } }),
+        guiEl('button', { class: 'sga-btn primary', text: '진행', onClick: () => { void finish(textarea.value || ''); } })
+      ]));
+      app.appendChild(card);
+      Gui.app = app;
+      Gui.root.appendChild(app);
+      forceTransparentGuiSurface();
+      setTimeout(() => { try { textarea.focus(); } catch (_) {} }, 0);
+    });
+  };
+
+  const showInputAssistDeliveryPicker = async generated => {
+    const body = text(generated || '').trim();
+    if (!body) return 'cancelled';
+    const guiReady = await canUseInputAssistConfirmationGui();
+    if (!guiReady) return 'direct';
+    const settingsWasVisible = Gui.visible === true;
+    try {
+      const guiApi = getLiveApi(['showContainer']);
+      if (typeof guiApi?.showContainer === 'function') await guiApi.showContainer('fullscreen');
+    } catch (_) {}
+    if (!Gui.root || !document.getElementById('sga-rp-gui-root')) await initSettingsGui();
+    setCompactInputAssistModalSurface(true);
+    Gui.visible = true;
+    Gui.confirmationVisible = true;
+    const clearRoot = () => {
+      if (typeof Gui.root.replaceChildren === 'function') Gui.root.replaceChildren();
+      else while (Gui.root.firstChild) Gui.root.removeChild(Gui.root.firstChild);
+    };
+    clearRoot();
+    return await new Promise(resolve => {
+      let settled = false;
+      const restore = async () => {
+        Gui.confirmationVisible = false;
+        Gui.app = null;
+        setCompactInputAssistModalSurface(false);
+        clearRoot();
+        if (settingsWasVisible) {
+          Gui.visible = true;
+          await ensureGuiState(true);
+          await renderSettingsGui();
+          forceTransparentGuiSurface();
+        } else {
+          Gui.visible = false;
+          try {
+            const guiApi = getLiveApi(['hideContainer']);
+            if (typeof guiApi?.hideContainer === 'function') await guiApi.hideContainer();
+          } catch (_) {}
+        }
+      };
+      const finish = async decision => {
+        if (settled) return;
+        settled = true;
+        await restore();
+        resolve(decision);
+      };
+      const preview = guiEl('textarea', {
+        class: 'sga-textarea',
+        value: body,
+        readonly: true,
+        style: { width: '100%', minHeight: '180px', maxHeight: '360px', padding: '12px', borderRadius: '10px', resize: 'vertical', background: 'rgba(5,9,17,.58)' }
+      });
+      const copyStatus = guiEl('div', {
+        class: 'sga-note',
+        text: '',
+        style: { minHeight: '18px', margin: '0', color: 'var(--sga-muted)' }
+      });
+      let copyButton = null;
+      const onCopy = async () => {
+        if (settled || copyButton?.disabled) return;
+        if (copyButton) copyButton.disabled = true;
+        copyStatus.textContent = '클립보드에 복사하고 있습니다…';
+        copyStatus.style.color = 'var(--sga-muted)';
+
+        // IMPORTANT: perform the clipboard action before restore()/hideContainer().
+        // Clipboard APIs commonly require the transient activation from this click.
+        const copied = await copyInputAssistTextToClipboard(body);
+        if (copied?.ok) {
+          if (Runtime.lastInputAssist) {
+            Runtime.lastInputAssist.clipboardCopyMethod = copied.method || '';
+            Runtime.lastInputAssist.clipboardUserActivation = copied.userActivation;
+          }
+          copyStatus.textContent = copied.method === 'execCommand'
+            ? '복사 완료 · 호환 복사 방식을 사용했습니다.'
+            : '복사 완료 · 클립보드 API를 사용했습니다.';
+          await finish('copy');
+          return;
+        }
+
+        const activationNote = copied?.userActivation === false ? ' 클릭 권한이 이미 소진된 상태였습니다.' : '';
+        copyStatus.textContent = `자동 복사가 차단되었습니다.${activationNote} 아래 인풋 전체를 선택해 Ctrl/Cmd+C로 복사해 주세요.`;
+        copyStatus.style.color = '#ff9aa7';
+        try {
+          preview.focus();
+          preview.select();
+          if (typeof preview.setSelectionRange === 'function') preview.setSelectionRange(0, preview.value.length);
+        } catch (_) {}
+        warn('input_assist_clipboard_copy_unavailable', copied?.error || 'unknown');
+        if (copyButton) copyButton.disabled = false;
+      };
+      copyButton = guiEl('button', { class: 'sga-btn ghost', text: '복사 후 직접 전송', onClick: () => { void onCopy(); } });
+      const app = guiEl('div', { class: 'sga-input-compact-app wide' });
+      const card = guiEl('section', { class: 'sga-card wide', style: { width: '100%', margin: '0', padding: '18px', display: 'grid', gap: '14px' } }, [
+        guiEl('div', {}, [
+          guiEl('h2', { text: '작성된 인풋 전송 방식' }),
+          guiEl('p', { class: 'sga-note', text: '작성된 인풋을 바로 전송하거나, 클립보드에 복사한 뒤 직접 입력창에서 전송할 수 있습니다.' })
+        ]),
+        preview,
+        copyStatus,
+        guiEl('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' } }, [
+          guiEl('button', { class: 'sga-btn ghost', text: '취소', onClick: () => { void finish('cancelled'); } }),
+          copyButton,
+          guiEl('button', { class: 'sga-btn primary', text: '바로 전송', onClick: () => { void finish('direct'); } })
+        ])
+      ]);
+      app.appendChild(card);
+      Gui.app = app;
+      Gui.root.appendChild(app);
+      forceTransparentGuiSurface();
+    });
+  };
+
   const runExplicitInputAssistContinue = async () => {
     if (Runtime.inFlight) {
       await notifyInputAssistContinueError('현재 GRADIA 초안 파이프라인이 끝난 뒤 다시 시도하세요.');
       return false;
     }
     if (Runtime.inputAssistSend?.busy) {
-      await notifyInputAssistContinueError('이미 상황 이어가기 입력을 작성하고 있습니다.');
+      await notifyInputAssistContinueError('이미 GRADIA 인풋을 작성하고 있습니다.');
       return false;
     }
+    let composerInput;
+    try {
+      composerInput = await showInputAssistComposer();
+    } catch (error) {
+      await notifyInputAssistContinueError(error?.message || error);
+      return false;
+    }
+    if (composerInput === null) return false;
+    const originalInput = text(composerInput || '').trim();
+    const continuationMode = !originalInput;
     const requestId = (Number(Runtime.inputAssistSend?.requestId) || 0) + 1;
     Runtime.inputAssistSend = {
-      busy: true,
-      phase: 'generating',
-      requestId,
-      cancelRequested: false,
-      cancelled: false,
-      lastAt: Date.now(),
-      ok: null,
-      reason: '',
-      generated: ''
+      busy: true, phase: 'generating', requestId, cancelRequested: false, cancelled: false,
+      lastAt: Date.now(), ok: null, reason: '', generated: ''
     };
-    await setInputAssistContinuePanel('직전 장면을 바탕으로 이어질 입력을 작성하고 있습니다…', 'working', 0, true);
+    await setInputAssistContinuePanel(
+      continuationMode ? '직전 장면을 바탕으로 이어질 인풋을 작성하고 있습니다…' : '작성한 인풋을 바탕으로 확장안을 만들고 있습니다…',
+      'working', 0, true
+    );
     try {
       const settings = await loadSettings();
-      if (settings.inputAssistMode === 'off') {
-        throw new Error('쉬운 설정에서 인풋 관리자 모드를 먼저 선택해 주세요.');
-      }
-      if (isAuthorDirectedDraftMode(settings)) {
-        await setInputAssistContinuePanel('현재 장면에서 가능한 유저 행동 선택지를 제안하고 있습니다…', 'working', 0, true);
-      } else {
-        await setInputAssistContinuePanel('현재 장면을 주인공·현장 인물·세계/외부 인물의 세 작가 관점으로 이어갈 방향을 제안하고 있습니다…', 'working', 0, true);
-      }
+      if (settings.inputAssistMode === 'off') throw new Error('쉬운 설정에서 인풋 관리자 모드를 먼저 선택해 주세요.');
       if (inputAssistContinueCancelled(requestId)) throw inputAssistContinueCancellationError();
-      const sendApi = getLiveApi(['sendChat']);
-      if (typeof sendApi?.sendChat !== 'function') {
-        throw new Error('현재 RisuAI에서 플러그인 sendChat API를 사용할 수 없습니다.');
-      }
-      const permissionApi = getLiveApi(['requestPluginPermission']);
-      if (typeof permissionApi?.requestPluginPermission === 'function') {
-        const granted = await permissionApi.requestPluginPermission('sendChat');
-        if (granted === false) throw new Error('GRADIA의 채팅 전송 권한이 거부되었습니다.');
-      }
-      if (inputAssistContinueCancelled(requestId)) throw inputAssistContinueCancellationError();
-      let generated = await runInputAssistForContent('', settings, {
-        source: 'explicit_continue_button',
+      let generated = await runInputAssistForContent(originalInput, settings, {
+        source: continuationMode ? 'explicit_continue_button' : 'explicit_input_writer',
         telemetryNewCycle: true
       });
       if (inputAssistContinueCancelled(requestId)) throw inputAssistContinueCancellationError();
       const authorChoiceAssist = isAuthorDirectedDraftMode(settings)
         && normalizeChoice(settings.inputAssistMode || 'off', INPUT_ASSIST_MODES, 'off') !== 'off';
       if (authorChoiceAssist) {
-        const choices = Array.isArray(Runtime.lastInputAssist?.authorChoices)
-          ? Runtime.lastInputAssist.authorChoices
-          : [];
-        if (Runtime.lastInputAssist?.ok !== true || choices.length < 2) {
-          throw new Error(Runtime.lastInputAssist?.reason || '유저 행동 선택지를 충분히 만들지 못했습니다.');
-        }
-        Runtime.inputAssistSend = {
-          ...Runtime.inputAssistSend,
-          phase: 'confirming',
-          generated: ''
-        };
-        await setInputAssistContinuePanel('선택지 생성 완료 · 다음 장면 방향을 직접 선택하세요.', 'working', 0, false);
+        const choices = Array.isArray(Runtime.lastInputAssist?.authorChoices) ? Runtime.lastInputAssist.authorChoices : [];
+        if (Runtime.lastInputAssist?.ok !== true || choices.length < 2) throw new Error(Runtime.lastInputAssist?.reason || '유저 행동 선택지를 충분히 만들지 못했습니다.');
+        Runtime.inputAssistSend = { ...Runtime.inputAssistSend, phase: 'confirming', generated: '' };
+        await setInputAssistContinuePanel('선택지 생성 완료 · 사용할 인풋을 직접 선택하세요.', 'working', 0, false);
         const reviewed = await showAuthorDirectedInputChoicePicker({
-          original: '',
+          original: originalInput,
           choices,
-          source: 'explicit_continue_button',
+          source: continuationMode ? 'explicit_continue_button' : 'explicit_input_writer',
           onRegenerate: async () => {
-            await runInputAssistForContent('', settings, { source: 'explicit_continue_author_choice_regenerate' });
+            await runInputAssistForContent(originalInput, settings, { source: continuationMode ? 'explicit_continue_author_choice_regenerate' : 'explicit_input_writer_author_choice_regenerate' });
             return Array.isArray(Runtime.lastInputAssist?.authorChoices) ? Runtime.lastInputAssist.authorChoices : [];
           }
         });
         if (reviewed.action === 'cancelled' || !text(reviewed.content).trim()) throw inputAssistContinueCancellationError();
         generated = text(reviewed.content).trim();
-        if (settings.inputAssistAlwaysTranslateEnglish === true) {
-          generated = await translateInputAssistReviewTextToEnglish(generated, settings);
-          if (Runtime.lastInputAssist) Runtime.lastInputAssist.autoTranslatedEnglish = true;
-        }
       } else {
-        const novelChoices = Array.isArray(Runtime.lastInputAssist?.novelChoices)
-          ? Runtime.lastInputAssist.novelChoices
-          : [];
-        if (Runtime.lastInputAssist?.ok !== true || novelChoices.length !== NOVEL_INPUT_CHOICE_TARGET) {
-          throw new Error(Runtime.lastInputAssist?.reason || '소설 모드의 세 작가 관점 이어쓰기 선택지를 모두 만들지 못했습니다.');
-        }
-        Runtime.inputAssistSend = {
-          ...Runtime.inputAssistSend,
-          phase: 'confirming',
-          generated: ''
-        };
-        await setInputAssistContinuePanel('세 작가 관점 선택지 생성 완료 · 이어갈 방향을 직접 선택하세요.', 'working', 0, false);
+        const choices = Array.isArray(Runtime.lastInputAssist?.novelChoices) ? Runtime.lastInputAssist.novelChoices : [];
+        if (Runtime.lastInputAssist?.ok !== true || choices.length !== NOVEL_INPUT_CHOICE_TARGET) throw new Error(Runtime.lastInputAssist?.reason || '소설 모드의 세 작가 관점 선택지를 모두 만들지 못했습니다.');
+        Runtime.inputAssistSend = { ...Runtime.inputAssistSend, phase: 'confirming', generated: '' };
+        await setInputAssistContinuePanel('세 작가 관점 선택지 생성 완료 · 사용할 인풋을 직접 선택하세요.', 'working', 0, false);
         const reviewed = await showNovelInputChoicePicker({
-          original: '',
-          choices: novelChoices,
-          source: 'explicit_continue_button',
+          original: originalInput,
+          choices,
+          source: continuationMode ? 'explicit_continue_button' : 'explicit_input_writer',
           onRegenerate: async () => {
-            await runInputAssistForContent('', settings, { source: 'explicit_continue_novel_choice_regenerate' });
+            await runInputAssistForContent(originalInput, settings, { source: continuationMode ? 'explicit_continue_novel_choice_regenerate' : 'explicit_input_writer_novel_choice_regenerate' });
             return Array.isArray(Runtime.lastInputAssist?.novelChoices) ? Runtime.lastInputAssist.novelChoices : [];
           }
         });
         if (reviewed.action === 'cancelled' || !text(reviewed.content).trim()) throw inputAssistContinueCancellationError();
         generated = text(reviewed.content).trim();
-        if (settings.inputAssistAlwaysTranslateEnglish === true) {
-          generated = await translateInputAssistReviewTextToEnglish(generated, settings);
-          if (Runtime.lastInputAssist) Runtime.lastInputAssist.autoTranslatedEnglish = true;
-        }
       }
-      // Both RP and Novel Input Assist use an explicit choice picker; no second confirmation layer is needed.
-      const explicitDeliverySource = Runtime.lastInputAssist?.confirmationDecision
-        ? `explicit_continue_${Runtime.lastInputAssist.confirmationDecision}${Runtime.lastInputAssist.confirmationEdited ? '_edited' : ''}`
-        : (Runtime.lastInputAssist?.autoTranslatedEnglish ? 'explicit_continue_translated' : 'explicit_continue_direct');
-      generated = finalizeInputAssistDelivery(generated, explicitDeliverySource, settings).trim();
-      Runtime.inputAssistSend = {
-        ...Runtime.inputAssistSend,
-        phase: 'ready',
-        generated: text(generated).trim()
-      };
-      await setInputAssistContinuePanel('입력 작성 완료 · 잠시 후 RisuAI로 전송합니다…', 'working', 0, true);
-      await new Promise(resolve => setTimeout(resolve, INPUT_ASSIST_CONTINUE_SEND_GRACE_MS));
+      if (settings.inputAssistAlwaysTranslateEnglish === true && generated) {
+        generated = await translateInputAssistReviewTextToEnglish(generated, settings);
+        if (Runtime.lastInputAssist) Runtime.lastInputAssist.autoTranslatedEnglish = true;
+      }
+      generated = finalizeInputAssistDelivery(generated, continuationMode ? 'explicit_writer_continue' : 'explicit_writer_expand', settings).trim();
+      Runtime.inputAssistSend = { ...Runtime.inputAssistSend, phase: 'ready', generated };
+      const delivery = await showInputAssistDeliveryPicker(generated);
+      if (delivery === 'cancelled') throw inputAssistContinueCancellationError();
+      if (delivery === 'copy') {
+        Runtime.inputAssistSend = { ...Runtime.inputAssistSend, busy: false, phase: 'copied', ok: true, reason: 'manual_copy', lastAt: Date.now() };
+        await setInputAssistContinuePanel('인풋을 복사했습니다. RisuAI 입력창에 붙여넣어 직접 전송하세요.', 'done', 6000);
+        finishCallTelemetry('explicit_input_writer_copied');
+        return true;
+      }
+      const sendApi = getLiveApi(['sendChat']);
+      if (typeof sendApi?.sendChat !== 'function') throw new Error('현재 RisuAI에서 플러그인 sendChat API를 사용할 수 없습니다. 복사 후 직접 전송을 사용해 주세요.');
+      const permissionApi = getLiveApi(['requestPluginPermission']);
+      if (typeof permissionApi?.requestPluginPermission === 'function') {
+        const granted = await permissionApi.requestPluginPermission('sendChat');
+        if (granted === false) throw new Error('GRADIA의 채팅 전송 권한이 거부되었습니다. 복사 후 직접 전송을 사용해 주세요.');
+      }
       if (inputAssistContinueCancelled(requestId)) throw inputAssistContinueCancellationError();
-      Runtime.inputAssistSend = {
-        ...Runtime.inputAssistSend,
-        phase: 'sending',
-        cancelRequested: false
-      };
+      Runtime.inputAssistSend = { ...Runtime.inputAssistSend, phase: 'sending', cancelRequested: false };
       await setInputAssistContinuePanel('RisuAI로 전송하고 있습니다…', 'working');
-      const sendStartedAt = Date.now();
-      const sent = await sendApi.sendChat(text(generated).trim());
+      const sent = await sendApi.sendChat(generated);
       if (sent === false) throw new Error('RisuAI가 GRADIA의 채팅 전송 요청을 허용하지 않았습니다.');
-      Runtime.inputAssistSend = {
-        busy: false,
-        phase: 'sent',
-        requestId,
-        cancelRequested: false,
-        cancelled: false,
-        lastAt: Date.now(),
-        ok: true,
-        reason: '',
-        generated: text(generated).trim()
-      };
-      const pipelineOwnsPanel = Runtime.pipelineWorkStatus?.source === 'explicit_continue'
-        && Number(Runtime.pipelineWorkStatus?.startedAt || 0) >= sendStartedAt - 1000;
-      if (!pipelineOwnsPanel) {
-        await setInputAssistContinuePanel('이어쓰기 입력을 전송했습니다.', 'done', 3500);
-      }
+      Runtime.inputAssistSend = { busy: false, phase: 'sent', requestId, cancelRequested: false, cancelled: false, lastAt: Date.now(), ok: true, reason: '', generated };
+      await setInputAssistContinuePanel('GRADIA 인풋을 전송했습니다.', 'done', 3500);
       return true;
     } catch (error) {
       if (error?.code === 'input_assist_send_cancelled' || inputAssistContinueCancelled(requestId)) {
-        Runtime.inputAssistSend = {
-          ...Runtime.inputAssistSend,
-          busy: false,
-          phase: 'cancelled',
-          requestId,
-          cancelRequested: false,
-          cancelled: true,
-          lastAt: Date.now(),
-          ok: false,
-          reason: 'user_cancelled'
-        };
-        await setInputAssistContinuePanel('이어쓰기 입력 전송을 취소했습니다.', 'cancelled', 3500);
-        finishCallTelemetry('explicit_continue_cancelled');
+        Runtime.inputAssistSend = { ...Runtime.inputAssistSend, busy: false, phase: 'cancelled', requestId, cancelRequested: false, cancelled: true, lastAt: Date.now(), ok: false, reason: 'user_cancelled' };
+        await setInputAssistContinuePanel('GRADIA 인풋 작성을 취소했습니다.', 'cancelled', 3500);
+        finishCallTelemetry('explicit_input_writer_cancelled');
         return false;
       }
       const reason = compact(error?.message || error, 1000);
-      Runtime.inputAssistSend = {
-        busy: false,
-        phase: 'error',
-        requestId,
-        cancelRequested: false,
-        cancelled: false,
-        lastAt: Date.now(),
-        ok: false,
-        reason,
-        generated: ''
-      };
-      warn('explicit_input_assist_continue_failed', error);
+      Runtime.inputAssistSend = { ...Runtime.inputAssistSend, busy: false, phase: 'error', requestId, cancelRequested: false, cancelled: false, lastAt: Date.now(), ok: false, reason };
       await notifyInputAssistContinueError(reason);
-      finishCallTelemetry('explicit_continue_failed');
+      finishCallTelemetry('explicit_input_writer_failed');
       return false;
     }
   };
@@ -30016,6 +30242,11 @@ html,body{width:100%;height:100%;overflow:hidden}
 @media(max-width:420px){
 .sga-top{grid-template-columns:minmax(0,1fr) auto;padding:8px}.sga-brand h1{font-size:15px}.sga-head-actions .sga-btn{padding:7px 8px;font-size:9px}.sga-mobile-nav{padding:8px}.sga-mobile-quick-nav{gap:4px}.sga-mobile-quick-btn{min-height:46px}.sga-mobile-quick-btn>small{font-size:8px}.sga-main{padding:8px 8px 76px}.sga-result-stage-tabs{grid-template-columns:minmax(0,1fr)}.sga-card,.sga-agent-expanded{padding:12px}.sga-actions .sga-btn{flex-basis:100%}
 }
+#sga-rp-gui-root.sga-compact-modal-root{display:grid!important;place-items:center!important;padding:20px!important}
+.sga-input-compact-app{display:block;width:min(760px,calc(100vw - 40px));max-height:calc(var(--sga-vh) - 40px);overflow:auto;color:#e7edfb}
+.sga-input-compact-app.wide{width:min(820px,calc(100vw - 40px))}
+.sga-input-compact-app>.sga-card{width:100%!important;margin:0!important;box-shadow:0 24px 72px rgba(0,0,0,.42)}
+@media(max-width:760px){#sga-rp-gui-root.sga-compact-modal-root{display:grid!important;padding:12px!important}.sga-input-compact-app,.sga-input-compact-app.wide{width:calc(100vw - 24px);max-height:calc(var(--sga-vh) - 24px)}.sga-input-compact-app>.sga-card{border-radius:16px}}
 .sga-input-confirm-app{display:flex;min-height:0;flex-direction:column;width:min(1180px,calc(100vw - 48px));height:min(760px,calc(var(--sga-vh) - 48px));overflow:hidden;border:1px solid rgba(124,156,255,.32);border-radius:22px;background:radial-gradient(circle at 86% 0%,rgba(124,92,255,.14),transparent 28%),#070b13;box-shadow:0 24px 72px rgba(0,0,0,.48);color:#e7edfb}
 .sga-input-confirm-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:20px 22px;border-bottom:1px solid rgba(124,156,255,.17);background:rgba(9,14,24,.96)}.sga-input-confirm-head h2{margin:0 0 6px;font-size:20px}.sga-input-confirm-head p{margin:0;color:#9aabc4;font-size:12px;line-height:1.55}.sga-input-confirm-close{flex:0 0 auto;min-width:42px;min-height:38px;padding:7px 12px;border:1px solid rgba(124,156,255,.24);border-radius:11px;background:#111a2b;color:#dce5f7;font-size:18px;cursor:pointer}
 .sga-input-confirm-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;flex:1;min-height:0;padding:16px 18px}.sga-input-confirm-pane{display:flex;min-width:0;min-height:0;flex-direction:column;overflow:hidden;border:1px solid rgba(124,156,255,.19);border-radius:16px;background:rgba(7,12,21,.76)}.sga-input-confirm-pane.expanded{border-color:rgba(124,92,255,.42);box-shadow:inset 0 2px rgba(139,92,255,.55)}.sga-input-confirm-pane-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:13px 15px;border-bottom:1px solid rgba(124,156,255,.14)}.sga-input-confirm-pane-head strong{font-size:14px}.sga-input-confirm-pane-head span{color:#8497b4;font-size:10px}.sga-input-confirm-pane-tools{display:flex;align-items:center;justify-content:flex-end;gap:7px}.sga-input-confirm-edit-badge{padding:3px 7px;border:1px solid rgba(139,92,255,.34);border-radius:999px;background:rgba(124,92,255,.12);color:#cbbcff!important}.sga-input-confirm-translation-row{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:7px;padding:8px 12px 0}.sga-input-confirm-translate{min-height:30px;padding:5px 9px;border:1px solid rgba(124,156,255,.22);border-radius:9px;background:#111a2b;color:#cbd7eb;font-size:10px;cursor:pointer}.sga-input-confirm-text{flex:1;min-height:0;margin:0;padding:16px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:#cfd9eb;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;user-select:text;-webkit-user-select:text}.sga-input-confirm-text.editable{box-sizing:border-box;width:100%;border:0;resize:none;background:rgba(5,9,17,.58);outline:none;caret-color:#a999ff}.sga-input-confirm-text.editable:focus{background:rgba(8,12,23,.9);box-shadow:inset 0 0 0 1px rgba(139,92,255,.38)}.sga-input-confirm-text.editable:disabled{opacity:.7}.sga-input-confirm-empty{color:#73839d;font-style:italic}.sga-input-confirm-actions{display:flex;gap:8px;padding:13px 15px;border-top:1px solid rgba(124,156,255,.14)}.sga-input-confirm-actions .sga-btn{flex:1;min-height:42px}.sga-input-confirm-footer{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:0 18px 17px}.sga-input-confirm-status{min-width:0;color:#8fa1bd;font-size:11px;line-height:1.45}.sga-input-confirm-status.err{color:#ff9eb3}.sga-input-confirm-regenerate{flex:0 0 auto;min-width:122px}.sga-input-confirm-app.busy button{opacity:.55;pointer-events:none}
@@ -30350,7 +30581,7 @@ html,body{width:100%;height:100%;overflow:hidden}
             ]),
             choice.summary ? guiEl('div', { class: 'sga-note', text: choice.summary }) : null,
             guiEl('pre', { class: 'sga-input-confirm-text', text: brief, style: { maxHeight: '180px', minHeight: '0', padding: '10px', borderRadius: '10px', background: 'rgba(5,9,17,.58)' } }),
-            guiEl('button', { class: 'sga-btn primary', text: '이 행동을 내 입력으로 사용', onClick: () => { void finish(`rp_action_choice_${choice.id || index + 1}`, brief, choice); } })
+            guiEl('button', { class: 'sga-btn primary', text: '이 행동을 선택', onClick: () => { void finish(`rp_action_choice_${choice.id || index + 1}`, brief, choice); } })
           ]);
           bodyNode.appendChild(card);
         });
@@ -30556,7 +30787,7 @@ html,body{width:100%;height:100%;overflow:hidden}
             ]),
             choice.summary ? guiEl('div', { class: 'sga-note', text: choice.summary }) : null,
             guiEl('pre', { class: 'sga-input-confirm-text', text: input, style: { maxHeight: '180px', minHeight: '0', padding: '10px', borderRadius: '10px', background: 'rgba(5,9,17,.58)' } }),
-            guiEl('button', { class: 'sga-btn primary', text: '이 입력 사용', onClick: () => { void finish(`novel_choice_${perspective || index + 1}`, input, choice); } })
+            guiEl('button', { class: 'sga-btn primary', text: '이 입력을 선택', onClick: () => { void finish(`novel_choice_${perspective || index + 1}`, input, choice); } })
           ]);
           bodyNode.appendChild(card);
         });
@@ -32939,7 +33170,7 @@ html,body{width:100%;height:100%;overflow:hidden}
         }))) : null,
         guiEl('div', { class: 'sga-callout', style: { marginTop: '12px' }, text: authorDirectedInput
           ? 'RP 모드에서는 인풋 관리자를 끌 수 있습니다. 켜면 유저 행동 세 가지를 제안하고, 고른 항목만 유저가 실제로 수행한 입력이 됩니다. SHADOW ACT는 그 행동을 재연하지 않고 NPC·세계 반응부터 씁니다.'
-          : '소설 모드에서는 핵심 작가 의도·명시적 고정 사건·금지사항은 유지하되, 지정하지 않은 주인공의 세부 행동·대사·내면까지 고정하지 않습니다. 주인공 중심 · 현장 인물 중심 · 세계/외부 인물 중심의 세 입력 후보를 한 번에 만든 뒤 직접 선택합니다. “GRADIA로 상황 이어가기”에도 같은 선택창이 적용됩니다.' }),
+          : '소설 모드에서는 핵심 작가 의도·명시적 고정 사건·금지사항은 유지하되, 지정하지 않은 주인공의 세부 행동·대사·내면까지 고정하지 않습니다. 주인공 중심 · 현장 인물 중심 · 세계/외부 인물 중심의 세 입력 후보를 한 번에 만든 뒤 직접 선택합니다. “GRADIA로 인풋 작성하기”에서도 같은 선택창이 적용됩니다.' }),
         guiEl('div', { class: 'sga-simple-stage-provider-grid', style: { marginTop: '12px' } }, [
           guiEl('div', { class: 'sga-simple-stage-provider' }, [
             fieldNode(
@@ -36964,8 +37195,9 @@ const buildNarrativeArchiveViewerPage = () => {
       // Flashback Memory uses a translucent root over a transparent iframe canvas.
       // Keeping the dimming here (rather than on html/body) prevents an opaque
       // WebView document canvas from replacing the RisuAI chat behind the panel.
-      root.style.setProperty('background', 'rgba(6,8,14,.38)', 'important');
-      root.style.setProperty('background-color', 'rgba(6,8,14,.38)', 'important');
+      const rootDim = root.classList?.contains?.('sga-compact-modal-root') ? 'rgba(6,8,14,.22)' : 'rgba(6,8,14,.38)';
+      root.style.setProperty('background', rootDim, 'important');
+      root.style.setProperty('background-color', rootDim, 'important');
       root.style.setProperty('background-image', 'none', 'important');
       root.style.setProperty('backdrop-filter', 'none', 'important');
       root.style.setProperty('-webkit-backdrop-filter', 'none', 'important');
@@ -37052,7 +37284,7 @@ const buildNarrativeArchiveViewerPage = () => {
       const chatButtonApi = getLiveApi(['registerButton']);
       if (!registered.continueButton && typeof chatButtonApi?.registerButton === 'function') {
         registered.continueButton = await chatButtonApi.registerButton({
-          name: `${PUBLIC_DISPLAY_NAME}로 상황 이어가기`,
+          name: `${PUBLIC_DISPLAY_NAME}로 인풋 작성하기`,
           icon: '✨',
           iconType: 'html',
           location: 'chat',
@@ -38934,7 +39166,9 @@ const buildNarrativeArchiveViewerPage = () => {
       }
       return true;
     };
-    await registerInputAssistHandler();
+    // v0.25.48: keep the legacy automatic Input Manager implementation for compatibility/debug,
+    // but do not register it. Input writing is entered only through the explicit chat button.
+    Runtime.hookStatus.input = false;
     await registerBeforeRequestHook();
     await registerGradiaRetraceIpc().catch(error => warn('GRADIA RE:TRACE IPC registration failed.', error));
 
