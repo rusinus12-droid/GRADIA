@@ -1,7 +1,9 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.44
+//@display-name GRADIA v0.25.47
 //@api 3.0
-//@version 0.25.44
+//@version 0.25.47
+
+/* v0.25.47 preserves RE:TRACE includePayload=false through the public runtime fallback so failed IPC discovery cannot hydrate the full Story Arc/Writer/Narrative Archive payload; v0.25.46 keeps Narrative Archive documents and compact vector sketches in pluginStorage while moving rebuildable full Float32 vectors into SafeLocalPluginStorage for lazy candidate-only loading. */
 //@allowed-ipc flashback_hayaku_bridge
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/GRADIA/main/GRADIA.js
 //@arg mode string off|lite|normal
@@ -903,7 +905,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.44';
+  const PLUGIN_VERSION = '0.25.47';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -933,6 +935,9 @@
   const STORAGE_WRITER_DESIGNS_KEY = 'serial_gradation_agents_for_rp:writer_designs:v1';
   const STORAGE_STORY_ARCS_KEY = 'serial_gradation_agents_for_rp:story_arcs:v2';
   const STORAGE_NARRATIVE_ARCHIVES_KEY = 'serial_gradation_agents_for_rp:narrative_archives:v1';
+  const STORAGE_NARRATIVE_SHARED_ARCHIVES_KEY = 'serial_gradation_agents_for_rp:narrative_shared_archives:v1'; // legacy monolith
+  const STORAGE_NARRATIVE_SHARED_ARCHIVE_INDEX_KEY = 'serial_gradation_agents_for_rp:narrative_shared_archive_index:v1';
+  const STORAGE_NARRATIVE_SHARED_ARCHIVE_PREFIX = 'serial_gradation_agents_for_rp:narrative_shared_archive:v1:';
   const STORAGE_NARRATIVE_EMBEDDING_SETTINGS_KEY = 'serial_gradation_agents_for_rp:narrative_embedding_settings:v1';
   const STORAGE_NATIVE_CHAT_COPY_REGISTRY_KEY = 'serial_gradation_agents_for_rp:native_chat_copy_registry:v1';
   const LOCAL_PROVIDER_SECRETS_KEY = 'serial_gradation_agents_for_rp:provider_secrets:v1';
@@ -1415,7 +1420,21 @@
   const ARC_CONTINUITY_HISTORY_MAX = 12;
   const ARC_DIRECTOR_STORE_MAX_SCOPES = 12;
   const NARRATIVE_ARCHIVE_SCHEMA = 'gradia.narrative_archive.v1';
+  const NARRATIVE_SHARED_ARCHIVE_SCHEMA = 'gradia.narrative_shared_archive.v1';
+  const NARRATIVE_SHARED_ARCHIVE_REF_SCHEMA = 'gradia.narrative_shared_archive_ref.v1';
+  const NARRATIVE_SHARED_ARCHIVE_MAX_DEPTH = 256;
   const NARRATIVE_ARCHIVE_ENTRY_SCHEMA = 'gradia.narrative_archive.entry.v1';
+  const NARRATIVE_LOCAL_VECTOR_PAYLOAD_SCHEMA = 'gradia.narrative_local_vector_payload.v1';
+  const NARRATIVE_LOCAL_VECTOR_REF_SCHEMA = 'gradia.narrative_local_vector_ref.v1';
+  const NARRATIVE_LOCAL_VECTOR_KEY_PREFIX = 'gradia.narrative.local_vector.';
+  const NARRATIVE_LOCAL_VECTOR_STORAGE_MODE = 'safe_local_float32_base64_v1';
+  const NARRATIVE_VECTOR_SKETCH_DIMS = 64;
+  const NARRATIVE_LOCAL_VECTOR_CACHE_MAX = 96;
+  const NarrativeLocalVectorCache = new Map();
+  const NarrativeLocalVectorStats = {
+    writes: 0, reads: 0, cacheHits: 0, misses: 0, failures: 0,
+    fallbackInline: 0, bytesWritten: 0, lastError: ''
+  };
   const NARRATIVE_ARCHIVE_STORE_MAX_SCOPES = 12;
   const NARRATIVE_ARCHIVE_MAX_ENTRIES_PER_SCOPE = 192;
   const NARRATIVE_ARCHIVE_DOCUMENT_MAX_CHARS = 6800;
@@ -5212,10 +5231,31 @@ const writeNarrativeEmbeddingSettings = async raw => {
   return settings;
 };
 
-const readNarrativeArchiveStore = async () => {
-  const raw = await readObject(STORAGE_NARRATIVE_ARCHIVES_KEY, {});
-  const source = raw?.scopes && typeof raw.scopes === 'object' && !Array.isArray(raw.scopes) ? raw.scopes : raw;
-  return source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+const narrativeSharedArchiveRefPointer = value => {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const archiveId = text(source.archiveId || '').trim();
+  if (!archiveId) return null;
+  return {
+    schema: NARRATIVE_SHARED_ARCHIVE_REF_SCHEMA,
+    archiveId,
+    storageKey: text(source.storageKey || `${STORAGE_NARRATIVE_SHARED_ARCHIVE_PREFIX}${archiveId}`).trim(),
+    generation: Math.max(1, Number(source.generation || 1) || 1),
+    depth: Math.max(1, Number(source.depth || 1) || 1),
+    deltaCount: Math.max(0, Number(source.deltaCount ?? source.entryCount ?? 0) || 0),
+    entryCount: Math.max(0, Number(source.entryCount || 0) || 0),
+    digest: text(source.digest || '').trim(),
+    memberIds: Array.from(new Set((Array.isArray(source.memberIds) ? source.memberIds : []).map(value => text(value || '').trim()).filter(Boolean))).slice(-NARRATIVE_ARCHIVE_MAX_ENTRIES_PER_SCOPE),
+    catalog: (Array.isArray(source.catalog) ? source.catalog : []).filter(item => item && typeof item === 'object' && text(item.archiveCanonicalId || '').trim()).slice(-NARRATIVE_ARCHIVE_MAX_ENTRIES_PER_SCOPE),
+    createdAt: Number(source.createdAt || 0) || 0,
+    updatedAt: Number(source.updatedAt || 0) || 0
+  };
+};
+
+const normalizeNarrativeSharedArchiveRef = value => {
+  const pointer = narrativeSharedArchiveRefPointer(value);
+  if (!pointer) return null;
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  return { ...pointer, parentRef: narrativeSharedArchiveRefPointer(source.parentRef || source.parentArchiveRef) };
 };
 
 const narrativeArchiveSessionEpoch = entry => {
@@ -5230,6 +5270,26 @@ const narrativeArchiveChronologyCompare = (a, b) => (
   || Number(a?.updatedAt || 0) - Number(b?.updatedAt || 0)
 );
 
+const narrativeSharedArchiveEntryIdentity = entry => text(entry?.archiveCanonicalId || entry?.originEntryId || '').trim()
+  || `gna_shared_${narrativeEmbeddingStableHash([
+    text(entry?.originChatId || entry?.inheritedFromChatId || ''),
+    text(entry?.documentHash || ''),
+    Number(entry?.turnStart || 0),
+    Number(entry?.turnEnd || 0),
+    text(entry?.document || '')
+  ].join('|'))}`;
+
+const mergeNarrativeArchiveEntries = (...lists) => {
+  const byId = new Map();
+  for (const entry of lists.flatMap(list => Array.isArray(list) ? list : [])) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !text(entry.document || '').trim()) continue;
+    const identity = narrativeSharedArchiveEntryIdentity(entry);
+    const previous = byId.get(identity);
+    if (!previous || Number(entry.updatedAt || 0) >= Number(previous.updatedAt || 0)) byId.set(identity, entry);
+  }
+  return Array.from(byId.values()).sort(narrativeArchiveChronologyCompare).slice(-NARRATIVE_ARCHIVE_MAX_ENTRIES_PER_SCOPE);
+};
+
 const normalizeNarrativeArchiveScope = (raw, scopeKey = '') => {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   const resolvedScopeKey = text(source.scopeKey || scopeKey);
@@ -5239,23 +5299,273 @@ const normalizeNarrativeArchiveScope = (raw, scopeKey = '') => {
       ...item,
       scopeKey: text(item.scopeKey || resolvedScopeKey),
       inherited: item.inherited === true,
-      sessionEpoch: narrativeArchiveSessionEpoch(item)
+      sessionEpoch: narrativeArchiveSessionEpoch(item),
+      archiveReferenceOnly: item.archiveReferenceOnly === true,
+      archiveId: text(item.archiveId || ''),
+      archiveCanonicalId: text(item.archiveCanonicalId || '')
     }))
     .sort(narrativeArchiveChronologyCompare)
     .slice(-NARRATIVE_ARCHIVE_MAX_ENTRIES_PER_SCOPE);
   return {
     schema: NARRATIVE_ARCHIVE_SCHEMA,
     scopeKey: resolvedScopeKey,
+    archiveRef: normalizeNarrativeSharedArchiveRef(source.archiveRef),
     createdAt: Number(source.createdAt || Date.now()),
     updatedAt: Number(source.updatedAt || Date.now()),
     entries
   };
 };
 
-const writeNarrativeArchiveStore = async scopes => {
-  const entries = Object.entries(scopes || {})
+const narrativeSharedArchiveEntryFingerprint = entry => ({
+  archiveCanonicalId: narrativeSharedArchiveEntryIdentity(entry),
+  documentHash: text(entry?.documentHash || ''),
+  embeddingHash: narrativeEmbeddingVectorIdentity(entry?.embedding),
+  turnStart: Number(entry?.turnStart || 0),
+  turnEnd: Number(entry?.turnEnd || 0),
+  updatedAt: Number(entry?.updatedAt || 0)
+});
+
+const narrativeSharedArchiveCatalog = entries => (Array.isArray(entries) ? entries : [])
+  .filter(entry => entry && typeof entry === 'object' && text(entry.document || '').trim())
+  .map(narrativeSharedArchiveEntryFingerprint)
+  .sort((a, b) => text(a.archiveCanonicalId).localeCompare(text(b.archiveCanonicalId)));
+
+const narrativeSharedArchiveCatalogDigest = catalog => narrativeEmbeddingStableHash(JSON.stringify(Array.isArray(catalog) ? catalog : []));
+const narrativeSharedArchiveStorageKey = archiveId => `${STORAGE_NARRATIVE_SHARED_ARCHIVE_PREFIX}${text(archiveId || '').trim()}`;
+
+const narrativeSharedArchiveMetaFromArchive = archive => {
+  if (!archive || archive.schema !== NARRATIVE_SHARED_ARCHIVE_SCHEMA || !text(archive.archiveId || '').trim()) return null;
+  const deltaCatalog = narrativeSharedArchiveCatalog(archive.entries);
+  const legacyDigest = narrativeSharedArchiveCatalogDigest(deltaCatalog);
+  return normalizeNarrativeSharedArchiveRef({
+    schema: NARRATIVE_SHARED_ARCHIVE_REF_SCHEMA,
+    archiveId: text(archive.archiveId || ''),
+    storageKey: text(archive.storageKey || narrativeSharedArchiveStorageKey(archive.archiveId)),
+    generation: Math.max(1, Number(archive.generation || 1) || 1),
+    depth: Math.max(1, Number(archive.depth || 1) || 1),
+    deltaCount: Math.max(0, Number(archive.deltaCount ?? deltaCatalog.length) || 0),
+    entryCount: Math.max(0, Number(archive.entryCount ?? deltaCatalog.length) || 0),
+    digest: text(archive.digest || legacyDigest),
+    memberIds: Array.isArray(archive.memberIds) ? archive.memberIds : deltaCatalog.map(item => item.archiveCanonicalId),
+    catalog: Array.isArray(archive.catalog) ? archive.catalog : deltaCatalog,
+    parentRef: archive.parentRef || archive.parentArchiveRef,
+    createdAt: Number(archive.createdAt || 0) || 0,
+    updatedAt: Number(archive.updatedAt || 0) || 0
+  });
+};
+
+const readNarrativeSharedArchiveIndex = async () => {
+  const raw = await readObject(STORAGE_NARRATIVE_SHARED_ARCHIVE_INDEX_KEY, {});
+  const entries = raw?.entries && typeof raw.entries === 'object' && !Array.isArray(raw.entries) ? raw.entries : raw;
+  return entries && typeof entries === 'object' && !Array.isArray(entries) ? entries : {};
+};
+
+const writeNarrativeSharedArchiveIndex = async entries => {
+  const rows = Object.entries(entries || {})
     .filter(([key, value]) => key && value && typeof value === 'object' && !Array.isArray(value))
-    .map(([key, value]) => [key, normalizeNarrativeArchiveScope(value, key)])
+    .sort((a, b) => Number(b[1]?.updatedAt || 0) - Number(a[1]?.updatedAt || 0))
+    .slice(0, 48);
+  return await writeObject(STORAGE_NARRATIVE_SHARED_ARCHIVE_INDEX_KEY, {
+    version: 2,
+    savedAt: new Date().toISOString(),
+    entries: Object.fromEntries(rows)
+  });
+};
+
+const readNarrativeSharedArchiveLayer = async refValue => {
+  const ref = normalizeNarrativeSharedArchiveRef(refValue);
+  if (!ref) return null;
+  let direct = await readObject(ref.storageKey, {});
+  if (direct?.schema === NARRATIVE_SHARED_ARCHIVE_SCHEMA && text(direct.archiveId || '') === ref.archiveId) return { ...direct, storageKey: ref.storageKey };
+  const legacyRaw = await readObject(STORAGE_NARRATIVE_SHARED_ARCHIVES_KEY, {});
+  const legacy = legacyRaw?.archives && typeof legacyRaw.archives === 'object' && !Array.isArray(legacyRaw.archives)
+    ? legacyRaw.archives[ref.archiveId]
+    : legacyRaw?.[ref.archiveId];
+  if (!legacy || legacy.schema !== NARRATIVE_SHARED_ARCHIVE_SCHEMA) return null;
+  direct = { ...legacy, archiveId: ref.archiveId, storageKey: ref.storageKey };
+  await writeObject(ref.storageKey, direct);
+  return direct;
+};
+
+const readNarrativeSharedArchiveMeta = async archiveRefOrId => {
+  if (archiveRefOrId && typeof archiveRefOrId === 'object' && !Array.isArray(archiveRefOrId)) {
+    const ref = normalizeNarrativeSharedArchiveRef(archiveRefOrId);
+    if (!ref) return null;
+    const layer = await readNarrativeSharedArchiveLayer(ref);
+    const meta = narrativeSharedArchiveMetaFromArchive(layer);
+    return meta
+      && meta.archiveId === ref.archiveId
+      && text(meta.storageKey || '') === text(ref.storageKey || '')
+      && Number(meta.generation || 0) === Number(ref.generation || 0)
+      && Number(meta.entryCount || 0) === Number(ref.entryCount || 0)
+      && text(meta.digest || '') === text(ref.digest || '')
+      ? ref
+      : null;
+  }
+  const archiveId = text(archiveRefOrId || '').trim();
+  if (!archiveId) return null;
+  const index = await readNarrativeSharedArchiveIndex();
+  const direct = normalizeNarrativeSharedArchiveRef(index[archiveId]);
+  if (direct) return direct;
+  const fallback = normalizeNarrativeSharedArchiveRef({ archiveId, storageKey: narrativeSharedArchiveStorageKey(archiveId) });
+  const layer = await readNarrativeSharedArchiveLayer(fallback);
+  const meta = narrativeSharedArchiveMetaFromArchive(layer);
+  if (meta) {
+    index[archiveId] = meta;
+    await writeNarrativeSharedArchiveIndex(index);
+  }
+  return meta;
+};
+
+const readNarrativeSharedArchive = async (archiveRefOrId, options = {}) => {
+  let head = null;
+  if (archiveRefOrId && typeof archiveRefOrId === 'object' && !Array.isArray(archiveRefOrId)) head = normalizeNarrativeSharedArchiveRef(archiveRefOrId);
+  else head = await readNarrativeSharedArchiveMeta(archiveRefOrId);
+  if (!head) return null;
+  const seen = new Set();
+  const layers = [];
+  let cursor = head;
+  while (cursor && layers.length < NARRATIVE_SHARED_ARCHIVE_MAX_DEPTH) {
+    if (seen.has(cursor.storageKey)) return null;
+    seen.add(cursor.storageKey);
+    const layer = await readNarrativeSharedArchiveLayer(cursor);
+    if (!layer) return null;
+    const rawEntries = Array.isArray(layer.entries) ? layer.entries : [];
+    const deltaCatalog = narrativeSharedArchiveCatalog(rawEntries);
+    if (Object.prototype.hasOwnProperty.call(layer, 'deltaCount') && deltaCatalog.length !== Number(layer.deltaCount || 0)) return null;
+    if (layer.deltaDigest && narrativeSharedArchiveCatalogDigest(deltaCatalog) !== text(layer.deltaDigest || '')) return null;
+    const layerGeneration = Math.max(1, Number(layer.generation || cursor.generation || 1) || 1);
+    const entries = rawEntries.map(entry => {
+      const archiveGeneration = Math.max(1, Number(entry?.archiveGeneration || layerGeneration) || layerGeneration);
+      const archiveBaseSessionEpoch = Number.isFinite(Number(entry?.archiveBaseSessionEpoch))
+        ? Number(entry.archiveBaseSessionEpoch)
+        : Math.min(-1, narrativeArchiveSessionEpoch(entry));
+      const sessionEpoch = archiveBaseSessionEpoch - Math.max(0, Number(head.generation || layerGeneration) - archiveGeneration);
+      return { ...entry, archiveGeneration, archiveBaseSessionEpoch, sessionEpoch };
+    });
+    layers.push({ ref: cursor, archive: layer, entries });
+    cursor = normalizeNarrativeSharedArchiveRef(cursor.parentRef || layer.parentRef || layer.parentArchiveRef);
+  }
+  if (cursor) return null;
+  let entries = mergeNarrativeArchiveEntries(...layers.slice().reverse().map(layer => layer.entries));
+  const memberIds = head.memberIds.length ? new Set(head.memberIds) : null;
+  if (memberIds) entries = entries.filter(entry => memberIds.has(narrativeSharedArchiveEntryIdentity(entry)));
+  entries = entries.sort(narrativeArchiveChronologyCompare).slice(-NARRATIVE_ARCHIVE_MAX_ENTRIES_PER_SCOPE);
+  const catalog = narrativeSharedArchiveCatalog(entries);
+  const digest = narrativeSharedArchiveCatalogDigest(catalog);
+  const verified = entries.length === head.entryCount && digest === head.digest;
+  return {
+    ...(layers[0]?.archive || {}),
+    schema: NARRATIVE_SHARED_ARCHIVE_SCHEMA,
+    archiveId: head.archiveId,
+    storageKey: head.storageKey,
+    generation: head.generation,
+    depth: head.depth,
+    entryCount: entries.length,
+    digest,
+    memberIds: catalog.map(item => item.archiveCanonicalId),
+    catalog,
+    entries,
+    archiveRef: head,
+    layers,
+    verified
+  };
+};
+
+const writeNarrativeSharedArchive = async archiveValue => {
+  const archive = archiveValue && typeof archiveValue === 'object' && !Array.isArray(archiveValue) ? archiveValue : null;
+  const archiveId = text(archive?.archiveId || '').trim();
+  if (!archive || !archiveId || archive.schema !== NARRATIVE_SHARED_ARCHIVE_SCHEMA) throw new Error('GRADIA shared Narrative Archive payload is invalid.');
+  const storageKey = text(archive.storageKey || narrativeSharedArchiveStorageKey(archiveId));
+  const externalizedEntries = [];
+  for (const entry of (Array.isArray(archive.entries) ? archive.entries : [])) {
+    externalizedEntries.push(await externalizeNarrativeArchiveEntryVector(entry));
+  }
+  const deltaCatalog = narrativeSharedArchiveCatalog(externalizedEntries);
+  const normalized = {
+    ...archive,
+    archiveId,
+    storageKey,
+    deltaCount: Math.max(0, Number(archive.deltaCount ?? deltaCatalog.length) || 0),
+    deltaDigest: text(archive.deltaDigest || narrativeSharedArchiveCatalogDigest(deltaCatalog)),
+    entries: externalizedEntries
+  };
+  if (!await writeObject(storageKey, normalized)) throw new Error('GRADIA shared Narrative Archive layer save failed.');
+  const persisted = await readObject(storageKey, {});
+  if (persisted.schema !== NARRATIVE_SHARED_ARCHIVE_SCHEMA || text(persisted.archiveId || '') !== archiveId
+    || Number(persisted.deltaCount || 0) !== normalized.deltaCount || text(persisted.deltaDigest || '') !== normalized.deltaDigest) {
+    throw new Error('GRADIA shared Narrative Archive layer durable readback failed.');
+  }
+  const meta = narrativeSharedArchiveMetaFromArchive(normalized);
+  const index = await readNarrativeSharedArchiveIndex();
+  index[archiveId] = meta;
+  if (!await writeNarrativeSharedArchiveIndex(index)) throw new Error('GRADIA shared Narrative Archive index save failed.');
+  return { archive: persisted, meta };
+};
+
+const readNarrativeArchiveStore = async (options = {}) => {
+  const raw = await readObject(STORAGE_NARRATIVE_ARCHIVES_KEY, {});
+  const source = raw?.scopes && typeof raw.scopes === 'object' && !Array.isArray(raw.scopes) ? raw.scopes : raw;
+  const scopes = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+  const out = Object.fromEntries(Object.entries(scopes).map(([scopeKey, rawScope]) => [scopeKey, normalizeNarrativeArchiveScope(rawScope, scopeKey)]));
+  if (options?.hydrateShared !== true) return out;
+  const requested = Array.isArray(options?.scopeKeys)
+    ? options.scopeKeys.map(value => text(value || '').trim()).filter(Boolean)
+    : Object.keys(out);
+  for (const scopeKey of requested) {
+    const local = normalizeNarrativeArchiveScope(out[scopeKey], scopeKey);
+    const archiveRef = normalizeNarrativeSharedArchiveRef(local.archiveRef);
+    if (!archiveRef) {
+      out[scopeKey] = { ...local, archiveVerified: true };
+      continue;
+    }
+    const shared = await readNarrativeSharedArchive(archiveRef);
+    const verified = shared?.verified === true;
+    const sharedEntries = verified
+      ? (Array.isArray(shared.entries) ? shared.entries : []).map(entry => ({
+        ...entry,
+        id: `gna_ref_${narrativeEmbeddingStableHash(`${scopeKey}|${narrativeSharedArchiveEntryIdentity(entry)}`)}`,
+        scopeKey,
+        inherited: true,
+        sessionEpoch: narrativeArchiveSessionEpoch(entry),
+        archiveGeneration: Math.max(1, Number(entry.archiveGeneration || archiveRef.generation || 1) || 1),
+        archiveBaseSessionEpoch: Number.isFinite(Number(entry.archiveBaseSessionEpoch)) ? Number(entry.archiveBaseSessionEpoch) : narrativeArchiveSessionEpoch(entry),
+        archiveReferenceOnly: true,
+        archiveId: archiveRef.archiveId,
+        archiveCanonicalId: narrativeSharedArchiveEntryIdentity(entry),
+        originEntryId: text(entry.originEntryId || entry.id || '')
+      }))
+      : [];
+    out[scopeKey] = {
+      ...local,
+      archiveRef,
+      archiveVerified: verified,
+      archiveReason: verified ? 'archive_verified' : 'archive_missing_or_mismatch',
+      entries: mergeNarrativeArchiveEntries(sharedEntries, local.entries)
+    };
+  }
+  return out;
+};
+
+const writeNarrativeArchiveStore = async scopes => {
+  const prepared = [];
+  for (const [key, value] of Object.entries(scopes || {})) {
+    if (!key || !value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const normalized = normalizeNarrativeArchiveScope(value, key);
+    const persistedEntries = [];
+    for (const entry of normalized.entries.filter(item => item.archiveReferenceOnly !== true)) {
+      const { archiveReferenceOnly, archiveSourceKey, ...persisted } = entry;
+      persistedEntries.push(await externalizeNarrativeArchiveEntryVector(persisted));
+    }
+    prepared.push([key, {
+      ...normalized,
+      archiveRef: normalizeNarrativeSharedArchiveRef(value.archiveRef || normalized.archiveRef),
+      archiveVerified: undefined,
+      archiveReason: undefined,
+      entries: persistedEntries
+    }]);
+  }
+  const entries = prepared
     .sort((a, b) => Number(b[1].updatedAt || 0) - Number(a[1].updatedAt || 0))
     .slice(0, NARRATIVE_ARCHIVE_STORE_MAX_SCOPES);
   return await writeObject(STORAGE_NARRATIVE_ARCHIVES_KEY, {
@@ -5263,6 +5573,86 @@ const writeNarrativeArchiveStore = async scopes => {
     savedAt: new Date().toISOString(),
     scopes: Object.fromEntries(entries)
   });
+};
+
+const ensureGradiaSharedNarrativeArchive = async (sourceArchive, sourceScopeKey = '') => {
+  const source = normalizeNarrativeArchiveScope(sourceArchive, text(sourceArchive?.scopeKey || sourceScopeKey));
+  const existingRef = normalizeNarrativeSharedArchiveRef(source.archiveRef);
+  const parent = existingRef ? await readNarrativeSharedArchive(existingRef) : null;
+  if (existingRef && parent?.verified !== true) throw new Error('GRADIA parent shared Narrative Archive verification failed.');
+  const parentEntries = Array.isArray(parent?.entries) ? parent.entries : [];
+  const parentById = new Map(parentEntries.map(entry => [narrativeSharedArchiveEntryIdentity(entry), entry]));
+  const localEntries = source.entries.filter(entry => entry.archiveReferenceOnly !== true);
+  const changedLocal = localEntries.filter(entry => {
+    const identity = narrativeSharedArchiveEntryIdentity(entry);
+    const previous = parentById.get(identity);
+    return !previous || JSON.stringify(narrativeSharedArchiveEntryFingerprint(previous)) !== JSON.stringify(narrativeSharedArchiveEntryFingerprint(entry));
+  });
+  const merged = mergeNarrativeArchiveEntries(parentEntries, localEntries);
+  const catalog = narrativeSharedArchiveCatalog(merged);
+  const digest = narrativeSharedArchiveCatalogDigest(catalog);
+  const memberIds = catalog.map(item => item.archiveCanonicalId);
+  if (!changedLocal.length && existingRef && existingRef.entryCount === merged.length && existingRef.digest === digest) {
+    return { archiveRef: existingRef, archive: parent, entries: merged, catalog, changed: false, deltaEntries: 0 };
+  }
+  const generation = Math.max(1, Number(existingRef?.generation || 0) + 1);
+  const deltaSeed = changedLocal.map(entry => JSON.stringify(narrativeSharedArchiveEntryFingerprint(entry))).sort().join('|');
+  const archiveId = `ga_${narrativeEmbeddingStableHash(`${existingRef?.archiveId || ''}|${sourceScopeKey || source.scopeKey}|${generation}|${deltaSeed}|${digest}`)}`;
+  const storageKey = narrativeSharedArchiveStorageKey(archiveId);
+  const prepared = changedLocal.map(entry => {
+    const canonicalId = narrativeSharedArchiveEntryIdentity(entry);
+    return {
+      ...gradiaRetraceClone(entry),
+      id: `gna_shared_${narrativeEmbeddingStableHash(`${archiveId}|${canonicalId}|${entry.updatedAt || 0}`)}`,
+      scopeKey: `archive:${archiveId}`,
+      inherited: true,
+      sessionEpoch: Math.min(-1, narrativeArchiveSessionEpoch(entry) - 1),
+      archiveBaseSessionEpoch: Math.min(-1, narrativeArchiveSessionEpoch(entry) - 1),
+      archiveGeneration: generation,
+      originEntryId: text(entry.originEntryId || entry.id || ''),
+      originChatId: text(entry.originChatId || entry.inheritedFromChatId || ''),
+      archiveReferenceOnly: false,
+      archiveId,
+      archiveCanonicalId: canonicalId,
+      updatedAt: Number(entry.updatedAt || Date.now())
+    };
+  });
+  const deltaCatalog = narrativeSharedArchiveCatalog(prepared);
+  const now = Date.now();
+  const archive = {
+    schema: NARRATIVE_SHARED_ARCHIVE_SCHEMA,
+    archiveId,
+    storageKey,
+    generation,
+    depth: Math.max(1, Number(existingRef?.depth || 0) + 1),
+    deltaCount: prepared.length,
+    deltaDigest: narrativeSharedArchiveCatalogDigest(deltaCatalog),
+    entryCount: merged.length,
+    digest,
+    memberIds,
+    catalog,
+    parentRef: existingRef ? narrativeSharedArchiveRefPointer(existingRef) : null,
+    createdAt: Number(existingRef?.createdAt || now),
+    updatedAt: now,
+    entries: prepared
+  };
+  const persisted = await writeNarrativeSharedArchive(archive);
+  const archiveRef = normalizeNarrativeSharedArchiveRef({
+    schema: NARRATIVE_SHARED_ARCHIVE_REF_SCHEMA,
+    archiveId,
+    storageKey,
+    generation,
+    depth: archive.depth,
+    deltaCount: prepared.length,
+    entryCount: merged.length,
+    digest,
+    memberIds,
+    catalog,
+    parentRef: existingRef ? narrativeSharedArchiveRefPointer(existingRef) : null,
+    createdAt: archive.createdAt,
+    updatedAt: now
+  });
+  return { archiveRef, archive: { ...persisted.archive, entries: merged, verified: true }, entries: merged, catalog, changed: true, deltaEntries: prepared.length };
 };
 
 const narrativeVectorBytesToBase64 = bytes => {
@@ -5303,6 +5693,190 @@ const decodeNarrativeVector = encoded => {
     copy.set(bytes);
     return Array.from(new Float32Array(copy.buffer));
   } catch (_) { return []; }
+};
+
+
+const normalizeNarrativeLocalVectorRef = value => {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const localKey = text(source.localKey || source.key || '').trim();
+  if (!localKey || source.schema !== NARRATIVE_LOCAL_VECTOR_REF_SCHEMA) return null;
+  return {
+    schema: NARRATIVE_LOCAL_VECTOR_REF_SCHEMA,
+    localKey,
+    vectorHash: text(source.vectorHash || '').trim(),
+    dimensions: Math.max(0, Number(source.dimensions || 0) || 0),
+    byteLength: Math.max(0, Number(source.byteLength || 0) || 0),
+    createdAt: Number(source.createdAt || 0) || 0
+  };
+};
+
+const narrativeEmbeddingVectorIdentity = embeddingValue => {
+  const embedding = embeddingValue && typeof embeddingValue === 'object' && !Array.isArray(embeddingValue) ? embeddingValue : {};
+  const explicit = text(embedding.vectorHash || normalizeNarrativeLocalVectorRef(embedding.localVectorRef)?.vectorHash || '').trim();
+  if (explicit) return explicit;
+  const inline = text(embedding.vector || '').trim();
+  return inline ? narrativeEmbeddingStableHash(inline) : '';
+};
+
+const narrativeEmbeddingHasVectorReference = embeddingValue => {
+  const embedding = embeddingValue && typeof embeddingValue === 'object' && !Array.isArray(embeddingValue) ? embeddingValue : {};
+  return !!text(embedding.vector || '').trim() || !!normalizeNarrativeLocalVectorRef(embedding.localVectorRef);
+};
+
+const foldNarrativeVectorSketch = (vector, dimensions = NARRATIVE_VECTOR_SKETCH_DIMS) => {
+  if (!Array.isArray(vector) || !vector.length) return [];
+  const size = Math.max(8, Math.floor(Number(dimensions || NARRATIVE_VECTOR_SKETCH_DIMS)));
+  const buckets = Array(size).fill(0);
+  for (let index = 0; index < vector.length; index += 1) {
+    const value = Number(vector[index]);
+    if (!Number.isFinite(value) || value === 0) continue;
+    const mixed = Math.imul(index + 1, 0x9e3779b1) >>> 0;
+    buckets[index % size] += value * ((mixed & 1) === 0 ? 1 : -1);
+  }
+  const norm = Math.sqrt(buckets.reduce((sum, value) => sum + value * value, 0));
+  if (!(norm > 0)) return [];
+  return buckets.map(value => Math.round((value / norm) * 100000) / 100000);
+};
+
+const narrativeEmbeddingSketch = embeddingValue => {
+  const embedding = embeddingValue && typeof embeddingValue === 'object' && !Array.isArray(embeddingValue) ? embeddingValue : {};
+  if (Array.isArray(embedding.vectorSketch) && embedding.vectorSketch.length) return embedding.vectorSketch.map(Number).filter(Number.isFinite);
+  const inline = text(embedding.vector || '').trim();
+  return inline ? foldNarrativeVectorSketch(decodeNarrativeVector(inline)) : [];
+};
+
+const cacheNarrativeLocalVector = (localKey, value) => {
+  if (!localKey || !Array.isArray(value) || !value.length) return value;
+  NarrativeLocalVectorCache.delete(localKey);
+  NarrativeLocalVectorCache.set(localKey, value);
+  while (NarrativeLocalVectorCache.size > NARRATIVE_LOCAL_VECTOR_CACHE_MAX) {
+    const oldest = NarrativeLocalVectorCache.keys().next().value;
+    if (oldest === undefined) break;
+    NarrativeLocalVectorCache.delete(oldest);
+  }
+  return value;
+};
+
+const externalizeNarrativeArchiveEntryVector = async entryValue => {
+  const entry = narrativeEmbeddingSafeClone(entryValue || {}) || {};
+  const embedding = entry.embedding && typeof entry.embedding === 'object' && !Array.isArray(entry.embedding)
+    ? { ...entry.embedding }
+    : {};
+  if (embedding.status !== 'ready') return { ...entry, embedding };
+  const inline = text(embedding.vector || '').trim();
+  const existingRef = normalizeNarrativeLocalVectorRef(embedding.localVectorRef);
+  if (!inline) {
+    return {
+      ...entry,
+      embedding: {
+        ...embedding,
+        localVectorRef: existingRef,
+        vectorHash: narrativeEmbeddingVectorIdentity(embedding),
+        hasVector: !!existingRef,
+        vectorStorageMode: existingRef ? NARRATIVE_LOCAL_VECTOR_STORAGE_MODE : text(embedding.vectorStorageMode || '')
+      }
+    };
+  }
+  const vector = decodeNarrativeVector(inline);
+  if (!vector.length) return { ...entry, embedding: { ...embedding, hasVector: false } };
+  const vectorHash = text(embedding.vectorHash || narrativeEmbeddingStableHash(inline)).trim();
+  const dimensions = Math.max(1, Number(embedding.dimensions || vector.length) || vector.length);
+  const localKey = `${NARRATIVE_LOCAL_VECTOR_KEY_PREFIX}${vectorHash}`;
+  const existingSketch = narrativeEmbeddingSketch(embedding);
+  const vectorSketch = existingSketch.length ? existingSketch : foldNarrativeVectorSketch(vector);
+  const payload = {
+    schema: NARRATIVE_LOCAL_VECTOR_PAYLOAD_SCHEMA,
+    localKey,
+    vectorHash,
+    dimensions,
+    byteLength: vector.length * 4,
+    vector: inline,
+    createdAt: Date.now()
+  };
+  const ref = {
+    schema: NARRATIVE_LOCAL_VECTOR_REF_SCHEMA,
+    localKey,
+    vectorHash,
+    dimensions,
+    byteLength: payload.byteLength,
+    createdAt: payload.createdAt
+  };
+  try {
+    const ok = await RisuCompat.localSetItem(localKey, payload);
+    if (ok === false) throw new Error('SafeLocalPluginStorage write returned false.');
+    const readbackRaw = await RisuCompat.localGetItem(localKey);
+    const readback = typeof readbackRaw === 'string' ? tryJsonParse(readbackRaw, null) : readbackRaw;
+    if (!readback || readback.schema !== NARRATIVE_LOCAL_VECTOR_PAYLOAD_SCHEMA
+      || text(readback.vectorHash || '') !== vectorHash
+      || Number(readback.dimensions || 0) !== dimensions
+      || text(readback.vector || '').trim() !== inline) {
+      throw new Error('SafeLocalPluginStorage durable readback failed.');
+    }
+    cacheNarrativeLocalVector(localKey, vector);
+    NarrativeLocalVectorStats.writes += 1;
+    NarrativeLocalVectorStats.bytesWritten += payload.byteLength;
+    NarrativeLocalVectorStats.lastError = '';
+    return {
+      ...entry,
+      embedding: {
+        ...embedding,
+        vector: '',
+        vectorHash,
+        vectorSketch,
+        localVectorRef: ref,
+        hasVector: true,
+        vectorStorageMode: NARRATIVE_LOCAL_VECTOR_STORAGE_MODE
+      }
+    };
+  } catch (error) {
+    NarrativeLocalVectorStats.failures += 1;
+    NarrativeLocalVectorStats.fallbackInline += 1;
+    NarrativeLocalVectorStats.lastError = compact(error?.message || error, 500);
+    return {
+      ...entry,
+      embedding: {
+        ...embedding,
+        vectorHash,
+        vectorSketch,
+        hasVector: true,
+        vectorStorageMode: 'plugin_storage_inline_fallback'
+      }
+    };
+  }
+};
+
+const loadNarrativeArchiveEntryVector = async entryValue => {
+  const embedding = entryValue?.embedding && typeof entryValue.embedding === 'object' ? entryValue.embedding : {};
+  const inline = text(embedding.vector || '').trim();
+  if (inline) return decodeNarrativeVector(inline);
+  const ref = normalizeNarrativeLocalVectorRef(embedding.localVectorRef);
+  if (!ref) return [];
+  const cached = NarrativeLocalVectorCache.get(ref.localKey);
+  if (cached) {
+    NarrativeLocalVectorStats.cacheHits += 1;
+    NarrativeLocalVectorCache.delete(ref.localKey);
+    NarrativeLocalVectorCache.set(ref.localKey, cached);
+    return cached.slice();
+  }
+  NarrativeLocalVectorStats.reads += 1;
+  try {
+    const raw = await RisuCompat.localGetItem(ref.localKey);
+    const payload = typeof raw === 'string' ? tryJsonParse(raw, null) : raw;
+    if (!payload || payload.schema !== NARRATIVE_LOCAL_VECTOR_PAYLOAD_SCHEMA) {
+      NarrativeLocalVectorStats.misses += 1;
+      return [];
+    }
+    const encoded = text(payload.vector || '').trim();
+    if (!encoded || (ref.vectorHash && narrativeEmbeddingStableHash(encoded) !== ref.vectorHash)) throw new Error('Narrative Archive local vector digest mismatch.');
+    const vector = decodeNarrativeVector(encoded);
+    if (!vector.length || (ref.dimensions && vector.length !== ref.dimensions)) throw new Error('Narrative Archive local vector dimensions mismatch.');
+    NarrativeLocalVectorStats.lastError = '';
+    return cacheNarrativeLocalVector(ref.localKey, vector).slice();
+  } catch (error) {
+    NarrativeLocalVectorStats.failures += 1;
+    NarrativeLocalVectorStats.lastError = compact(error?.message || error, 500);
+    return [];
+  }
 };
 
 const cosineNarrativeVectors = (left, right) => {
@@ -6094,11 +6668,11 @@ const inspectNarrativeArchiveScope = async (scopeKey = Runtime.arcDirector?.scop
   const key = text(scopeKey || '').trim();
   const settings = embeddingSettings || await readNarrativeEmbeddingSettings();
   const configProfileId = narrativeEmbeddingConfigFingerprint(settings);
-  const store = await readNarrativeArchiveStore();
+  const store = await readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [key] });
   const scope = normalizeNarrativeArchiveScope(store[key], key);
   const entries = scope.entries || [];
-  const ready = entries.filter(item => item?.embedding?.status === 'ready' && item?.embedding?.configProfileId === configProfileId).length;
-  const stale = entries.filter(item => item?.embedding?.status === 'ready' && item?.embedding?.configProfileId !== configProfileId).length;
+  const ready = entries.filter(item => item?.embedding?.status === 'ready' && item?.embedding?.configProfileId === configProfileId && narrativeEmbeddingHasVectorReference(item.embedding)).length;
+  const stale = entries.filter(item => item?.embedding?.status === 'ready' && item?.embedding?.configProfileId !== configProfileId && narrativeEmbeddingHasVectorReference(item.embedding)).length;
   const failed = entries.filter(item => ['failed', 'invalid'].includes(text(item?.embedding?.status || '').toLowerCase())).length;
   const status = {
     scopeKey: key,
@@ -6111,7 +6685,10 @@ const inspectNarrativeArchiveScope = async (scopeKey = Runtime.arcDirector?.scop
     configProfileId,
     provider: settings.provider,
     model: settings.model,
-    enabled: settings.enabled === true
+    enabled: settings.enabled === true,
+    vectorStorageMode: NARRATIVE_LOCAL_VECTOR_STORAGE_MODE,
+    localVectorCacheEntries: NarrativeLocalVectorCache.size,
+    localVectorStats: narrativeEmbeddingSafeClone(NarrativeLocalVectorStats)
   };
   Runtime.narrativeArchive = { ...Runtime.narrativeArchive, ...status };
   return status;
@@ -6127,7 +6704,7 @@ const upsertNarrativeArchiveBoundary = async (arc, turns = [], previousArc = nul
   const chatHash = text(arc?.basis?.chatHash || arcCanonicalChatHash(turns)).trim();
   const id = narrativeArchiveEntryId(scopeKey, window.end, chatHash);
   const documentHash = `gna_doc_${narrativeEmbeddingStableHash(document)}`;
-  const store = await readNarrativeArchiveStore();
+  const store = await readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [scopeKey] });
   const scope = normalizeNarrativeArchiveScope(store[scopeKey], scopeKey);
   const index = scope.entries.findIndex(item => item.id === id || (Number(item.turnEnd || 0) === window.end && text(item.chatHash || '') === chatHash));
   const previousEntry = index >= 0 ? scope.entries[index] : null;
@@ -6135,7 +6712,7 @@ const upsertNarrativeArchiveBoundary = async (arc, turns = [], previousArc = nul
   const configProfileId = narrativeEmbeddingConfigFingerprint(settings);
   const sameDocumentVector = previousEntry?.documentHash === documentHash
     && previousEntry?.embedding?.status === 'ready'
-    && text(previousEntry?.embedding?.vector || '').trim();
+    && narrativeEmbeddingHasVectorReference(previousEntry?.embedding);
   const entry = {
     schema: NARRATIVE_ARCHIVE_ENTRY_SCHEMA,
     id,
@@ -6202,7 +6779,7 @@ const upsertNarrativeArchiveBoundary = async (arc, turns = [], previousArc = nul
     };
     Runtime.narrativeArchive.lastError = entry.embedding.error;
   }
-  const latestStore = await readNarrativeArchiveStore();
+  const latestStore = await readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [scopeKey] });
   const latestScope = normalizeNarrativeArchiveScope(latestStore[scopeKey], scopeKey);
   const latestIndex = latestScope.entries.findIndex(item => item.id === entry.id);
   if (latestIndex >= 0) latestScope.entries[latestIndex] = entry; else latestScope.entries.push(entry);
@@ -6222,14 +6799,14 @@ const recallNarrativeArchiveForBoundary = async (existingArc, snapshot, newTurns
     const validated = NarrativeEmbeddingProviderRegistry.validateConfig(settings);
     if (!validated.ok) return { ...fallback, reason: `archive_embedding_unconfigured:${validated.missing.join(',')}` };
     const scopeKey = text(existingArc?.scopeKey || arcDirectorScopeKey(snapshot)).trim();
-    const store = await readNarrativeArchiveStore();
+    const store = await readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [scopeKey] });
     const scope = normalizeNarrativeArchiveScope(store[scopeKey], scopeKey);
     const turns = arcCanonicalCompletedTurns(snapshot);
     const previousThrough = Math.max(0, Number(existingArc?.basis?.throughTurn || 0));
     const configProfileId = narrativeEmbeddingConfigFingerprint(settings);
     const eligible = (scope.entries || []).filter(entry => {
       if (entry?.embedding?.status !== 'ready' || entry?.embedding?.configProfileId !== configProfileId) return false;
-      if (!text(entry?.embedding?.vector || '').trim()) return false;
+      if (!narrativeEmbeddingHasVectorReference(entry?.embedding) && !narrativeEmbeddingSketch(entry?.embedding).length) return false;
       if (entry.inherited !== true && Number(entry.turnEnd || 0) > Math.max(0, previousThrough - ARC_DIRECTOR_UPDATE_INTERVAL)) return false;
       return narrativeArchiveEntryBranchValid(entry, turns, scopeKey);
     });
@@ -6241,9 +6818,24 @@ const recallNarrativeArchiveForBoundary = async (existingArc, snapshot, newTurns
     const result = await NarrativeEmbeddingProviderRegistry.embedTexts(settings, [query], { purpose: 'query' });
     const queryVector = result?.vectors?.[0] || [];
     if (!Array.isArray(queryVector) || !queryVector.length) return { ...fallback, reason: 'archive_query_vector_empty' };
-    const scored = eligible.map(entry => {
-      const vector = decodeNarrativeVector(entry.embedding.vector);
-      return { entry, score: vector.length === queryVector.length ? cosineNarrativeVectors(queryVector, vector) : -1 };
+    const querySketch = foldNarrativeVectorSketch(queryVector);
+    const preRanked = eligible.map(entry => {
+      const sketch = narrativeEmbeddingSketch(entry.embedding);
+      const sketchScore = sketch.length === querySketch.length ? cosineNarrativeVectors(querySketch, sketch) : -1;
+      return { entry, sketchScore };
+    }).sort((a, b) => b.sketchScore - a.sketchScore || Number(b.entry.turnEnd || 0) - Number(a.entry.turnEnd || 0));
+    const shortlistLimit = Math.max(24, Math.min(64, Number(settings.recallTopK || NARRATIVE_ARCHIVE_DEFAULT_TOP_K) * 8));
+    const shortlisted = preRanked.slice(0, shortlistLimit);
+    const loadedCandidates = await Promise.all(shortlisted.map(async item => ({
+      ...item,
+      vector: await loadNarrativeArchiveEntryVector(item.entry)
+    })));
+    const scored = loadedCandidates.map(item => {
+      const hasFullVector = item.vector.length === queryVector.length;
+      const score = hasFullVector
+        ? cosineNarrativeVectors(queryVector, item.vector)
+        : (Number.isFinite(item.sketchScore) ? item.sketchScore * 0.92 : -1);
+      return { entry: item.entry, score, vectorSource: hasFullVector ? 'full_local_or_inline' : 'synced_sketch_fallback' };
     }).filter(item => Number.isFinite(item.score) && item.score >= settings.recallMinScore)
       .sort((a, b) => b.score - a.score || Number(b.entry.turnEnd || 0) - Number(a.entry.turnEnd || 0))
       .slice(0, settings.recallTopK);
@@ -6270,10 +6862,12 @@ const recallNarrativeArchiveForBoundary = async (existingArc, snapshot, newTurns
       lastRecallCount: blocks.length,
       lastRecallCandidates: eligible.length,
       lastRecallScores: scored.map(item => Number(item.score.toFixed(4))),
-      lastRecallMatches: scored.map(item => ({ id: item.entry.id, turnStart: item.entry.turnStart, turnEnd: item.entry.turnEnd, score: Number(item.score.toFixed(4)) })),
+      lastRecallMatches: scored.map(item => ({ id: item.entry.id, turnStart: item.entry.turnStart, turnEnd: item.entry.turnEnd, score: Number(item.score.toFixed(4)), vectorSource: item.vectorSource })),
+      lastRecallShortlist: shortlisted.length,
+      localVectorCacheEntries: NarrativeLocalVectorCache.size,
       lastError: ''
     };
-    return { ok: true, active: true, entries: scored.map(item => ({ id: item.entry.id, turnStart: item.entry.turnStart, turnEnd: item.entry.turnEnd, score: item.score })), promptBlock, reason: blocks.length ? 'archive_recall_ready' : 'archive_below_threshold', elapsedMs: Date.now() - startedAt };
+    return { ok: true, active: true, entries: scored.map(item => ({ id: item.entry.id, turnStart: item.entry.turnStart, turnEnd: item.entry.turnEnd, score: item.score, vectorSource: item.vectorSource })), promptBlock, reason: blocks.length ? 'archive_recall_ready' : 'archive_below_threshold', elapsedMs: Date.now() - startedAt };
   } catch (error) {
     const reason = compact(error?.message || error, 500);
     Runtime.narrativeArchive = { ...Runtime.narrativeArchive, lastRecallAt: Date.now(), lastRecallCount: 0, lastRecallScores: [], lastRecallMatches: [], lastError: reason };
@@ -6314,16 +6908,16 @@ const repairNarrativeArchiveLedgerSections = async (scopeKey, ledgerEntries = []
   const key = text(scopeKey || '').trim();
   if (!key) return { repaired: 0, vectorsInvalidated: 0, total: 0 };
   const settings = await readNarrativeEmbeddingSettings();
-  const store = await readNarrativeArchiveStore();
+  const store = await readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [key] });
   const scope = normalizeNarrativeArchiveScope(store[key], key);
   let repaired = 0;
   let vectorsInvalidated = 0;
   const entries = scope.entries.map(entry => {
-    if (entry.inherited === true) return entry;
+    if (entry.inherited === true || entry.archiveReferenceOnly === true) return entry;
     const nextDocument = replaceNarrativeArchiveBeatLedgerSection(entry.document, ledgerEntries, entry.turnStart, entry.turnEnd);
     if (!nextDocument || nextDocument === entry.document) return entry;
     repaired += 1;
-    const hadVector = !!text(entry?.embedding?.vector || '').trim() || entry?.embedding?.status === 'ready';
+    const hadVector = narrativeEmbeddingHasVectorReference(entry?.embedding) || entry?.embedding?.status === 'ready';
     if (hadVector) vectorsInvalidated += 1;
     return {
       ...entry,
@@ -6338,6 +6932,10 @@ const repairNarrativeArchiveLedgerSections = async (scopeKey, ledgerEntries = []
         model: settings.model,
         dimensions: 0,
         vector: '',
+        vectorHash: '',
+        vectorSketch: [],
+        localVectorRef: null,
+        hasVector: false,
         updatedAt: Date.now(),
         error: hadVector ? 'Archive text changed after Beat Ledger repair; regenerate vectors manually.' : ''
       }
@@ -6361,11 +6959,11 @@ const rebuildNarrativeArchiveVectors = async (scopeKey = Runtime.arcDirector?.sc
   if (settings.enabled !== true) throw new Error('먼저 Narrative Archive 임베딩 연결을 활성화하세요.');
   const validated = NarrativeEmbeddingProviderRegistry.validateConfig(settings);
   if (!validated.ok) throw new Error(`임베딩 설정이 완전하지 않습니다: ${validated.missing.join(', ')}`);
-  const store = await readNarrativeArchiveStore();
+  const store = await readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [key] });
   const scope = normalizeNarrativeArchiveScope(store[key], key);
   if (!scope.entries.length) throw new Error('현재 채팅에 재생성할 Narrative Archive 기록이 없습니다.');
   const configProfileId = narrativeEmbeddingConfigFingerprint(settings);
-  const entries = scope.entries.map(item => ({ ...item, embedding: { ...(item.embedding || {}) } }));
+  const entries = scope.entries.filter(item => item.archiveReferenceOnly !== true).map(item => ({ ...item, embedding: { ...(item.embedding || {}) } }));
   Runtime.narrativeArchive = { ...Runtime.narrativeArchive, rebuilding: true, rebuildDone: 0, rebuildTotal: entries.length, lastError: '' };
   const batchSize = Math.max(1, Math.min(Number(settings.batchSize || 8), 24));
   let success = 0, failed = 0;
@@ -6395,7 +6993,7 @@ const rebuildNarrativeArchiveVectors = async (scopeKey = Runtime.arcDirector?.sc
         const message = compact(error?.message || error, 500);
         batch.forEach(entry => {
           const previousEmbedding = entry.embedding && typeof entry.embedding === 'object' ? entry.embedding : {};
-          const hasPreservableVector = previousEmbedding.status === 'ready' && text(previousEmbedding.vector || '').trim();
+          const hasPreservableVector = previousEmbedding.status === 'ready' && narrativeEmbeddingHasVectorReference(previousEmbedding);
           entry.embedding = hasPreservableVector
             ? { ...previousEmbedding, rebuildFailedAt: Date.now(), rebuildError: message }
             : { ...previousEmbedding, status: 'failed', configProfileId, provider: settings.provider, model: settings.model, vector: '', updatedAt: Date.now(), error: message };
@@ -14400,6 +14998,9 @@ function mergeAgentCbsWarnings(...warningLists) {
       writerDesignHandoff: true,
       narrativeArchiveHandoff: true,
       narrativeArchiveInheritedHistory: true,
+      narrativeArchiveSharedReference: true,
+      physicalNarrativeArchiveCopyOnHandoff: false,
+      summaryInspect: true,
       storyArcSessionRebase: true,
       durableReadback: true,
       nativeChatCopy: true
@@ -14420,22 +15021,29 @@ function mergeAgentCbsWarnings(...warningLists) {
     return { ok: true, reason: 'story_arc_chat_hash_match', arc, throughTurn };
   };
 
-  const inspectGradiaForRetrace = async () => {
+  const inspectGradiaForRetrace = async (options = {}) => {
+    const includePayload = options?.includePayload !== false;
     const context = await resolveNativeChatCopyContext();
     if (!context?.ok || !context.character || !context.chat) {
       return {
         schema: GRADIA_RETRACE_INSPECT_SCHEMA,
         pluginVersion: PLUGIN_VERSION,
         available: false,
+        payloadIncluded: includePayload,
         integrity: { ok: false, reason: context?.reason || 'current_chat_unavailable' },
         scope: {}, counts: { storyArc: 0, writerDesign: 0, narrativeArchive: 0, manualUserIntent: 0 },
-        storyArc: null, writerDesign: null, narrativeArchive: null, snapshotHash: '', inspectedAt: new Date().toISOString()
+        storyArc: null, writerDesign: null, narrativeArchive: null, narrativeArchiveRef: null,
+        snapshotHash: '', inspectedAt: new Date().toISOString()
       };
     }
     const chatId = nativeChatCopyChatId(context.chat);
     const characterId = nativeChatCopyCharacterId(context.character);
     const turns = nativeChatCopyCanonicalTurnsFromChat(context.chat);
-    const [arcStore, writerStore, archiveStore] = await Promise.all([readStoryArcStore(), readWriterDesignStore(), readNarrativeArchiveStore()]);
+    const [arcStore, writerStore, archiveLocalStore] = await Promise.all([
+      readStoryArcStore(),
+      readWriterDesignStore(),
+      readNarrativeArchiveStore({ hydrateShared: false })
+    ]);
     const directArcScopeKey = nativeChatCopyArcScopeKey(context.character, context.chat, context.identity || '');
     let sourceArcEntry = null;
     const directArcRaw = arcStore[directArcScopeKey];
@@ -14444,39 +15052,42 @@ function mergeAgentCbsWarnings(...warningLists) {
       sourceArcEntry = { storeKey: directArcScopeKey, ...compatible };
     }
     if (!sourceArcEntry?.ok) {
-      const found = findNativeChatCopyArcForChat(
-        arcStore,
-        context.character,
-        context.chat,
-        context.characterIndex,
-        context.chatIndex,
-        []
-      );
+      const found = findNativeChatCopyArcForChat(arcStore, context.character, context.chat, context.characterIndex, context.chatIndex, []);
       if (found?.arc) sourceArcEntry = { storeKey: found.storeKey, ok: true, reason: 'story_arc_found_by_canonical_hash', arc: found.arc, throughTurn: found.throughTurn };
     }
     const storyArc = sourceArcEntry?.ok ? normalizeStoryArcPackage(sourceArcEntry.arc, sourceArcEntry.arc) : null;
     const storyArcIssue = directArcRaw && !sourceArcEntry?.ok ? (sourceArcEntry?.reason || 'story_arc_invalid') : '';
-
     const archiveScopeKey = text(sourceArcEntry?.storeKey || directArcScopeKey).trim();
-    const rawArchiveScope = archiveScopeKey ? archiveStore[archiveScopeKey] : null;
-    const normalizedArchiveScope = rawArchiveScope ? normalizeNarrativeArchiveScope(rawArchiveScope, archiveScopeKey) : null;
-    const effectiveArchiveEntries = normalizedArchiveScope
-      ? (normalizedArchiveScope.entries || []).filter(entry => narrativeArchiveEntryBranchValid(entry, turns, archiveScopeKey))
-      : [];
-    const narrativeArchive = effectiveArchiveEntries.length ? {
-      ...gradiaRetraceClone(normalizedArchiveScope),
-      scopeKey: archiveScopeKey,
-      entries: effectiveArchiveEntries.map(entry => gradiaRetraceClone(entry))
-    } : null;
-
+    const localArchiveScope = normalizeNarrativeArchiveScope(archiveLocalStore[archiveScopeKey], archiveScopeKey);
+    const archiveRef = normalizeNarrativeSharedArchiveRef(localArchiveScope.archiveRef);
+    const sharedMeta = archiveRef ? await readNarrativeSharedArchiveMeta(archiveRef) : null;
+    const archiveRefVerified = !archiveRef || (!!sharedMeta
+      && Number(sharedMeta.entryCount || 0) === Number(archiveRef.entryCount || 0)
+      && text(sharedMeta.digest || '') === text(archiveRef.digest || ''));
+    const validLocalEntries = (localArchiveScope.entries || []).filter(entry => narrativeArchiveEntryBranchValid(entry, turns, archiveScopeKey));
+    let narrativeArchive = null;
+    let archiveCatalog = [];
+    if (includePayload) {
+      const hydratedStore = await readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [archiveScopeKey] });
+      const hydratedScope = normalizeNarrativeArchiveScope(hydratedStore[archiveScopeKey], archiveScopeKey);
+      const effectiveEntries = (hydratedScope.entries || []).filter(entry => narrativeArchiveEntryBranchValid(entry, turns, archiveScopeKey));
+      archiveCatalog = narrativeSharedArchiveCatalog(effectiveEntries);
+      if (effectiveEntries.length) narrativeArchive = { ...gradiaRetraceClone(hydratedScope), scopeKey: archiveScopeKey, entries: effectiveEntries.map(entry => gradiaRetraceClone(entry)) };
+    } else {
+      const byId = new Map((Array.isArray(sharedMeta?.catalog) ? sharedMeta.catalog : []).map(item => [text(item.archiveCanonicalId || ''), item]));
+      for (const entry of validLocalEntries) {
+        const fingerprint = narrativeSharedArchiveEntryFingerprint(entry);
+        byId.set(text(fingerprint.archiveCanonicalId || ''), fingerprint);
+      }
+      archiveCatalog = Array.from(byId.values()).filter(item => text(item.archiveCanonicalId || '')).sort((a, b) => text(a.archiveCanonicalId).localeCompare(text(b.archiveCanonicalId)));
+    }
+    const narrativeArchiveCount = archiveCatalog.length;
+    const narrativeArchiveContentHash = narrativeSharedArchiveCatalogDigest(archiveCatalog);
     const writerScope = nativeChatCopyWriterScopeKey(context.character, context.chat);
     const rawWriter = writerStore[writerScope];
     const writerDesign = rawWriter ? normalizeWriterDesignPackage(rawWriter, rawWriter) : null;
     const writerAhead = !!writerDesign && Math.max(0, Number(writerDesign.completedTurnCount || 0)) > turns.length;
-    const integrityOk = !storyArcIssue && !writerAhead;
-    // The handoff snapshot must be stable across repeated inspection. Normalizers may
-    // synthesize timestamps for legacy/missing fields, so hash the durable raw records
-    // plus the canonical visible chat state instead of the normalized presentation copy.
+    const integrityOk = !storyArcIssue && !writerAhead && archiveRefVerified;
     const sourceArcStoreKey = storyArc ? (sourceArcEntry?.storeKey || directArcScopeKey) : '';
     const sourceArcRaw = sourceArcStoreKey ? (arcStore[sourceArcStoreKey] || sourceArcEntry?.arc || null) : null;
     const snapshotPayload = {
@@ -14486,28 +15097,30 @@ function mergeAgentCbsWarnings(...warningLists) {
       canonicalChatHash: arcCanonicalChatHash(turns),
       storyArcScopeKey: sourceArcStoreKey,
       storyArcRawHash: sourceArcRaw ? gradiaRetraceHash(sourceArcRaw) : '',
-      narrativeArchiveScopeKey: narrativeArchive ? archiveScopeKey : '',
-      narrativeArchiveHash: narrativeArchive ? gradiaRetraceHash(narrativeArchive) : '',
-      narrativeArchiveCount: narrativeArchive?.entries?.length || 0,
+      narrativeArchiveScopeKey: narrativeArchiveCount ? archiveScopeKey : '',
+      narrativeArchiveContentHash,
+      narrativeArchiveCount,
       writerScopeKey: writerDesign ? writerScope : '',
       writerRawHash: rawWriter ? gradiaRetraceHash(rawWriter) : ''
     };
     return {
       schema: GRADIA_RETRACE_INSPECT_SCHEMA,
       pluginVersion: PLUGIN_VERSION,
-      available: integrityOk && !!(storyArc || writerDesign || narrativeArchive),
+      available: integrityOk && !!(storyArc || writerDesign || narrativeArchiveCount),
+      payloadIncluded: includePayload,
+      capabilities: { sharedNarrativeArchiveRefV1: true, summaryInspect: true, physicalNarrativeArchiveCopies: 0 },
       integrity: {
         ok: integrityOk,
-        reason: storyArcIssue || (writerAhead ? 'writer_design_ahead_of_chat' : 'ok'),
+        reason: storyArcIssue || (writerAhead ? 'writer_design_ahead_of_chat' : !archiveRefVerified ? 'narrative_archive_ref_mismatch' : 'ok'),
         storyArc: storyArc ? 'ok' : (directArcRaw ? storyArcIssue : 'absent'),
-        narrativeArchive: narrativeArchive ? 'ok' : rawArchiveScope ? 'no_branch_valid_entries' : 'absent',
+        narrativeArchive: narrativeArchiveCount ? (archiveRefVerified ? 'ok' : 'archive_ref_mismatch') : 'absent',
         writerDesign: writerAhead ? 'writer_design_ahead_of_chat' : writerDesign ? 'ok' : 'absent'
       },
       scope: {
         characterId,
         chatId,
         storyArcScopeKey: storyArc ? sourceArcEntry?.storeKey || directArcScopeKey : '',
-        narrativeArchiveScopeKey: narrativeArchive ? archiveScopeKey : '',
+        narrativeArchiveScopeKey: narrativeArchiveCount ? archiveScopeKey : '',
         writerScopeKey: writerDesign ? writerScope : '',
         characterIndex: context.characterIndex,
         chatIndex: context.chatIndex
@@ -14515,14 +15128,15 @@ function mergeAgentCbsWarnings(...warningLists) {
       counts: {
         storyArc: storyArc ? 1 : 0,
         writerDesign: writerDesign ? 1 : 0,
-        narrativeArchive: narrativeArchive?.entries?.length || 0,
+        narrativeArchive: narrativeArchiveCount,
         manualUserIntent: writerDesign?.manualUserIntent ? 1 : 0,
         storyArcBeats: Array.isArray(storyArc?.beats) ? storyArc.beats.length : 0,
         completedTurns: turns.length
       },
-      storyArc: storyArc ? gradiaRetraceClone(storyArc) : null,
-      writerDesign: writerDesign ? gradiaRetraceClone(writerDesign) : null,
-      narrativeArchive: narrativeArchive ? gradiaRetraceClone(narrativeArchive) : null,
+      storyArc: includePayload && storyArc ? gradiaRetraceClone(storyArc) : null,
+      writerDesign: includePayload && writerDesign ? gradiaRetraceClone(writerDesign) : null,
+      narrativeArchive: includePayload ? narrativeArchive : null,
+      narrativeArchiveRef: archiveRef,
       snapshotHash: gradiaRetraceHash(snapshotPayload),
       inspectedAt: new Date().toISOString()
     };
@@ -14544,16 +15158,26 @@ function mergeAgentCbsWarnings(...warningLists) {
     const expectedNarrativeArchive = gradiaHandoffExpectedArchiveCount(options, inspection.counts?.narrativeArchive || 0);
     if (Number(inspection.counts?.storyArc || 0) !== expectedStoryArc
       || Number(inspection.counts?.writerDesign || 0) !== expectedWriterDesign
-      || Number(inspection.counts?.narrativeArchive || 0) !== expectedNarrativeArchive) {
-      throw new Error('GRADIA handoff source count changed before preparation.');
-    }
+      || Number(inspection.counts?.narrativeArchive || 0) !== expectedNarrativeArchive) throw new Error('GRADIA handoff source count changed before preparation.');
     const expectedSnapshotHash = text(options.expectedSnapshotHash || '').trim();
-    if (expectedSnapshotHash && expectedSnapshotHash !== text(inspection.snapshotHash || '')) {
-      throw new Error('GRADIA handoff source snapshot changed before preparation.');
+    if (expectedSnapshotHash && expectedSnapshotHash !== text(inspection.snapshotHash || '')) throw new Error('GRADIA handoff source snapshot changed before preparation.');
+    let archiveRef = null;
+    if (expectedNarrativeArchive) {
+      const archive = await ensureGradiaSharedNarrativeArchive(inspection.narrativeArchive, inspection.scope?.narrativeArchiveScopeKey || inspection.scope?.storyArcScopeKey || '');
+      archiveRef = archive.archiveRef;
+      if (archive.entries.length !== expectedNarrativeArchive) throw new Error('GRADIA shared Narrative Archive count mismatch.');
+      const archiveStore = await readNarrativeArchiveStore({ hydrateShared: false });
+      const sourceScopeKey = text(inspection.scope?.narrativeArchiveScopeKey || inspection.scope?.storyArcScopeKey || '');
+      if (sourceScopeKey) {
+        const sourceScope = normalizeNarrativeArchiveScope(archiveStore[sourceScopeKey], sourceScopeKey);
+        archiveStore[sourceScopeKey] = { ...sourceScope, archiveRef, entries: [] };
+        await writeNarrativeArchiveStore(archiveStore);
+      }
     }
     const preparedAt = Date.now();
     const packageData = {
       schema: GRADIA_RETRACE_HANDOFF_PACKAGE_SCHEMA,
+      archiveContract: NARRATIVE_SHARED_ARCHIVE_REF_SCHEMA,
       transferId,
       sourceChatId: text(inspection.scope?.chatId || ''),
       sourceCharacterId: text(inspection.scope?.characterId || ''),
@@ -14567,7 +15191,8 @@ function mergeAgentCbsWarnings(...warningLists) {
       expectedNarrativeArchive,
       storyArc: expectedStoryArc ? gradiaRetraceClone(inspection.storyArc) : null,
       writerDesign: expectedWriterDesign ? gradiaRetraceClone(inspection.writerDesign) : null,
-      narrativeArchive: expectedNarrativeArchive ? gradiaRetraceClone(inspection.narrativeArchive) : null,
+      narrativeArchiveRef: archiveRef,
+      physicalNarrativeArchiveCopies: 0,
       preparedAt,
       expiresAt: preparedAt + GRADIA_RETRACE_HANDOFF_TTL_MS
     };
@@ -14576,25 +15201,18 @@ function mergeAgentCbsWarnings(...warningLists) {
     if (!await writeObject(storageKey, packageData)) throw new Error('GRADIA handoff package save failed.');
     const persisted = await readObject(storageKey, {});
     const persistedHash = gradiaRetraceHash({ ...persisted, packageHash: undefined });
-    if (persisted.schema !== GRADIA_RETRACE_HANDOFF_PACKAGE_SCHEMA
-      || text(persisted.transferId || '') !== transferId
-      || text(persisted.packageHash || '') !== packageData.packageHash
-      || persistedHash !== packageData.packageHash) {
-      throw new Error('GRADIA handoff package durable readback failed.');
-    }
+    if (persisted.schema !== GRADIA_RETRACE_HANDOFF_PACKAGE_SCHEMA || text(persisted.transferId || '') !== transferId || text(persisted.packageHash || '') !== packageData.packageHash || persistedHash !== packageData.packageHash) throw new Error('GRADIA handoff package durable readback failed.');
     return {
       schema: GRADIA_RETRACE_HANDOFF_RECEIPT_SCHEMA,
-      action: 'prepared',
-      prepared: true,
-      durable: true,
-      transferId,
+      action: 'prepared', prepared: true, durable: true, transferId,
       sourceChatId: packageData.sourceChatId,
-      storyArc: expectedStoryArc,
-      expectedStoryArc,
-      writerDesign: expectedWriterDesign,
-      expectedWriterDesign,
-      narrativeArchive: expectedNarrativeArchive,
-      expectedNarrativeArchive,
+      storyArc: expectedStoryArc, expectedStoryArc,
+      writerDesign: expectedWriterDesign, expectedWriterDesign,
+      narrativeArchive: expectedNarrativeArchive, expectedNarrativeArchive,
+      narrativeArchiveId: archiveRef?.archiveId || '',
+      narrativeArchiveGeneration: archiveRef?.generation || 0,
+      narrativeArchiveDigest: archiveRef?.digest || '',
+      physicalNarrativeArchiveCopies: 0,
       sourceSnapshotHash: packageData.sourceSnapshotHash,
       packageHash: packageData.packageHash,
       preparedAt: new Date(preparedAt).toISOString()
@@ -14733,43 +15351,17 @@ function mergeAgentCbsWarnings(...warningLists) {
     };
   };
 
-  const rebaseGradiaNarrativeArchiveForNewSession = (sourceArchive, targetScopeKey, sourceChatId, targetChatId) => {
-    const source = normalizeNarrativeArchiveScope(sourceArchive, text(sourceArchive?.scopeKey || ''));
-    const now = Date.now();
-    const entries = (source.entries || []).map(entry => {
-      const sourceEpoch = narrativeArchiveSessionEpoch(entry);
-      const targetEpoch = sourceEpoch < 0 ? sourceEpoch - 1 : -1;
-      const originEntryId = text(entry.originEntryId || entry.id || '').trim();
-      const originChatId = text(entry.originChatId || sourceChatId || '').trim();
-      const targetId = `gna_inherited_${narrativeEmbeddingStableHash([
-        targetScopeKey,
-        originEntryId || entry.id || '',
-        targetEpoch,
-        sourceChatId || '',
-        targetChatId || ''
-      ].join('|'))}`;
-      return {
-        ...gradiaRetraceClone(entry),
-        id: targetId,
-        scopeKey: targetScopeKey,
-        inherited: true,
-        sessionEpoch: targetEpoch,
-        originEntryId,
-        originChatId,
-        inheritedFromChatId: text(sourceChatId || ''),
-        inheritedFromScopeKey: text(entry.scopeKey || source.scopeKey || ''),
-        inheritedAt: now,
-        updatedAt: now
-      };
-    }).sort(narrativeArchiveChronologyCompare).slice(-NARRATIVE_ARCHIVE_MAX_ENTRIES_PER_SCOPE);
+  const rebaseGradiaNarrativeArchiveForNewSession = (sourceArchive, targetScopeKey, sourceChatId, targetChatId, archiveRefValue = null) => {
+    const archiveRef = normalizeNarrativeSharedArchiveRef(archiveRefValue || sourceArchive?.archiveRef);
     return normalizeNarrativeArchiveScope({
       schema: NARRATIVE_ARCHIVE_SCHEMA,
       scopeKey: targetScopeKey,
-      createdAt: now,
-      updatedAt: now,
+      archiveRef,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
       inheritedFromChatId: text(sourceChatId || ''),
       targetChatId: text(targetChatId || ''),
-      entries
+      entries: []
     }, targetScopeKey);
   };
 
@@ -14826,7 +15418,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     const [arcStore, writerStore, archiveStore] = await Promise.all([
       readStoryArcStore(),
       readWriterDesignStore(),
-      readNarrativeArchiveStore()
+      readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [receipt.targetNarrativeArchiveScopeKey] })
     ]);
     const targetArc = receipt.targetStoryArcScopeKey ? arcStore[receipt.targetStoryArcScopeKey] : null;
     const targetWriter = receipt.targetWriterScopeKey ? writerStore[receipt.targetWriterScopeKey] : null;
@@ -14846,16 +15438,15 @@ function mergeAgentCbsWarnings(...warningLists) {
       : !!targetWriter
         && Math.max(0, Number(targetWriter?.completedTurnCount || 0) || 0) === 0
         && gradiaRetraceHash(normalizeWriterDesignPackage(targetWriter, targetWriter)) === text(receipt.targetWriterHash || '');
+    const targetArchiveRef = normalizeNarrativeSharedArchiveRef(targetArchive?.archiveRef);
     const archiveOk = expectedNarrativeArchive === 0
       ? !receipt.targetNarrativeArchiveScopeKey
       : !!targetArchive
         && targetArchive.entries.length === expectedNarrativeArchive
-        && targetArchive.entries.every(entry => (
-          entry.inherited === true
-          && narrativeArchiveSessionEpoch(entry) < 0
-          && text(entry.scopeKey || '') === text(receipt.targetNarrativeArchiveScopeKey || '')
-        ))
-        && gradiaRetraceHash(targetArchive) === text(receipt.targetNarrativeArchiveHash || '');
+        && targetArchive.entries.every(entry => entry.inherited === true && narrativeArchiveSessionEpoch(entry) < 0)
+        && targetArchiveRef?.archiveId === text(receipt.narrativeArchiveId || '')
+        && targetArchiveRef?.digest === text(receipt.narrativeArchiveDigest || '')
+        && targetArchive.archiveVerified !== false;
     const countOk = Number(receipt.storyArc || 0) === expectedStoryArc
       && Number(receipt.writerDesign || 0) === expectedWriterDesign
       && Number(receipt.narrativeArchive || 0) === expectedNarrativeArchive;
@@ -14872,6 +15463,10 @@ function mergeAgentCbsWarnings(...warningLists) {
       expectedWriterDesign,
       narrativeArchive: verified ? expectedNarrativeArchive : Number(receipt.narrativeArchive || 0),
       expectedNarrativeArchive,
+      narrativeArchiveId: text(targetArchiveRef?.archiveId || receipt.narrativeArchiveId || ''),
+      narrativeArchiveGeneration: Number(targetArchiveRef?.generation || receipt.narrativeArchiveGeneration || 0),
+      narrativeArchiveDigest: text(targetArchiveRef?.digest || receipt.narrativeArchiveDigest || ''),
+      physicalNarrativeArchiveCopies: 0,
       reason: verified ? 'gradia_handoff_readback_verified' : 'gradia_handoff_readback_mismatch',
       verifiedAt: new Date().toISOString()
     };
@@ -14907,6 +15502,10 @@ function mergeAgentCbsWarnings(...warningLists) {
     const expectedNarrativeArchive = archiveExpectationExplicit
       ? gradiaHandoffExpectedArchiveCount(options, 0)
       : Math.max(0, Number(packageData.expectedNarrativeArchive || 0) || 0);
+    const packageArchiveRef = normalizeNarrativeSharedArchiveRef(packageData.narrativeArchiveRef);
+    if (expectedNarrativeArchive > 0 && (!packageArchiveRef || packageArchiveRef.entryCount !== expectedNarrativeArchive)) {
+      throw new Error('GRADIA prepared shared Narrative Archive reference is invalid.');
+    }
     if (Number(packageData.expectedStoryArc || 0) !== expectedStoryArc
       || Number(packageData.expectedWriterDesign || 0) !== expectedWriterDesign
       || Number(packageData.expectedNarrativeArchive || 0) !== expectedNarrativeArchive) {
@@ -14921,7 +15520,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     const [arcStoreRaw, writerStoreRaw, archiveStoreRaw] = await Promise.all([
       readStoryArcStore(),
       readWriterDesignStore(),
-      readNarrativeArchiveStore()
+      readNarrativeArchiveStore({ hydrateShared: false })
     ]);
     const arcStore = { ...(arcStoreRaw || {}) };
     const writerStore = { ...(writerStoreRaw || {}) };
@@ -14934,7 +15533,9 @@ function mergeAgentCbsWarnings(...warningLists) {
     }
     const oldArcStore = gradiaRetraceClone(arcStore) || {};
     const oldWriterStore = gradiaRetraceClone(writerStore) || {};
-    const oldArchiveStore = gradiaRetraceClone(archiveStore) || {};
+    const oldArchiveTarget = Object.prototype.hasOwnProperty.call(archiveStore, targetNarrativeArchiveScopeKey)
+      ? gradiaRetraceClone(archiveStore[targetNarrativeArchiveScopeKey])
+      : undefined;
     let targetArc = null;
     let targetArcRebase = null;
     let targetWriter = null;
@@ -14964,12 +15565,14 @@ function mergeAgentCbsWarnings(...warningLists) {
       }
       if (expectedNarrativeArchive) {
         targetArchive = rebaseGradiaNarrativeArchiveForNewSession(
-          packageData.narrativeArchive,
+          null,
           targetNarrativeArchiveScopeKey,
           packageData.sourceChatId,
-          targetChatId
+          targetChatId,
+          packageData.narrativeArchiveRef
         );
-        if (targetArchive.entries.length !== expectedNarrativeArchive) throw new Error('GRADIA target Narrative Archive rebase count mismatch.');
+        const sharedArchiveRef = normalizeNarrativeSharedArchiveRef(targetArchive.archiveRef);
+        if (!sharedArchiveRef || sharedArchiveRef.entryCount !== expectedNarrativeArchive) throw new Error('GRADIA target shared Narrative Archive reference count mismatch.');
         archiveStore[targetNarrativeArchiveScopeKey] = targetArchive;
         if (!await writeNarrativeArchiveStore(archiveStore)) throw new Error('GRADIA target Narrative Archive save failed.');
       }
@@ -14999,10 +15602,12 @@ function mergeAgentCbsWarnings(...warningLists) {
         packageHash: text(packageData.packageHash || ''),
         targetStoryArcHash: targetArc ? gradiaRetraceHash(normalizeStoryArcPackage(targetArc, targetArc)) : '',
         targetWriterHash: targetWriter ? gradiaRetraceHash(normalizeWriterDesignPackage(targetWriter, targetWriter)) : '',
-        targetNarrativeArchiveHash: targetArchive
-          ? gradiaRetraceHash(normalizeNarrativeArchiveScope(targetArchive, targetNarrativeArchiveScopeKey))
-          : '',
-        targetNarrativeArchiveInheritedEntries: targetArchive?.entries?.length || 0,
+        targetNarrativeArchiveHash: targetArchive?.archiveRef ? gradiaRetraceHash(targetArchive.archiveRef) : '',
+        targetNarrativeArchiveInheritedEntries: expectedNarrativeArchive,
+        narrativeArchiveId: text(targetArchive?.archiveRef?.archiveId || ''),
+        narrativeArchiveGeneration: Number(targetArchive?.archiveRef?.generation || 0),
+        narrativeArchiveDigest: text(targetArchive?.archiveRef?.digest || ''),
+        physicalNarrativeArchiveCopies: 0,
         targetArcRebasedThroughTurn: targetArc ? Math.max(0, Number(targetArc.basis?.throughTurn || 0) || 0) : 0,
         targetArcNextWindowStart: targetArc ? Number(targetArc.basis?.nextWindowStart || 0) : 0,
         targetArcNextWindowEnd: targetArc ? Number(targetArc.basis?.nextWindowEnd || 0) : 0,
@@ -15021,12 +15626,20 @@ function mergeAgentCbsWarnings(...warningLists) {
         expectedNarrativeArchive
       });
       if (verified.verified !== true) throw new Error(verified.reason || 'GRADIA handoff durable verification failed.');
+      try { await RisuCompat.removeItem(gradiaRetracePackageKey(transferId)); } catch (_) {}
       resetNativeChatCopyTransientState('retrace_session_handoff_adopted');
       return { ...verified, action: 'adopted', adopted: true, reason: 'gradia_session_handoff_adopted' };
     } catch (error) {
       try { if (expectedStoryArc) await writeStoryArcStore(oldArcStore); } catch (_) {}
       try { if (expectedWriterDesign) await writeWriterDesignStore(oldWriterStore); } catch (_) {}
-      try { if (expectedNarrativeArchive) await writeNarrativeArchiveStore(oldArchiveStore); } catch (_) {}
+      try {
+        if (expectedNarrativeArchive) {
+          const rollbackStore = await readNarrativeArchiveStore({ hydrateShared: false });
+          if (oldArchiveTarget === undefined) delete rollbackStore[targetNarrativeArchiveScopeKey];
+          else rollbackStore[targetNarrativeArchiveScopeKey] = oldArchiveTarget;
+          await writeNarrativeArchiveStore(rollbackStore);
+        }
+      } catch (_) {}
       try { await RisuCompat.removeItem(gradiaRetraceReceiptKey(transferId)); } catch (_) {}
       throw error;
     }
@@ -15052,7 +15665,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       let error = '';
       try {
         if (action === 'ping' || action === 'capabilities') result = gradiaRetraceCapabilities();
-        else if (action === 'inspect') result = await inspectGradiaForRetrace();
+        else if (action === 'inspect') result = await inspectGradiaForRetrace(request.payload || {});
         else if (action === 'prepare_session_handoff') result = await prepareGradiaSessionHandoff(request.payload || {});
         else if (action === 'adopt_session_handoff') result = await adoptGradiaSessionHandoff(request.payload || {});
         else if (action === 'verify_session_handoff') result = await verifyGradiaSessionHandoff(request.payload || {});
@@ -34638,7 +35251,7 @@ const hydrateNarrativeArchiveViewerGuiState = async () => {
       return [];
     }
     const settings = await readNarrativeEmbeddingSettings();
-    const store = await readNarrativeArchiveStore();
+    const store = await readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [scopeKey] });
     const scope = normalizeNarrativeArchiveScope(store[scopeKey], scopeKey);
     const recallMap = new Map((Array.isArray(Runtime.narrativeArchive?.lastRecallMatches) ? Runtime.narrativeArchive.lastRecallMatches : []).map(item => [item.id, item]));
     Gui.narrativeArchiveEntries = scope.entries.slice().sort(narrativeArchiveChronologyCompare).reverse().map(entry => {
@@ -34650,7 +35263,7 @@ const hydrateNarrativeArchiveViewerGuiState = async () => {
         ...narrativeEmbeddingSafeClone(entryWithoutEmbedding),
         embedding: {
           ...narrativeEmbeddingSafeClone(embeddingWithoutVector),
-          hasVector: !!text(sourceVector || '').trim(),
+          hasVector: !!text(sourceVector || '').trim() || !!normalizeNarrativeLocalVectorRef(sourceEmbedding.localVectorRef),
           vector: ''
         },
         lastRecall: recallMap.get(sourceEntry.id) || null
@@ -36469,7 +37082,7 @@ const buildNarrativeArchiveViewerPage = () => {
     internalCodeName: INTERNAL_CODE_NAME,
     version: PLUGIN_VERSION,
     retraceCapabilities: () => gradiaRetraceClone(gradiaRetraceCapabilities()),
-    inspectForRetrace: async () => gradiaRetraceClone(await inspectGradiaForRetrace()),
+    inspectForRetrace: async (options = {}) => gradiaRetraceClone(await inspectGradiaForRetrace(options)),
     prepareSessionHandoff: async options => gradiaRetraceClone(await prepareGradiaSessionHandoff(options || {})),
     adoptSessionHandoff: async options => gradiaRetraceClone(await adoptGradiaSessionHandoff(options || {})),
     verifySessionHandoff: async options => gradiaRetraceClone(await verifyGradiaSessionHandoff(options || {})),
@@ -36512,6 +37125,16 @@ const buildNarrativeArchiveViewerPage = () => {
     },
     async openSettingsGui() { return await showSettingsGui(); },
     async closeSettingsGui() { return await hideSettingsGui(); },
+    getNarrativeLocalVectorStorageStats() {
+      return narrativeEmbeddingSafeClone({
+        mode: NARRATIVE_LOCAL_VECTOR_STORAGE_MODE,
+        sketchDimensions: NARRATIVE_VECTOR_SKETCH_DIMS,
+        cacheEntries: NarrativeLocalVectorCache.size,
+        ...NarrativeLocalVectorStats
+      });
+    },
+    async debugLoadNarrativeArchiveEntryVector(entry = {}) { return await loadNarrativeArchiveEntryVector(entry); },
+    debugFoldNarrativeVectorSketch(vector = []) { return foldNarrativeVectorSketch(vector); },
     async debugNativeChatCopy(options = {}) {
       const result = await ensureNativeChatCopyAdopted({ force: options.force !== false });
       return JSON.parse(JSON.stringify({
