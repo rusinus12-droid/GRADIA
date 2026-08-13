@@ -1,7 +1,7 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.54
+//@display-name GRADIA v0.25.58
 //@api 3.0
-//@version 0.25.54
+//@version 0.25.58
 
 /* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
 //@allowed-ipc flashback_hayaku_bridge
@@ -823,6 +823,10 @@
  * v0.25.52 stabilizes Story Arc identity and foreground maintenance. Arc scope no longer depends on chat title/live index, compatible legacy arcs are recovered by exact canonical-prefix hash without reanalysis, normal generation never launches a full-history Arc rebuild, and missed/bootstrap boundaries use one bounded latest-five rebase call. Manual full rebuild remains available. It also repairs the legacy lore reranker Top-K=1 regression once (then respects later user changes) and removes button-only Input Assist calls from normal pipeline call estimates.
  * v0.25.53 adds editable English/Korean/Japanese review to every RP/Novel Input Writer choice and to the final delivery picker. Explicitly selected translations override automatic-English delivery, and final delivery identity/static-handoff state is now recorded from the exact edited text that is copied or sent.
  * v0.25.54 removes the Input Manager's always-translate-to-English setting and every implicit translation branch/call estimate. English, Korean, and Japanese remain available only as explicit review actions in the choice and final-delivery editors.
+ * v0.25.55 adds chat/worldline-scoped draft checkpoints for reroll and rollback. A completed draft is stored by exact request identity; when the same clean request returns, GRADIA asks before reusing it. Choosing No discards that checkpoint and runs a fresh draft pipeline, while provider retries continue to reuse their short-lived transport cache without prompting.
+ * v0.25.56 replaces Novel/RP final-injection continuation prompts with one density-invariant same-turn finalization kernel. The originating user request is explicitly distinguished from a post-candidate turn, candidate event semantics and terminal beat are locked, Novel and player-controlled RP receive bounded mode-specific contracts, successful Engine output alone enters preservation mode, and failed Engine runs fall back to ordinary candidate integration instead of being mislabeled as already synthesized.
+ * v0.25.57 hardens reroll/rollback draft checkpoints with a stable visible-turn match fingerprint that ignores transient system/module prompt changes while retaining chat, prior-turn, writing-mode, and language boundaries. Explicit No is now an idempotent, read-back-verified discard with an in-memory tombstone fallback, Escape can no longer silently discard a draft, and confirmation restoration always settles.
+ * v0.25.58 prevents serial AIDEs from replaying repairs already embodied in the current draft. Completed AIDE summaries, domain notes, constraints, and rewrite directives are no longer forwarded as unresolved work; only durable do-not-reveal and POV/knowledge guards survive. Structural patch application also suppresses normalized exact duplicate inserts/replacements as a successful no-op while preserving repetitions that were already present in the source draft.
  * v0.25.51 fixes copy/manual-send clipboard delivery in iframe/WebView runtimes. The copy action now runs inside the originating button click before any modal restore/hide await can consume transient user activation; it tries synchronous selection/execCommand first, then navigator.clipboard, records the method for diagnostics, and keeps the dialog open with the generated text selected when browser policy blocks automated copying.
  *
  * v0.25.23 hardens those contracts after review: unavailable or cross-chat Arc state now
@@ -911,7 +915,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.54';
+  const PLUGIN_VERSION = '0.25.58';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -946,6 +950,7 @@
   const STORAGE_NARRATIVE_SHARED_ARCHIVE_PREFIX = 'serial_gradation_agents_for_rp:narrative_shared_archive:v1:';
   const STORAGE_NARRATIVE_EMBEDDING_SETTINGS_KEY = 'serial_gradation_agents_for_rp:narrative_embedding_settings:v1';
   const STORAGE_NATIVE_CHAT_COPY_REGISTRY_KEY = 'serial_gradation_agents_for_rp:native_chat_copy_registry:v1';
+  const STORAGE_DRAFT_CHECKPOINTS_KEY = 'serial_gradation_agents_for_rp:draft_checkpoints:v1';
   const LOCAL_PROVIDER_SECRETS_KEY = 'serial_gradation_agents_for_rp:provider_secrets:v1';
   const LOCAL_NARRATIVE_EMBEDDING_SECRET_KEY = 'serial_gradation_agents_for_rp:narrative_embedding_secret:v1';
   const LOCAL_BACKEND_HOSTING_TOKEN_KEY = 'serial_gradation_agents_for_rp:backend_hosting_token:v1';
@@ -1408,6 +1413,11 @@
   const REQUEST_REUSE_TTL_MS = 3 * 60 * 1000;
   const REQUEST_FAILURE_REUSE_TTL_MS = 20 * 1000;
   const REQUEST_REUSE_CACHE_MAX = 8;
+  const DRAFT_CHECKPOINT_SCHEMA = 'gradia_draft_checkpoint_v1';
+  const DRAFT_CHECKPOINT_STORE_VERSION = 1;
+  const DRAFT_CHECKPOINT_MATCH_VERSION = 1;
+  const DRAFT_CHECKPOINT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+  const DRAFT_CHECKPOINT_MAX = 12;
   const WRITER_DESIGN_SCHEMA = 'gradia_writer_design_v2';
   const WRITER_STAGE_ID = 'writer_ooc';
   const ARC_DIRECTOR_STAGE_ID = 'arc_director';
@@ -1812,21 +1822,28 @@
   };
 
 
-  const buildPlayerControlledAgencyLedgerBlock = (recent = {}, maxInputChars = 2600) => {
+  const buildPlayerControlledAgencyLedgerBlock = (recent = {}, maxInputChars = 2600, options = {}) => {
     const currentInput = text(submittedCurrentInput(recent) || recent?.latestUser || '').trim();
     const cue = classifyInputAssistContinuationCue(currentInput);
     const inputHash = stableDraftHash(currentInput);
     const excerptLimit = clampInt(maxInputChars, 400, 7000, 2600);
+    const finalization = options?.finalization === true;
     return [
       '[PLAYER-CONTROLLED USER AGENCY LEDGER — HARD BOUNDARY]',
       `current_input_hash=${inputHash}; passive_continuation=${cue.active === true}`,
       currentInput ? `USER-AUTHORED CONTRIBUTION EXCERPT (already enacted / do not reenact):\n${compact(currentInput, excerptLimit)}` : 'USER-AUTHORED CONTRIBUTION: (none; user takes no new action this turn)',
       currentInput.length > excerptLimit ? '- The full exact current submitted input is supplied separately in this prompt/request and is the complete authority; this excerpt is only a compact guard copy.' : '',
       '- Only behavior explicitly contained in the full CURRENT SUBMITTED USER INPUT belongs to the user character for this turn.',
-      '- Never add user dialogue, voluntary movement, action, consent/refusal, decision, thought, feeling, motive, sensory conclusion, or reaction after that contribution.',
-      '- NPC/world actions and consequences may continue autonomously until the next meaningful user decision/action is required.',
+      finalization
+        ? '- Never add user dialogue, intentional action, voluntary movement, consent/refusal, decision, thought, feeling, motive, sensory conclusion, or chosen/voluntary reaction after that contribution. A directly observable externally imposed physical effect is not a voluntary reaction.'
+        : '- Never add user dialogue, voluntary movement, action, consent/refusal, decision, thought, feeling, motive, sensory conclusion, or reaction after that contribution.',
+      finalization
+        ? '- NPC/world autonomy is already represented by valid beats in the supplied candidate. Preserve those beats, but do not generate another NPC/world beat after its endpoint.'
+        : '- NPC/world actions and consequences may continue autonomously until the next meaningful user decision/action is required.',
       '- Externally caused unavoidable effects on the user character are allowed only as effects, never as inferred voluntary reactions.',
-      '- When in doubt about whether a beat belongs to user agency, leave it open and stop.'
+      finalization
+        ? '- When in doubt, preserve the candidate boundary and repair only a proven agency violation.'
+        : '- When in doubt about whether a beat belongs to user agency, leave it open and stop.'
     ].filter(Boolean).join('\n');
   };
 
@@ -1841,6 +1858,13 @@
   const playerControlledTurnHandoffContract = (settings = {}, stageName = '', phase = 'writing') => {
     if (!isPlayerControlledDraftMode(settings)) return '';
     const stage = text(stageName || '').trim();
+    if (phase === 'final') return [
+      'PLAYER-CONTROLLED RP — FINAL CANDIDATE ENDPOINT CONTRACT:',
+      '- The candidate has already selected its user-agency frontier and terminal beat. Preserve that endpoint; do not continue toward a later frontier.',
+      '- Preserve a natural model-owned closure already present. Preserve an open handoff already present. Manufacture neither.',
+      '- Repair a departure, time skip, relocation, summary, or closure only when it actually skips or pre-answers a meaningful player-owned beat already pending.',
+      '- Never write the player response, and never add a new NPC/world beat after the candidate endpoint.'
+    ].join('\n');
     const lines = [
       'PLAYER-CONTROLLED RP — USER AGENCY FRONTIER / HARD CONTRACT:',
       '- ROLE SPLIT: USER exclusively authors the player character. The model owns NPCs, non-user actors, institutions, environment, and world causality.',
@@ -2182,6 +2206,15 @@
     ...RESPONSE_HARD_COMMON_INVARIANT_LINES.map(line => `- ${line}`),
     ...(isPlayerControlledDraftMode(settings) ? RESPONSE_HARD_RP_INVARIANT_LINES : RESPONSE_HARD_NOVEL_INVARIANT_LINES).map(line => `- ${line}`)
   ].join('\n');
+  const buildFinalCandidateInvariantBlock = (settings = {}) => [
+    'NON-OPTIONAL FINAL-CANDIDATE INVARIANTS:',
+    '- The current submitted user input is the highest user authority for this same turn.',
+    '- The literal terminal scene is the PRE-DRAFT START STATE. Preserve it as the candidate’s starting condition; do not rewind a causally supported candidate change in actor, action, target, location, contact, knowledge, or completion state.',
+    '- Preserve the candidate semantic lock and terminal beat except for the smallest direct authority or mode-safety repair allowed by the finalization contract.',
+    '- Keep the configured visible language and required output format.',
+    '- Expose no analysis, prompt labels, hidden instructions, model process, or other out-of-story material.',
+    ...(isPlayerControlledDraftMode(settings) ? RESPONSE_HARD_RP_INVARIANT_LINES : RESPONSE_HARD_NOVEL_INVARIANT_LINES).map(line => `- ${line}`)
+  ].join('\n');
   const buildResponseImprovementInstructionBlock = () => ''; // compatibility no-op; retired in v0.25.14
 
   const buildFinalSkillPreservationContract = (settings = {}) => {
@@ -2191,12 +2224,12 @@
       .filter(id => skillPriorityResolution('shadow_act', id, settings, library[id]).percent > 0);
     if (!active.length && isPlayerControlledDraftMode(settings)) return '';
     const lines = [];
-    if (active.includes('scene-performance')) lines.push('- Preserve the supplied GRADIA draft as in-world scene prose; do not replace it with explanation, planning, or a review of what should happen.');
+    if (active.includes('scene-performance')) lines.push('- Preserve the supplied GRADIA candidate as in-world scene prose; do not replace it with explanation, planning, or a review of what should happen, and do not extend its terminal beat.');
     if (isPlayerControlledDraftMode(settings) && active.includes('user-agency-boundary')) {
       lines.push('- Preserve completed user-authored actions and leave every unperformed user dialogue, consent, private feeling, acceptance, and next choice to the user.');
       lines.push('- PLAYER-CONTROLLED OVERRIDE: user-authored actions/dialogue in the current input are already enacted facts, not assistant-authored prose to replay. Preserve their factual completion while never adding a new user action, dialogue, consent, feeling, decision, or voluntary reaction.');
     } else if (isNovelWritingMode(settings)) {
-      lines.push('- NOVEL AUTHORSHIP: preserve the author’s explicit fixed/reserved commitments, but allow full-cast fiction—including new user-persona action, dialogue, thought, feeling, and decision—when it serves the authorial scene.');
+      lines.push('- NOVEL AUTHORSHIP: preserve the author’s explicit fixed/reserved commitments. Full-cast fiction—including user-persona action, dialogue, thought, feeling, and decision—is allowed only while realizing the candidate’s existing beats; this Skill contract never authorizes a later beat.');
     }
     if (active.includes('output-contract-discipline')) lines.push('- Keep the configured language and return only final RP prose with no acknowledgement, prompt labels, analysis, checklist, or model-process commentary.');
     return ['FINAL SKILL PRESERVATION CONTRACT:', ...lines].join('\n');
@@ -3069,6 +3102,7 @@
     },
     userIntentOoc: { targetStage: 'shadow_act', messages: [], messagesByStage: {}, startedByStage: {}, pendingByStage: {}, summariesByStage: {}, revisionsByStage: {}, busy: false, lastError: '', statusText: '', statusState: 'idle', requestId: 0 },
     requestReuse: { hits: 0, misses: 0, stores: 0, evictions: 0, hostRetryBypasses: 0, lastFingerprint: '', lastReuseAt: 0 },
+    draftCheckpoint: { detections: 0, stores: 0, reuses: 0, discards: 0, corruptions: 0, lastKey: '', lastDecision: '', lastAt: 0, prompted: false, promptUnavailable: false },
     guiPerformance: { stateLoads: 0, lastStateLoadMs: 0, lastStateLoadSource: '', renders: 0, lastRenderMs: 0, maxRenderMs: 0, oocHydrations: 0, lastOocHydrationMs: 0 },
     hookStatus: { input: false, beforeRequest: false, afterRequest: false, replacerPermission: 'unknown', unload: false, setting: false, button: false, inputAssistSendButton: false, retraceIpc: false }
   };
@@ -8878,7 +8912,8 @@ ${JSON.stringify(previousArc.destination)}` : '',
   const isSgaTransportInjectionMessage = message => {
     const body = contentToText(message?.content);
     if (!isSgaInjectionText(body)) return false;
-    if (body.includes(INJECTION_HEADER) && /SCENE TEXT TO REALIZE:/i.test(body)) return true;
+    if (body.includes(INJECTION_HEADER)
+      && /(?:SCENE TEXT TO REALIZE|PRIMARY SAME-TURN (?:NOVEL RESPONSE|NPC\/WORLD RESPONSE) CANDIDATE|ENGINE-SYNTHESIZED FINAL (?:NOVEL|NPC\/WORLD) CANDIDATE):/i.test(body)) return true;
     return currentTurnRole(message) === 'system'
       && LEGACY_INJECTION_HEADERS.some(header => body.includes(header));
   };
@@ -21879,6 +21914,127 @@ function mergeAgentCbsWarnings(...warningLists) {
     });
   };
 
+  const showDraftCheckpointConfirmation = async (checkpoint = {}) => {
+    const question = '동일 인풋을 감지했습니다. 이전에 작성한 초안을 그대로 사용하시겠습니까?';
+    const recordDecision = (decision, prompted, promptUnavailable = false) => {
+      Runtime.draftCheckpoint = {
+        ...(Runtime.draftCheckpoint || {}),
+        lastDecision: decision,
+        lastAt: Date.now(),
+        prompted: prompted === true,
+        promptUnavailable: promptUnavailable === true
+      };
+      return decision;
+    };
+    const guiReady = await canUseInputAssistConfirmationGui();
+    if (!guiReady) {
+      try {
+        if (typeof globalThis?.confirm === 'function') {
+          return recordDecision(globalThis.confirm(question) ? 'reuse' : 'regenerate', true, false);
+        }
+      } catch (_) {}
+      // Never reuse a saved draft without affirmative confirmation. When neither
+      // the GRADIA surface nor a native confirm is available, run a fresh draft
+      // and leave the old checkpoint intact until a successful replacement exists.
+      return recordDecision('regenerate_unprompted', false, true);
+    }
+    const settingsWasVisible = Gui.visible === true;
+    try {
+      const guiApi = getLiveApi(['showContainer']);
+      if (typeof guiApi?.showContainer === 'function') await guiApi.showContainer('fullscreen');
+    } catch (_) {}
+    if (!Gui.root || !document.getElementById('sga-rp-gui-root')) await initSettingsGui();
+    setCompactInputAssistModalSurface(true);
+    Gui.visible = true;
+    Gui.confirmationVisible = true;
+    const clearRoot = () => {
+      if (typeof Gui.root?.replaceChildren === 'function') Gui.root.replaceChildren();
+      else while (Gui.root?.firstChild) Gui.root.removeChild(Gui.root.firstChild);
+    };
+    clearRoot();
+    return await new Promise(resolve => {
+      let settled = false;
+      const app = guiEl('div', { class: 'sga-input-compact-app', dataset: { draftCheckpointDialog: '' } });
+      const card = guiEl('section', {
+        class: 'sga-card wide',
+        style: { width: '100%', margin: '0', padding: '18px', display: 'grid', gap: '14px' }
+      });
+      const restore = async () => {
+        Gui.confirmationVisible = false;
+        Gui.app = null;
+        setCompactInputAssistModalSurface(false);
+        clearRoot();
+        if (settingsWasVisible) {
+          Gui.visible = true;
+          await ensureGuiState(true);
+          await renderSettingsGui();
+          forceTransparentGuiSurface();
+        } else {
+          Gui.visible = false;
+          try {
+            const guiApi = getLiveApi(['hideContainer']);
+            if (typeof guiApi?.hideContainer === 'function') await guiApi.hideContainer();
+          } catch (_) {}
+        }
+      };
+      const finish = async decision => {
+        if (settled) return;
+        settled = true;
+        document.removeEventListener('keydown', keyHandler);
+        try { await restore(); }
+        catch (error) { warn('draft_checkpoint_confirmation_restore_failed', error); }
+        resolve(recordDecision(decision, true, false));
+      };
+      const keyHandler = event => {
+        if (event?.key === 'Escape') {
+          event.preventDefault?.();
+          // This dialog has only two consequential choices. Escape must not be
+          // interpreted as explicit No because No durably discards the checkpoint.
+          event.stopPropagation?.();
+        }
+      };
+      const storedAt = Number(checkpoint?.createdAt || checkpoint?.storedAt || 0);
+      const storedLabel = storedAt > 0 && Number.isFinite(storedAt)
+        ? new Date(storedAt).toLocaleString('ko-KR')
+        : '';
+      const draftPreview = compactMiddle(checkpoint?.finalDraft || '', 1200);
+      document.addEventListener('keydown', keyHandler);
+      card.appendChild(guiEl('div', {}, [
+        guiEl('h2', { text: '동일 인풋 감지' }),
+        guiEl('p', { class: 'sga-note', text: question })
+      ]));
+      if (draftPreview) {
+        card.appendChild(guiEl('pre', {
+          class: 'sga-input-confirm-text',
+          text: draftPreview,
+          style: { maxHeight: '220px', overflow: 'auto', whiteSpace: 'pre-wrap', margin: '0' }
+        }));
+      }
+      card.appendChild(guiEl('div', {
+        class: 'sga-note',
+        text: [storedLabel ? `저장 시각 ${storedLabel}` : '', checkpoint?.finalDraft ? `${text(checkpoint.finalDraft).length.toLocaleString('ko-KR')}자` : ''].filter(Boolean).join(' · ')
+      }));
+      card.appendChild(guiEl('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' } }, [
+        guiEl('button', {
+          class: 'sga-btn ghost',
+          text: '아니오',
+          dataset: { draftCheckpointDecision: 'regenerate' },
+          onClick: () => { void finish('regenerate'); }
+        }),
+        guiEl('button', {
+          class: 'sga-btn primary',
+          text: '예',
+          dataset: { draftCheckpointDecision: 'reuse' },
+          onClick: () => { void finish('reuse'); }
+        })
+      ]));
+      app.appendChild(card);
+      Gui.app = app;
+      Gui.root.appendChild(app);
+      forceTransparentGuiSurface();
+    });
+  };
+
   const showInputAssistDeliveryPicker = async (generated, { onTranslate = null } = {}) => {
     const body = text(generated || '').trim();
     const cancelledResult = { action: 'cancelled', content: '', edited: false, translationLanguage: '' };
@@ -23478,6 +23634,20 @@ function mergeAgentCbsWarnings(...warningLists) {
     };
   };
 
+  const normalizeDraftPatchComparisonText = value => text(value || '')
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const findExactDraftPatchDuplicate = (nodes = [], value = '', excludedId = '') => {
+    const normalized = normalizeDraftPatchComparisonText(value);
+    if (!normalized) return null;
+    return nodes.find(node => (
+      node?.id !== excludedId
+      && normalizeDraftPatchComparisonText(node?.text) === normalized
+    )) || null;
+  };
+
   const applyDraftPatchOperations = (documentValue, editValues = []) => {
     const document = typeof documentValue === 'string'
       ? buildDraftPatchDocument(documentValue)
@@ -23505,6 +23675,15 @@ function mergeAgentCbsWarnings(...warningLists) {
         continue;
       }
       if (edit.operation === 'replace') {
+        if (normalizeDraftPatchComparisonText(edit.content) === normalizeDraftPatchComparisonText(target.text)) {
+          skipped.push({ ...edit, skipReason: 'replacement_unchanged', duplicateOf: target.id });
+          continue;
+        }
+        const duplicate = findExactDraftPatchDuplicate(nodes, edit.content, target.id);
+        if (duplicate) {
+          skipped.push({ ...edit, skipReason: 'duplicate_existing_block', duplicateOf: duplicate.id });
+          continue;
+        }
         target.text = edit.content;
         target.hash = stableDraftHash(target.text);
         applied.push({ ...edit });
@@ -23521,6 +23700,11 @@ function mergeAgentCbsWarnings(...warningLists) {
         continue;
       }
       if (edit.operation === 'insert_before') {
+        const duplicate = findExactDraftPatchDuplicate(nodes, edit.content);
+        if (duplicate) {
+          skipped.push({ ...edit, skipReason: 'duplicate_existing_block', duplicateOf: duplicate.id });
+          continue;
+        }
         const tailId = beforeTail.get(edit.target);
         const insertionIndex = tailId ? findIndex(tailId) + 1 : targetIndex;
         const node = {
@@ -23536,6 +23720,11 @@ function mergeAgentCbsWarnings(...warningLists) {
         continue;
       }
       if (edit.operation === 'insert_after') {
+        const duplicate = findExactDraftPatchDuplicate(nodes, edit.content);
+        if (duplicate) {
+          skipped.push({ ...edit, skipReason: 'duplicate_existing_block', duplicateOf: duplicate.id });
+          continue;
+        }
         const tailId = afterTail.get(edit.target);
         const anchorIndex = tailId ? findIndex(tailId) : findIndex(edit.target);
         if (anchorIndex < 0) {
@@ -23570,6 +23759,14 @@ function mergeAgentCbsWarnings(...warningLists) {
     };
   };
 
+  const isSafeAidePatchNoop = (patch, applied) => (
+    Array.isArray(patch?.edits)
+    && patch.edits.length > 0
+    && (applied?.applied?.length || 0) === 0
+    && applied?.skipped?.length === patch.edits.length
+    && applied.skipped.every(edit => ['duplicate_existing_block', 'replacement_unchanged'].includes(edit.skipReason))
+  );
+
   const isAcceptedAidePatchApplication = (patch, applied) => (
     !!patch
     && !!applied?.ok
@@ -23577,6 +23774,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       !Array.isArray(patch.edits)
       || patch.edits.length === 0
       || (applied.applied?.length || 0) > 0
+      || isSafeAidePatchNoop(patch, applied)
     )
   );
 
@@ -24696,17 +24894,23 @@ Begin directly with the in-world response and finish the complete same-turn draf
         ].join('\n'));
       }
     }
-    for (const stageId of inheritedLedgerOrder(ledger)) {
+    const completedPriorStages = inheritedLedgerOrder(ledger).filter(stageId => {
+      const key = ledgerKeyForStage(stageId);
+      return !!ledger[key];
+    });
+    if (completedPriorStages.length) {
+      parts.push([
+        '[COMPLETED PRIOR AIDES — RESOLVED PATCHES, PRESERVATION ONLY]',
+        'Their analysis summaries, domain notes, constraints, and rewrite directives were already applied to the CURRENT SAME-TURN DRAFT and are intentionally omitted here. Do not reconstruct, repeat, or re-issue those repairs. Reassess only the current draft inside your own domain; when the current draft already resolves a concern, make no edit for it.'
+      ].join('\n'));
+    }
+    for (const stageId of completedPriorStages) {
       const key = ledgerKeyForStage(stageId);
       const entry = ledger[key];
       if (!entry) continue;
       const label = STAGE_DEF_MAP[stageId]?.label || stageId;
-      if (entry.analysis?.summary) parts.push(`[${label} ANALYSIS — inherited in actual execution order]\n${entry.analysis.summary}`);
-      if (entry.domain) parts.push(`[${label} DOMAIN NOTES]\n${compactAnalysisDomain(entry.domain)}`);
-      if (entry.rewriteDirectives?.length) parts.push(`${label} REWRITE DIRECTIVES:\n- ${entry.rewriteDirectives.join('\n- ')}`);
       if (entry.doNotReveal?.length) parts.push(`DO NOT REVEAL (${label}):\n- ${entry.doNotReveal.join('\n- ')}`);
       if (entry.povLimits?.length) parts.push(`POV / KNOWLEDGE LIMITS (${label}):\n- ${entry.povLimits.join('\n- ')}`);
-      if (entry.constraints?.length) parts.push(`${label} CONSTRAINTS:\n- ${entry.constraints.join('\n- ')}`);
     }
     if (Array.isArray(ledger.customAnalyses) && ledger.customAnalyses.length) {
       const customBlocks = ledger.customAnalyses.slice(-12).map((item, index) => {
@@ -24722,7 +24926,7 @@ Begin directly with the in-world response and finish the complete same-turn draf
       if (customBlocks.length) parts.push(`CUSTOM ANALYSIS AGENTS — use as private constraints for the next rewrite:\n${customBlocks.join('\n\n')}`);
     }
     return parts.length
-      ? `INHERITED CONSTRAINTS FROM COMPLETED PRIOR STAGES — actual order: ${inheritedLedgerOrder(ledger).join(' > ')}\n${parts.join('\n\n')}`
+      ? `INHERITED READ-ONLY CONTEXT FROM COMPLETED PRIOR STAGES — actual order: ${inheritedLedgerOrder(ledger).join(' > ')}\n${parts.join('\n\n')}`
       : '';
   };
 
@@ -25938,7 +26142,7 @@ Begin directly with the in-world response and finish the complete same-turn draf
   ]
 }
 ${dedicatedAnalysis ? 'The dedicated analysis is already supplied. Do not repeat or replace it in analysis, domain, rewrite_directives, do_not_reveal, pov_limits, or beats; keep those fields compact as shown and spend the output on exact edits.' : ''}
-Use edits: [] when the current draft already satisfies this stage. Never return the complete draft, unchanged paragraphs, markdown fences, commentary, or prose outside the JSON object.`;
+Use edits: [] when the current draft already satisfies this stage. Never emit an insert or replacement whose normalized prose exactly matches any CURRENT SAME-TURN DRAFT block. Never return the complete draft, unchanged paragraphs, markdown fences, commentary, or prose outside the JSON object.`;
 
   const formatAnalysisTransferForPatch = (value, maxChars = 5200) => {
     if (!isPlainObject(value)) return '';
@@ -26008,6 +26212,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       'You are a serial RP draft analysis-and-patch agent.',
       'The immediately previous pipeline stage already produced the complete same-turn draft. Analyze that exact draft, then return the smallest sufficient set of structural paragraph edits needed for your own domain.',
       'This is a real partial edit operation, not a request to regenerate, paraphrase, summarize, or continue the whole draft.',
+      'Every completed prior AIDE repair is already embodied in CURRENT SAME-TURN DRAFT. Never replay a prior summary, diagnosis, constraint, or rewrite directive as a new edit. Diagnose the current draft independently inside your own domain, and return edits: [] when the alleged gap is already resolved.',
       dedicatedAnalysis
         ? 'A dedicated analysis call has already completed. Treat DEDICATED DOMAIN ANALYSIS as the controlling diagnosis for this patch; do not replace it with a new plan. Convert only its evidence-grounded findings into minimal structural edits.'
         : '',
@@ -26016,6 +26221,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         ? 'Keep actor -> action -> target, speaker, observer, knowledge path, player agency, and the current response boundary literal.'
         : 'Keep actor -> action -> target, speaker, observer, knowledge path, explicit author-fixed/reserved commitments, and the current response boundary literal. Do not impose an RP player-agency boundary on the Novel-mode user persona.',
       'Unchanged draft blocks must not appear in edits. Do not make cosmetic changes without a concrete domain benefit.',
+      'Before emitting insert_before, insert_after, or replace, compare the proposed prose with every CURRENT SAME-TURN DRAFT block. Never emit a normalized exact duplicate of prose already present; existing intentional repetitions must remain untouched.',
       'Each target must be an existing DRAFT_BLOCK id. Copy its hash into expected_hash. Patch content must contain only in-world replacement or insertion prose and must not include DRAFT_BLOCK markers.',
       dedicatedAnalysis
         ? 'Do not re-run or restate the dedicated analysis. Return one short application note and the structural edits only.'
@@ -26046,7 +26252,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       skillGuidance: stageSkillBlockForPrompt(recent, 'patch', settings),
       optionalCriteria: '',
       outputContract: aidePatchJsonContract(stageName, !!dedicatedAnalysis),
-      successCriteria: 'Return the smallest sufficient paragraph patch. Insert new prose only when a concrete domain need requires it.',
+      successCriteria: 'Return the smallest sufficient paragraph patch. Insert new prose only when a concrete current-domain need remains unresolved, and never duplicate an existing draft block.',
       finalReminder: `Return the compact ${stageName} patch JSON now.`
     }, resolvePresetForPromptCompiler(settings, stageName)).text;
     const user = [
@@ -26069,7 +26275,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       olderFacts.text ? `[OLDER COMPLETED TURNS — FILTERED DURABLE FACTS ONLY]\n${olderFacts.text}\n` : '',
       referencePacketBlockForPrompt(recent) ? `[CURRENT-INPUT RELEVANT CANON FOR THIS STAGE]\n${referencePacketBlockForPrompt(recent)}\n` : '',
       recent.systemContext ? `[SYSTEM AND SETTING CONSTRAINTS]\n${compact(recent.systemContext, 2400)}\n` : '',
-      inherited ? `[ALREADY APPLIED PRIOR-STAGE ANALYSIS — READ ONLY]\n${inherited}\n` : '',
+      inherited ? `[COMPLETED PRIOR-STAGE GUARDS — PRESERVATION ONLY]\n${inherited}\n` : '',
       dedicatedAnalysis ? `[DEDICATED DOMAIN ANALYSIS — APPLY THROUGH PATCHES]\n${dedicatedAnalysis}\n` : '',
       '[CURRENT SAME-TURN DRAFT BLOCKS — ONLY PATCH TARGET]',
       `source_hash: ${document.sourceHash}`,
@@ -26289,12 +26495,17 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         beats: patch.beats
       };
       const analysis = precomputedAnalysis || patchAnalysis;
+      const safeNoop = isSafeAidePatchNoop(patch, applied);
       const normalized = {
         schema: FULL_DRAFT_STAGE_SCHEMA,
         stage: stageName,
         ok: true,
         fallback: false,
-        reason: applied.skipped.length ? 'patch_applied_with_structural_skips' : '',
+        reason: safeNoop
+          ? 'patch_redundant_edits_suppressed'
+          : applied.skipped.length
+            ? 'patch_applied_with_structural_skips'
+            : '',
         analysis: {
           summary: analysis.analysis?.summary || patch.analysis.summary,
           constraints: analysis.analysis?.constraints || patch.analysis.constraints,
@@ -26332,7 +26543,11 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       };
       const structuralValidation = {
         ok: true,
-        reason: applied.applied.length ? 'serial_patch_applied' : 'serial_patch_no_change_needed',
+        reason: applied.applied.length
+          ? 'serial_patch_applied'
+          : safeNoop
+            ? 'serial_patch_redundant_noop'
+            : 'serial_patch_no_change_needed',
         metrics: {
           requestedEdits: patch.edits.length,
           appliedEdits: applied.applied.length,
@@ -26831,7 +27046,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       intentItems.length
         ? [
             '[SCENE INTENT]',
-            'Use these only as scene effects and revision intent, not as text to quote or a checklist to display.',
+            'These notes may already be embodied in the candidate. Use them only to repair or deepen an existing mapped beat, never to originate a new beat or extend the candidate endpoint; do not quote or display them as a checklist.',
             ...intentItems.map(item => `- ${item}`)
           ].join('\n')
         : ''
@@ -26863,7 +27078,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       : Math.min(2200, Math.max(260, Math.floor(settings.maxInjectionChars * 0.07)));
     return compact([
       'CREATIVE DIRECTION:',
-      'Express these directions through the scene only where they fit the current facts and the named story domain.',
+      'These directions may already be embodied in the candidate. Use them only to refine an existing mapped beat where they fit current facts and the named story domain; never use them to originate a new beat or extend the candidate endpoint.',
       isPlayerControlledDraftMode(settings)
         ? 'PLAYER-CONTROLLED LIMIT: creative directions may shape NPC/world behavior, focus, tone, pacing, staging, and portrayal only. They never authorize a new user-character action, dialogue, consent/refusal, decision, thought, feeling, motive, sensory conclusion, or voluntary movement.'
         : '',
@@ -26872,87 +27087,132 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     ].filter(Boolean).join('\n'), budget);
   };
 
-  const buildFinalSynthesisContract = (density = 'full') => {
+  const FINALIZATION_KERNEL_VERSION = 'gradia_same_turn_finalization_v1';
+  const SAME_TURN_FINALIZATION_KERNEL = [
+    `[SAME-TURN FINALIZATION KERNEL — ${FINALIZATION_KERNEL_VERSION}]`,
+    '- The candidate below was written for the ORIGINATING USER REQUEST identified in this request. That user request belongs to this same turn and is not a new turn after the candidate.',
+    '- Produce a polished replacement of the candidate. Do not answer the current user input independently, continue from the candidate ending, or start another scene-generation pass.',
+    '[AUTHORITY ORDER]',
+    '1. Current user input: its explicit commitments, prohibitions, and reserved choices.',
+    '2. The literal pre-draft terminal scene state and newer exact canon.',
+    '3. The supplied same-turn response candidate.',
+    '4. Relevant current reference evidence.',
+    '5. Older or uncertain memory, analysis, creative direction, Skills, and style preferences.',
+    '- The pre-draft terminal state governs the candidate’s starting conditions, not its ending. A causally supported state change already present in the candidate is not a conflict and must not be rewound.',
+    '- A lower tier may not overwrite a higher tier. Missing supporting detail is not a conflict. On a direct conflict, repair only the smallest conflicting span and preserve the rest of the candidate.',
+    '[CANDIDATE SEMANTIC LOCK]',
+    '- Preserve the supported actors, actions, targets, modality, outcomes, causal order, positions, knowledge paths, unresolved choices, scene function, and terminal handoff.',
+    '- The candidate terminal beat is the latest permitted story moment. Do not add an event, reaction, consequence, discovery, transition, aftermath, or sequel after it.'
+  ].join('\n');
+
+  const buildFinalizationTransformationBudget = (preservationOnly = false) => preservationOnly
+    ? [
+        '[TRANSFORMATION BUDGET — PRESERVATION ONLY]',
+        '- Preserve the candidate event graph and ending. Change only surface wording, configured language/format, or the smallest span needed to repair a direct higher-authority conflict.',
+        '- Do not add, remove, reorder, or replace a supported beat except where the mode-specific safety contract explicitly requires local repair.',
+        '- When uncertain, preserve rather than invent.'
+      ].join('\n')
+    : [
+        '[TRANSFORMATION BUDGET — BOUNDED RECOMPOSITION]',
+        '- You may freely rewrite prose, merge or condense repetition, locally reorder wording, strengthen characterization and sensory grounding, and concretize detail already contained inside a committed beat.',
+        '- You may not create a new state change, goal, outcome, story turn, arrival, departure, reveal, relocation, time skip, aftermath, or resolution; resolve no open or reserved choice; choose no different ending.',
+        '- Reference evidence may correct or deepen an existing mapped beat, but it may not originate the next beat.',
+        '- When uncertain, preserve rather than invent.'
+      ].join('\n');
+
+  const buildDensityQualityGuidance = (density = 'full') => {
     const normalizedDensity = normalizeChoice(density, ['full', 'compact', 'tiny'], 'full');
-    const core = [
-      'NOVEL MODE — SCENE-BLUEPRINT SYNTHESIS / FULL-CAST AUTHORSHIP:',
-      '- AUTHORIAL AUTHORITY: the current user input is an author/director instruction and may contain scene direction, supplied in-world material, fixed events/outcomes, or OOC constraints. Preserve explicit author-fixed commitments and reservations exactly.',
-      '- FULL-CAST AUTHORSHIP: you may write the user persona as a story character alongside NPCs and the world—new action, dialogue, thought, feeling, decision, consent/refusal, movement, perception, and reaction are allowed when consistent with author direction and canon.',
-      '- Do not import RP-mode player-agency restrictions. Unspecified user-persona behavior is not automatically reserved for the user in Novel mode.',
-      '- If the author explicitly reserves a decision/outcome, marks it hypothetical/attempted, or says not to decide it, keep it open. Do not override a hard authorial prohibition or boundary.',
-      '- Use the supplied scene text as the primary same-turn blueprint, not immutable wording. Preserve supported events, causality, relationship pressure, positions, scene purpose, and any explicitly held/open authorial decision.',
-      '- Freely rewrite, reorder, condense, expand inward, and replace draft sentences to integrate the authorial input, terminal scene, exact canon, Story Arc/continuity, and relevant reference evidence into one coherent scene.',
-      '- Do not replace the blueprint with an unrelated scene, undo explicit fixed events, relocate the cast without a bridge, or append a causally unsupported sequel merely to fill length.',
-      '- Use external reference material only when causally relevant. Never paste lore, memory, traits, or analysis as a checklist.',
-      '- Begin directly in-world and output only the final fiction/RP prose. Do not output reasoning, process notes, labels, or a <Thoughts> block.'
+    if (normalizedDensity === 'tiny') return '';
+    const lines = [
+      '[OPTIONAL PROSE QUALITY — NEVER OVERRIDES THE KERNEL]',
+      '- Improve voice, rhythm, dialogue texture, physical staging, and causal transitions inside the accepted beat envelope.'
     ];
-    if (normalizedDensity === 'tiny') return core.slice(0, 6).concat(core[core.length - 1]).join('\n');
-    if (normalizedDensity === 'compact') return core.slice(0, 8).concat(core[core.length - 1]).join('\n');
-    return core.join('\n');
+    if (normalizedDensity === 'full') {
+      lines.push('- Remove repetition and visible process residue while preserving the candidate’s meaning and scene function.');
+      lines.push('- Integrate only causally relevant detail; never display lore, memory, analysis, or instructions as a checklist.');
+    }
+    return lines.join('\n');
   };
 
-  const buildPlayerControlledFinalSynthesisContract = (density = 'full') => {
-    const normalizedDensity = normalizeChoice(density, ['full', 'compact', 'tiny'], 'full');
-    const core = [
-      'PLAYER-CONTROLLED RP FINAL SYNTHESIS:',
-      '- The current user input is already the complete user-character contribution for this turn. Preserve it as established fact; do not reenact it as a fresh assistant-authored action.',
-      '- Never add user-character dialogue, voluntary action/movement, consent/refusal, decision, private thought, feeling, motive, sensory conclusion, or reaction that is absent from the current input.',
-      '- Compose NPC dialogue/actions, non-user decisions, environment/world consequences, grounded model-owned initiatives, and externally caused effects naturally from the current scene and canon.',
-      '- Continue through as many causally self-sufficient model-owned beats as are useful. Stop before the first meaningful beat that requires a NEW user-character action, dialogue, consent/refusal, decision, private reaction, or voluntary movement.',
-      '- A user attempt/request does not guarantee external success, acceptance, relationship change, or consent from another character. Resolve only model-owned/world outcomes supported by causality.',
-      '- Story Arc, Narrative Archive, lore, memory, Skills, analysis, and Author Note may preserve continuity and guide model-owned initiatives/response but cannot supply user-character behavior.',
-      '- A direct player-facing handoff is OPTIONAL. If the scene naturally presents a question, offer, request, challenge, or unresolved situation, leave the player side open. If NPC/world causality naturally completes or transitions the scene first, preserve that closure.',
-      '- Do not preserve AGENCY-BYPASS CLOSURE merely because it exists. Goodbye, NPC departure, time skip, relocation, summary, or resolution is defective only when it skips/pre-answers a meaningful player-owned beat that was actually pending; otherwise it is valid model-owned causality.',
-      '- If any candidate passage after the current input writes a new user-character action/dialogue/interior state, remove it. When such contamination starts mid-draft, preserve valid prior NPC/world response and rewrite or truncate from the first violating passage instead of carrying the contaminated ending forward.',
-      '- Do not add an unrelated random hook, causally unsupported sequel, arbitrary cast arrival, reveal, relocation, or escalation merely to fill length. Do not invent a question/handoff solely because this is RP.',
-      '- Output only final in-world RP prose.'
-    ];
-    if (normalizedDensity === 'tiny') return core.slice(0, 5).concat(core[core.length - 1]).join('\n');
-    if (normalizedDensity === 'compact') return core.slice(0, 7).concat(core[core.length - 1]).join('\n');
-    return core.join('\n');
-  };
+  const buildFinalSynthesisContract = (density = 'full') => [
+    SAME_TURN_FINALIZATION_KERNEL,
+    '[NOVEL MODE — BOUNDED FULL-CAST RECOMPOSITION]',
+    '- The user is the author/director. Full-cast authorship, including the user persona’s action, dialogue, thought, feeling, decision, movement, perception, and reaction, applies only inside the candidate’s existing event interval.',
+    '- Preserve every explicit author-fixed commitment, prohibition, hypothetical/attempted status, reservation, and unresolved outcome. Novel authorship does not authorize a new consequential beat after the candidate endpoint.',
+    '- Develop an already committed beat inward when useful, but do not add a separate beat merely because it would be causal or dramatically natural.',
+    '- Current evidence may repair or deepen a mapped candidate beat; Story Arc, memory, analysis, or creative direction may not originate a future beat.',
+    buildFinalizationTransformationBudget(false),
+    buildDensityQualityGuidance(density),
+    '- Begin directly in-world and output only the final Novel-mode fiction prose. Do not output reasoning, process notes, labels, or a <Thoughts> block.'
+  ].filter(Boolean).join('\n');
+
+  const PLAYER_CONTROLLED_AGENCY_KERNEL = [
+    '[PLAYER-CONTROLLED RP — HARD AGENCY KERNEL]',
+    '- The current user input is the complete, already-enacted user-character contribution for this turn. Preserve exactly what the user explicitly did, said, attempted, requested, or left undecided.',
+    '- An attempt or request does not establish success, NPC consent, acceptance, relationship change, or another external result.',
+    '- Do not invent user-character dialogue, intentional action, voluntary movement, consent/refusal, decision, private thought, emotion, motive, interpretation, sensory conclusion, or chosen reaction.',
+    '- A brief causal reference to an exact user-authored fact is allowed when needed for coherent prose, but it must add no new player behavior.',
+    '- You may describe a directly observable physical effect externally imposed by NPC/world action or established physics. Do not turn that effect into a voluntary response, emotion, decision, or consent.'
+  ].join('\n');
+
+  const PLAYER_CONTROLLED_CANDIDATE_INTEGRATION = [
+    '[GRADIA NPC/WORLD CANDIDATE — PRIMARY SAME-TURN COMPOSITION]',
+    '- Presume all supported candidate NPC/world beats are accepted. Preserve their actors, event inventory, causal order, positions, knowledge boundaries, dialogue purpose, unresolved player-owned choices, scene function, terminal beat, and earned ending.',
+    '- Do not add any new NPC/world beat after the candidate endpoint. NPC/world autonomy here means preserving and polishing valid initiative, transition, or natural closure already present in the candidate—not generating more of it.',
+    '- Change a candidate-level event only to repair: newly invented player behavior; agency-bypass closure; a direct conflict with current input, literal terminal state, or authoritative canon; or an impossible causal, spatial, or knowledge-state error.',
+    '- If a violation begins mid-candidate, preserve the valid prefix and repair or truncate from the first violating passage. Do not discard valid earlier NPC/world material.',
+    '- An open handoff and natural model-owned closure are both valid. Preserve whichever ending the candidate earned; manufacture neither a question nor a closure.'
+  ].join('\n');
+
+  const buildPlayerControlledFinalSynthesisContract = (density = 'full') => [
+    SAME_TURN_FINALIZATION_KERNEL,
+    PLAYER_CONTROLLED_AGENCY_KERNEL,
+    PLAYER_CONTROLLED_CANDIDATE_INTEGRATION,
+    buildFinalizationTransformationBudget(false),
+    buildDensityQualityGuidance(density),
+    '- Output only one complete in-world NPC/world RP response. Do not output reasoning, process notes, labels, or a <Thoughts> block.'
+  ].filter(Boolean).join('\n');
+
   // Compatibility alias for older debug helpers.
   const buildAuthorDirectedFinalSynthesisContract = buildPlayerControlledFinalSynthesisContract;
+  const CANDIDATE_END_HARD_RESPONSE_BOUNDARY = [
+    '[CANDIDATE END — HARD RESPONSE BOUNDARY]',
+    'The candidate terminal beat above is the latest permitted story moment.',
+    'Return the same response interval as a polished replacement. Do not write what happens next.'
+  ].join('\n');
   const PLAYER_CONTROLLED_FINAL_TAIL = [
-    'PLAYER-CONTROLLED RP FINAL PASS:',
-    'Keep the user input as already-enacted user behavior. Write only NPC/world/model-owned continuation and externally caused consequences; add no new user-character behavior.',
-    'Do not force a live question/open hook. Preserve natural NPC/world continuation or closure. Repair only an AGENCY-BYPASS CLOSURE that skips or pre-answers a meaningful player-owned beat already pending.',
-    'If the candidate crosses the actual user-agency frontier, cut/recompose before the player contribution. Otherwise keep valid model-owned endings and output only the in-world RP response.'
+    CANDIDATE_END_HARD_RESPONSE_BOUNDARY,
+    'FINAL RP PASS: preserve valid candidate NPC/world causality and its open handoff or natural closure. Repair only a direct authority, agency, causal, spatial, or knowledge violation, then output only the in-world response.'
   ].join('\n');
   const AUTHOR_DIRECTED_FINAL_TAIL = PLAYER_CONTROLLED_FINAL_TAIL;
   const PLAYER_CONTROLLED_RISU_FINAL_TAIL = [
-    'PLAYER-CONTROLLED RP — FINAL PRESERVATION PASS:',
-    'The supplied candidate is the NPC/world response for this turn. User-agency violations and AGENCY-BYPASS CLOSURE are not protected merely because they appear in the candidate.',
-    'Remove any surviving reenactment or newly invented user-character behavior. If needed, truncate/recompose from the first violation while preserving valid earlier NPC/world response.',
-    'Preserve natural NPC/world departure, transition, time passage, or closure when it does not skip a pending player-owned beat. Do not add a random hook, forced question, or sequel solely to keep the scene open.',
-    'Stop before the next actual player-owned contribution. Output only the minimally finished in-world response.'
+    CANDIDATE_END_HARD_RESPONSE_BOUNDARY,
+    'FINAL RP PRESERVATION PASS: the Engine candidate already completed creative synthesis. Preserve it except for surface defects or the smallest repair required by the hard agency/authority rules, then output only the in-world response.'
   ].join('\n');
 
   const FINAL_SYNTHESIS_TAIL = [
-    'FINAL SYNTHESIS:',
-    'Rebuild one natural in-world response from all relevant evidence.',
-    'Do not mechanically continue the blueprint or patch reference facts onto it.',
-    'Preserve the supported authorial scene commitments and boundary, use full-cast Novel authorship where needed, then output only the final prose.'
+    CANDIDATE_END_HARD_RESPONSE_BOUNDARY,
+    'FINAL NOVEL PASS: realize the same candidate interval through bounded full-cast recomposition, preserve its semantic commitments and ending, and output only the final prose.'
   ].join('\n');
   const RISU_ENGINE_PRESERVATION_CONTRACT = [
-    'RISU-ENGINE PRESERVATION FINISH:',
-    '- The supplied scene text is already the internally synthesized final candidate, not a seed for another creative pass.',
-    '- Preserve its events, causal order, cast positions, dialogue purpose, scene boundary, unresolved choices, and ending.',
-    '- Change only wording or a local detail that directly conflicts with the current user input, literal terminal state, authoritative canon, configured language, or required output format.',
-    '- Do not add a beat, expand the scene, append an aftermath or sequel, relocate anyone, reopen completed action, or choose a different ending.',
-    '- Return only the minimally finished in-world RP response.'
+    SAME_TURN_FINALIZATION_KERNEL,
+    '[NOVEL RISU-ENGINE FINAL CANDIDATE — PRESERVATION ONLY]',
+    '- The supplied text already completed internal creative synthesis. It is the final same-turn response candidate, not a seed for another pass.',
+    buildFinalizationTransformationBudget(true),
+    '- Preserve explicit authorial reservations and output only the minimally finished in-world Novel-mode response.'
   ].join('\n');
   const PLAYER_CONTROLLED_RISU_PRESERVATION_CONTRACT = [
-    'PLAYER-CONTROLLED RISU-ENGINE PRESERVATION FINISH:',
-    '- Preserve valid NPC/world reaction, initiative, transitions, closure, and established causality from the internally synthesized candidate.',
-    '- USER-AGENCY VIOLATIONS AND AGENCY-BYPASS CLOSURE ARE NOT PRESERVED CONTENT. You may delete, truncate, or locally recompose the offending tail even when that changes the candidate ending.',
-    '- Do not add unrelated beats or expand into a sequel. Repair closure only when it skipped/pre-answered a meaningful player-owned beat; otherwise preserve natural model-owned closure and stop before the next actual player contribution.',
-    '- Otherwise change only wording or a local detail that directly conflicts with current input, terminal state, canon, language, or output format.',
-    '- Return only the minimally finished in-world RP response.'
+    SAME_TURN_FINALIZATION_KERNEL,
+    PLAYER_CONTROLLED_AGENCY_KERNEL,
+    '[PLAYER-CONTROLLED RISU-ENGINE FINAL CANDIDATE — PRESERVATION ONLY]',
+    '- Preserve supported NPC/world events, causal order, positions, knowledge boundaries, dialogue purpose, unresolved player choices, terminal beat, and ending.',
+    '- User-agency violations and agency-bypass closure are not protected. Preserve the valid prefix and repair or truncate from the first violation; otherwise do not alter the event graph or ending.',
+    buildFinalizationTransformationBudget(true),
+    '- Output only the minimally finished in-world NPC/world response.'
   ].join('\n');
   const RISU_ENGINE_FINAL_TAIL = [
-    'FINAL PRESERVATION PASS:',
-    'Keep the supplied candidate’s content and boundary. Correct only direct authority conflicts or surface defects, then output it as in-world prose.'
+    CANDIDATE_END_HARD_RESPONSE_BOUNDARY,
+    'FINAL PRESERVATION PASS: keep the Engine candidate’s event graph and boundary. Correct only a direct authority conflict or surface defect, then output it as in-world prose.'
   ].join('\n');
 
   const renderFinalOverlayAuxiliary = entries => (entries || [])
@@ -27062,10 +27322,10 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
   };
 
   const playerControlledRpTerminalEvidenceBlock = (recent = {}, maxChars = 2800) => compactMiddle([
-    '[PLAYER-CONTROLLED RP — TERMINAL SCENE STATE / HARD FACTUAL ANCHOR]',
+    '[PLAYER-CONTROLLED RP — PRE-DRAFT TERMINAL SCENE STATE / HARD FACTUAL ANCHOR]',
     recent.terminalVisibleScene || recent.inputAssistTerminalVisibleScene || recent.sceneAnchor || 'Use the literal latest visible ending already present in the request and do not revive an older scene.',
     recent.inputAssistPreviousResponseEvidence || recent.previousResponseEvidence || '',
-    'START RULE: the user contribution has already occurred from this state. Visible assistant prose should normally begin with the first NPC/world reaction or external consequence, not by reenacting the user input.'
+    'ROLE: this is the state from which the candidate was written, not an event to replay and not permission to write past the candidate endpoint. The user contribution has already occurred from this state.'
   ].filter(Boolean).join('\n'), Math.max(700, Math.floor(Number(maxChars) || 2800)));
 
   const buildNovelFinalOverlay = (lastStage, stages, recent, settings) => {
@@ -27073,7 +27333,10 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     const finalOverlay = isUsableStage(lastStage) ? lastStage?.final_overlay : safeLast?.final_overlay;
     const draft = text(finalOverlay?.final_rp_draft || stageDraft(safeLast) || stageDraft(lastStage) || submittedCurrentInput(recent));
     const outputMode = normalizeChoice(settings.outputMode || 'draft_guided', OUTPUT_MODES, 'draft_guided');
-    const preservationMode = outputMode === 'risu_engine';
+    const engineCandidateAdopted = outputMode === 'risu_engine'
+      && safeLast?.stage === RISU_ENGINE_STAGE
+      && isUsableStage(safeLast);
+    const preservationMode = engineCandidateAdopted;
     const configuredMaxInjectionChars = clampInt(settings.maxInjectionChars, 1500, 60000, DEFAULT_MAX_INJECTION_CHARS);
     const configuredDensity = configuredMaxInjectionChars < 3200 ? 'tiny' : configuredMaxInjectionChars < 7000 ? 'compact' : 'full';
     const densityCandidates = configuredDensity === 'full'
@@ -27082,7 +27345,9 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         ? ['compact', 'tiny']
         : ['tiny'];
     const rawLanguageContract = buildInternalDraftLanguageContract(settings, 'final');
-    const draftLabel = 'SCENE TEXT TO REALIZE:';
+    const draftLabel = preservationMode
+      ? 'ENGINE-SYNTHESIZED FINAL NOVEL CANDIDATE:'
+      : 'PRIMARY SAME-TURN NOVEL RESPONSE CANDIDATE:';
     const buildEssential = density => {
       const languageContract = density === 'tiny' ? compactMiddle(rawLanguageContract, 220) : rawLanguageContract;
       const synthesisContract = preservationMode
@@ -27098,15 +27363,15 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
           stage: 'final',
           authority: preservationMode
             ? 'The supplied candidate has already completed internal synthesis. Current input, literal terminal state, and exact canon alone may correct it.'
-            : 'Current input ranks first; literal terminal state and exact canon follow; the supplied draft is the primary same-turn scene blueprint.',
+            : 'The current input is the originating request for this same turn. It ranks first; literal pre-draft terminal state and exact canon follow; the supplied candidate is the primary response composition.',
           task: preservationMode
             ? 'Perform one preservation-only surface finish.'
-            : 'Realize the supplied blueprint as one coherent final same-turn RP response.',
+            : 'Produce a polished replacement of the supplied candidate inside the same event interval. Do not continue from its ending.',
           hardConstraints: [languageContract, buildNovelAuthorshipContract(settings, 'final'), synthesisContract],
           outputContract: 'Begin directly in-world. Output no reasoning, process text, review, labels, or <Thoughts> block.',
           successCriteria: preservationMode
             ? 'Events, order, positions, explicit author-reserved decisions, ending, and scene boundary remain unchanged.'
-            : 'Author-fixed commitments and scene boundary are preserved while underwritten full-cast material is developed inward.',
+            : 'Author-fixed commitments, supported candidate semantics, terminal beat, and scene boundary are preserved while prose is improved inward.',
           finalReminder: preservationMode
             ? 'Return only the minimally finished in-world response.'
             : 'Return only the final in-world RP response.'
@@ -27149,9 +27414,10 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         : 0
     };
     const terminalEvidence = [
-      'TERMINAL SCENE STATE:',
+      'PRE-DRAFT TERMINAL SCENE STATE — DO NOT REPLAY:',
       recent.terminalVisibleScene || recent.inputAssistTerminalVisibleScene || recent.sceneAnchor || 'Use the literal latest visible ending already present in the request and do not revive an older scene.',
-      recent.inputAssistPreviousResponseEvidence || recent.previousResponseEvidence || ''
+      recent.inputAssistPreviousResponseEvidence || recent.previousResponseEvidence || '',
+      'Use this only to repair a direct continuity conflict inside the candidate. It does not authorize a beat after the candidate endpoint.'
     ].join('\n');
     const auxiliary = fitFinalOverlayAuxiliary([
       {
@@ -27187,7 +27453,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       automaticExpansionChars: Math.max(0, effectiveMaxInjectionChars - configuredMaxInjectionChars),
       automaticExpansionApplied: effectiveMaxInjectionChars > configuredMaxInjectionChars,
       automaticExpansionCeiling: 60000, essentialCeilingExceeded, density: essential.density,
-      outputMode, preservationMode, essentialChars: essential.block.length,
+      outputMode, preservationMode, engineCandidateAdopted, essentialChars: essential.block.length,
       auxiliaryAvailableChars, auxiliaryChars: auxiliary.block.length, auxiliary: auxiliary.entries,
       draftChars: draft.length, fullDraftPreserved,
       draftStartIndex: draft ? block.indexOf(draft, block.indexOf(draftLabel) + draftLabel.length) : -1,
@@ -27227,7 +27493,10 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     const finalOverlay = isUsableStage(lastStage) ? lastStage?.final_overlay : safeLast?.final_overlay;
     const draft = text(finalOverlay?.final_rp_draft || stageDraft(safeLast) || stageDraft(lastStage) || '');
     const outputMode = normalizeChoice(settings.outputMode || 'draft_guided', OUTPUT_MODES, 'draft_guided');
-    const preservationMode = outputMode === 'risu_engine';
+    const engineCandidateAdopted = outputMode === 'risu_engine'
+      && safeLast?.stage === RISU_ENGINE_STAGE
+      && isUsableStage(safeLast);
+    const preservationMode = engineCandidateAdopted;
     const configuredMaxInjectionChars = clampInt(settings.maxInjectionChars, 1500, 60000, DEFAULT_MAX_INJECTION_CHARS);
     const configuredDensity = configuredMaxInjectionChars < 3200 ? 'tiny' : configuredMaxInjectionChars < 7000 ? 'compact' : 'full';
     const densityCandidates = configuredDensity === 'full'
@@ -27236,22 +27505,23 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         ? ['compact', 'tiny']
         : ['tiny'];
     const rawLanguageContract = buildInternalDraftLanguageContract(settings, 'final');
-    const playerAgencyLedger = buildPlayerControlledAgencyLedgerBlock(recent, 3000);
+    const playerAgencyLedger = buildPlayerControlledAgencyLedgerBlock(recent, 3000, { finalization: true });
     const terminalEvidence = playerControlledRpTerminalEvidenceBlock(recent, 3000);
     const continuityGuard = buildPlayerControlledFinalContinuityGuard(recent, 3400);
     const hardTransfer = buildPlayerControlledFinalHardTransferBlock(stages, settings, recent, 2400);
     const candidateAudit = buildPlayerControlledCandidateAuditBlock(draft, recent, settings, 1600);
     const turnHandoff = playerControlledTurnHandoffContract(settings, 'final', 'final');
-    const draftLabel = 'NPC/WORLD RESPONSE CANDIDATE TO FINALIZE:';
+    const draftLabel = preservationMode
+      ? 'ENGINE-SYNTHESIZED FINAL NPC/WORLD CANDIDATE:'
+      : 'PRIMARY SAME-TURN NPC/WORLD RESPONSE CANDIDATE:';
     const finalPresetStage = CORE_AIDE_STAGE_IDS.includes(safeLast?.stage) || safeLast?.stage === 'shadow_act'
       ? safeLast.stage
       : 'aide_plot';
     const buildEssential = density => {
       const languageContract = density === 'tiny' ? compactMiddle(rawLanguageContract, 220) : rawLanguageContract;
-      const synthesisContract = [
-        preservationMode ? PLAYER_CONTROLLED_RISU_PRESERVATION_CONTRACT : '',
-        buildPlayerControlledFinalSynthesisContract(preservationMode ? 'compact' : density)
-      ].filter(Boolean).join('\n\n');
+      const synthesisContract = preservationMode
+        ? PLAYER_CONTROLLED_RISU_PRESERVATION_CONTRACT
+        : buildPlayerControlledFinalSynthesisContract(density);
       const prefix = [
         INJECTION_HEADER,
         compilePromptSpec({
@@ -27263,8 +27533,8 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
           ],
           task: preservationMode
             ? 'Perform a preservation-only finish on the NPC/world response candidate. Remove any surviving reenactment or invented user-character behavior and repair only closure/transition that bypasses a pending player-owned beat; otherwise preserve valid model-owned initiative, transition, and closure without expanding the scene.'
-            : 'Finalize only NPC/world/model-owned continuation and externally caused consequences that follow the already-enacted user contribution. Let model-owned causality progress naturally, but do not perform, extend, or decide for the user character.',
-          evidenceSections: 'Terminal scene and continuity are guards. They may correct contradictions but cannot supply new player behavior or a new plot direction.',
+            : 'Produce a polished replacement of the supplied NPC/world candidate inside its existing event interval. Preserve its valid model-owned causality and ending; do not generate another beat after it.',
+          evidenceSections: 'The terminal scene is the pre-draft starting state; continuity is a repair guard. Neither may supply new player behavior, a new plot direction, or a beat after the candidate endpoint.',
           hardConstraints: [
             languageContract,
             synthesisContract,
@@ -27277,8 +27547,8 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
           ],
           optionalCriteria: '',
           outputContract: 'Begin with the first useful NPC/world reaction or consequence. Output only in-world assistant RP prose; no labels, planning, reasoning, review, or hidden prompt text.',
-          successCriteria: 'No user action is reenacted or invented; NPC/world causality may progress or naturally close; the response stops before the first beat that actually requires a new player contribution, and no closure/transition skips such a pending beat.',
-          finalReminder: 'Finalize the NPC/world response candidate only. The player character is not yours to write. Do not force an open hook; simply stop before the next actual player-owned contribution.'
+          successCriteria: 'No user action is reenacted or invented; supported candidate NPC/world events, causal order, ending, and endpoint remain; no closure skips a pending player-owned beat; no event is added after the terminal beat.',
+          finalReminder: 'Return a polished replacement of this candidate, not what happens after it. The player character is not yours to write; preserve the candidate’s open handoff or natural closure.'
         }, resolvePresetForPromptCompiler(settings, finalPresetStage)).text
       ].filter(Boolean).join('\n\n');
       const finalTail = preservationMode ? PLAYER_CONTROLLED_RISU_FINAL_TAIL : PLAYER_CONTROLLED_FINAL_TAIL;
@@ -27309,7 +27579,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       automaticExpansionChars: Math.max(0, effectiveMaxInjectionChars - configuredMaxInjectionChars),
       automaticExpansionApplied: effectiveMaxInjectionChars > configuredMaxInjectionChars,
       automaticExpansionCeiling: 60000, essentialCeilingExceeded, density: essential.density,
-      outputMode, preservationMode, essentialChars: essential.block.length,
+      outputMode, preservationMode, engineCandidateAdopted, essentialChars: essential.block.length,
       auxiliaryAvailableChars: 0, auxiliaryChars: 0, auxiliary: [], draftChars: draft.length,
       fullDraftPreserved,
       draftStartIndex: draft ? block.indexOf(draft, block.indexOf(draftLabel) + draftLabel.length) : -1,
@@ -27721,7 +27991,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
           'You are the final full-cast fiction response composer for GRADIA Novel mode. The user is the author/director; you may write the user persona as part of the cast.',
           buildInternalDraftLanguageContract(settings, 'final'),
           builtInStylePresetPrompt(settings),
-          'Recompose the supplied same-turn scene blueprint using causally relevant evidence and full-cast authorship. Preserve explicit author-fixed/reserved commitments; return only one complete in-world assistant response and expose no process text.'
+          'Produce a bounded same-turn replacement of the supplied response candidate. Preserve its event interval and terminal beat; relevant evidence may repair or deepen an existing beat but may not create the next beat. Preserve explicit author-fixed/reserved commitments; return only one complete in-world assistant response and expose no process text.'
         ].filter(Boolean).join('\n\n'),
         _mandatory: true, _order: 0, _key: 'response_instructions'
       },
@@ -27737,14 +28007,11 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       conversation.olderConversation ? { type: 'chat', rangeStart: 0, rangeEnd: 'completed', name: 'Earlier Completed Conversation', content: conversation.olderConversation, _fitPriority: 30, _trimPolicy: 'tail', _order: 60, _key: 'older_conversation' } : null,
       conversation.latestScene ? { type: 'chat', rangeStart: 'latest', rangeEnd: 'latest', name: 'Latest Visible Scene', content: conversation.latestScene, _mandatory: true, _order: 70, _key: 'latest_scene' } : null,
       {
-        type: 'postEverything', role: 'system', name: 'Scene Blueprint and Final Synthesis',
+        type: 'postEverything', role: 'system', name: 'Novel Candidate and Same-Turn Finalization',
         content: [
-          '[SCENE BLUEPRINT]', text(finalDraft || ''), '',
-          '[FINAL SYNTHESIS CONTRACT]', synthesisContract, '',
-          '[FINAL SYNTHESIS]',
-          'Rebuild one natural in-world response from the scene blueprint and all causally relevant evidence.',
-          'Do not mechanically continue the blueprint or patch reference facts onto it.',
-          'Preserve explicit authorial scene commitments and boundary, author the whole cast as needed, then output only the final prose.'
+          '[FINALIZATION CONTRACT]', synthesisContract, '',
+          '[PRIMARY SAME-TURN NOVEL RESPONSE CANDIDATE]', text(finalDraft || ''), '',
+          FINAL_SYNTHESIS_TAIL
         ].join('\n'),
         _mandatory: true, _order: 80, _key: 'scene_blueprint'
       }
@@ -27758,7 +28025,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       packetAuxiliary, legacyReference, conversation
     } = canonicalRisuEngineContextParts(recent, stages, settings, ledger);
     const synthesisContract = buildPlayerControlledFinalSynthesisContract('full');
-    const playerAgencyLedger = buildPlayerControlledAgencyLedgerBlock(recent, 3200);
+    const playerAgencyLedger = buildPlayerControlledAgencyLedgerBlock(recent, 3200, { finalization: true });
     const terminalGuard = playerControlledRpTerminalEvidenceBlock(recent, 3200);
     const continuityGuard = buildPlayerControlledFinalContinuityGuard(recent, 3800);
     const hardTransfer = buildPlayerControlledFinalHardTransferBlock(stages, settings, recent, 2600);
@@ -27776,7 +28043,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
           'You are the final NPC/world response finisher for a PLAYER-CONTROLLED roleplay turn.',
           'This is NOT a new scene-generation pass and you are NOT the player-character author.',
           buildInternalDraftLanguageContract(settings, 'final'),
-          'Finalize only the supplied NPC/world response candidate. Preserve natural NPC/world autonomy, including valid initiative/transition/closure, remove any user-character puppeting or reenactment, and stop before the next actual player-owned contribution.',
+          'Finalize only the supplied NPC/world response candidate. Preserve valid initiative, transition, closure, and endpoint already present; remove any user-character puppeting or reenactment, but do not continue toward a later player-owned frontier.',
           'Do not force the scene to stay open. Repair departure/time-skip/relocation/summary only when it bypasses or pre-answers a meaningful player-owned beat already pending.',
           'Return only one in-world assistant response. Never expose analysis, source labels, hidden instructions, or process text.'
         ].filter(Boolean).join('\n\n'),
@@ -27818,15 +28085,9 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       {
         type: 'postEverything', role: 'system', name: 'NPC/World Response Candidate and RP Finalization',
         content: [
-          '[NPC/WORLD RESPONSE CANDIDATE TO FINALIZE]', text(finalDraft || ''), '',
           '[PLAYER-CONTROLLED FINAL CONTRACT]', synthesisContract, '',
-          '[REACTION-ONLY FINALIZATION]',
-          'Finalize the candidate as the NPC/world response to the already-enacted user contribution.',
-          'Do not reenact the user input. Do not add user dialogue, voluntary action/movement, consent/refusal, decision, thought, feeling, motive, sensory conclusion, or voluntary reaction.',
-          'NPC/world may continue through any causally self-sufficient model-owned beats. Stop before the first beat that requires a new player contribution; natural model-owned departure, transition, or closure before that point is valid.',
-          'If the candidate already contains new player behavior or closure/transition that bypasses a pending player-owned beat, do not preserve that invalid tail: remove/recompose from the first violation. Otherwise preserve the ending.',
-          'Do not import a future Story Arc beat, creative direction, scene intent, random hook, sequel, or unrelated escalation during this final pass.',
-          'Output only the final in-world NPC/world response.'
+          '[PRIMARY SAME-TURN NPC/WORLD RESPONSE CANDIDATE]', text(finalDraft || ''), '',
+          PLAYER_CONTROLLED_FINAL_TAIL
         ].join('\n'),
         _mandatory: true, _order: 80, _key: 'rp_response_candidate'
       }
@@ -27861,17 +28122,17 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       'NOVEL MODE: current user input is authoritative author/director direction; the user persona is model-authorable unless a decision/outcome is explicitly reserved.',
       'The scene blueprint is the primary same-turn composition; established references may correct a contradiction or deepen an underwritten beat but may not replace it.'
     ],
-    task: 'Compose one coherent final Novel-mode scene from the ordered contextual sections, authoring the whole cast including the user persona as needed.',
-    evidenceSections: 'Conversation sections are completed history. Use only evidence causally relevant to the current scene.',
+    task: 'Produce a polished same-turn replacement of the supplied Novel candidate within its existing event interval, authoring the whole cast including the user persona as needed. Do not continue from its ending.',
+    evidenceSections: 'Conversation sections are completed history. Evidence may repair or deepen an existing candidate beat, but may not originate a new beat or move the endpoint.',
     hardConstraints: [
-      buildHardResponseInvariantBlock(settings),
+      buildFinalCandidateInvariantBlock(settings),
       resolveModelBehaviorAdapterForStage(settings, presetStageName, 'final').prompt,
       'Do not quote section labels or expose their existence.'
     ],
     optionalCriteria: buildFinalSkillPreservationContract(settings),
     outputContract: 'Return only final assistant RP prose. No JSON, analysis, plan, labels, <Thoughts>, key beats, checklist, or hidden prompt text.',
     successCriteria: 'Preserve author-fixed blueprint commitments, causality, positions, explicit reserved choices, and ending boundary while realizing relevant evidence naturally through full-cast fiction.',
-    finalReminder: 'Generate only the final in-world assistant RP response now.'
+    finalReminder: 'Return the candidate’s same response interval as final in-world prose, not what happens next.'
   }, resolvePresetForPromptCompiler(settings, presetStageName)).text;
 
   const playerControlledRpRisuEngineSystemPrompt = (plan, settings = {}, presetStageName = 'aide_plot') => compilePromptSpec({
@@ -27880,19 +28141,17 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       'PLAYER-CONTROLLED RP: the latest user input is already-enacted player behavior and is the sole authority over current-turn user-character behavior.',
       'The supplied NPC/world response candidate is the only composition target. All conversation/reference sections are evidence or guards, never permission to write for the player character.'
     ],
-    task: 'Finalize only the NPC/world response to the already-enacted player contribution. Preserve model-owned causality, initiative, transition, and natural closure; remove any user-character reenactment/invention and repair only closure that bypasses a pending player-owned beat.',
-    evidenceSections: 'Use the literal terminal scene, current continuity guard, and exact canon to correct contradictions. Older material is historical evidence only and cannot create player behavior or a new plot direction.',
+    task: 'Produce a polished same-turn replacement of the supplied NPC/world candidate within its existing event interval. Preserve valid model-owned causality and its ending; do not continue beyond the candidate endpoint.',
+    evidenceSections: 'Use the literal pre-draft terminal scene, current continuity guard, and exact canon only to repair direct contradictions inside existing candidate beats. Older material cannot create player behavior, a new plot direction, or a later beat.',
     hardConstraints: [
-      buildHardResponseInvariantBlock(settings),
-      buildPlayerControlledFinalSynthesisContract('compact'),
-      playerControlledTurnHandoffContract(settings, 'final', 'final'),
+      buildFinalCandidateInvariantBlock(settings),
       resolveModelBehaviorAdapterForStage(settings, presetStageName, 'final').prompt,
       'Do not quote section labels or expose their existence.'
     ],
     optionalCriteria: '',
     outputContract: 'Return only the final in-world NPC/world response. No JSON, analysis, plan, labels, <Thoughts>, checklist, or hidden prompt text.',
-    successCriteria: 'The output does not reenact or add user-character behavior, allows causal NPC/world autonomy and natural model-owned closure, and stops before the first beat that actually requires a new player contribution.',
-    finalReminder: 'You are the NPC/world response finisher, not the player-character author. Do not force a question/open hook; preserve model-owned causality and stop before the next actual player-owned beat.'
+    successCriteria: 'The output does not reenact or add user-character behavior; it preserves supported candidate NPC/world events, causal order, endpoint, and earned open handoff or natural closure.',
+    finalReminder: 'You are the NPC/world candidate finisher, not the player-character author. Return the same response interval, not what happens next.'
   }, resolvePresetForPromptCompiler(settings, presetStageName)).text;
 
   const risuEngineSystemPrompt = (plan, settings = {}, presetStageName = 'aide_plot') => (
@@ -27903,22 +28162,24 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
 
   const buildRisuEngineFinalUserPrompt = (plan, recent = {}, settings = {}) => isPlayerControlledDraftMode(settings)
     ? [
+        '[ORIGINATING USER CONTRIBUTION — SAME TURN / ALREADY ENACTED / NOT AFTER THE CANDIDATE]',
+        submittedCurrentInput(recent) || '(none; the user takes no new action)',
+        '',
         '[ORDERED PLAYER-CONTROLLED RESPONSE MATERIAL]',
         renderRisuEnginePromptPlan(plan),
         '',
-        '[CURRENT USER CONTRIBUTION — ALREADY ENACTED / DO NOT REENACT]',
-        submittedCurrentInput(recent) || '(none; the user takes no new action)',
-        '',
-        'Finalize only the NPC/world response candidate above. Remove any surviving user-character puppeting or restaging. Preserve natural model-owned closure/transition; repair only a closure that bypasses a pending player-owned beat, and stop before the next actual player contribution. Output only the RP response text.'
+        '[FINAL TASK — SAME-TURN REPLACEMENT]',
+        'Return a polished replacement of the NPC/world candidate above. Remove only proven user-character puppeting, agency-bypass closure, direct authority conflict, or impossible causal/spatial/knowledge error. Preserve its valid events and endpoint; do not write what happens next. Output only the RP response text.'
       ].join('\n')
     : [
-        '[RESPONSE MATERIAL]',
-        renderRisuEnginePromptPlan(plan),
-        '',
-        '[LATEST USER INPUT]',
+        '[ORIGINATING USER REQUEST — SAME TURN / NOT AFTER THE CANDIDATE]',
         submittedCurrentInput(recent) || '(none)',
         '',
-        'Generate the final assistant response now. Output only the RP response text.'
+        '[ORDERED NOVEL FINALIZATION MATERIAL]',
+        renderRisuEnginePromptPlan(plan),
+        '',
+        '[FINAL TASK — SAME-TURN REPLACEMENT]',
+        'Return a polished replacement of the Novel candidate above inside the same event interval. Preserve its terminal beat and do not write what happens next. Output only the final Novel-mode response text.'
       ].join('\n');
 
   const normalizeRisuEngineOutput = (rawContent, fallbackDraft) => {
@@ -27975,6 +28236,42 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         preview: compact(item.content || '', 400)
       }))
     };
+    if (!promptBundle.fit?.fits) {
+      const fb = {
+        schema: FULL_DRAFT_STAGE_SCHEMA,
+        stage: RISU_ENGINE_STAGE,
+        ok: false,
+        fallback: true,
+        reason: 'engine_prompt_mandatory_context_overflow',
+        analysis: {
+          summary: 'Risu Engine mandatory same-turn candidate and safety contract exceed the verified input capacity; keeping the serial draft for ordinary bounded finalization.',
+          constraints: [],
+          risks: []
+        },
+        draft: { rp_text: finalDraft },
+        engineConsumedAuxiliary: promptBundle.consumedAuxiliary,
+        enginePromptFit: promptBundle.fit,
+        elapsedMs: Date.now() - startedAt
+      };
+      Runtime.risuEngine = {
+        ...Runtime.risuEngine,
+        status: 'fallback',
+        reason: fb.reason,
+        elapsedMs: fb.elapsedMs
+      };
+      recordStageTrace({
+        stage: RISU_ENGINE_STAGE,
+        ok: false,
+        reason: fb.reason,
+        presetName,
+        elapsedMs: fb.elapsedMs,
+        systemPrompt: system,
+        userPrompt: user,
+        rawResponse: '',
+        parsed: fb
+      });
+      return fb;
+    }
     try {
       const maxTokens = risuEngineOutputTokenBudget(settings);
       const result = await callLLMWithPreset(engineSettings, RISU_ENGINE_STAGE, system, user, { maxTokens, temp: undefined, promptPhase: 'final' });
@@ -28097,7 +28394,268 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
 
 
   const RequestReuseCache = new Map();
+  const SuppressedDraftCheckpointKeys = new Set();
   let RequestReuseCleanupTimer = null;
+  const boundedDraftCheckpointText = (value, max = 120000) => {
+    const body = text(value || '').replace(/\r\n/g, '\n').trim();
+    return body.length <= max ? body : body.slice(0, max);
+  };
+  const draftCheckpointModeSignature = settings => [
+    normalizeWritingMode(settings?.writingMode, writingModeFromDraftMode(settings?.shadowDraftMode)),
+    normalizeInternalDraftLanguage(settings?.internalDraftLanguage)
+  ].join(':');
+  const draftCheckpointMatchFingerprint = (messages = [], type = '', settings = {}, currentTurnResolution = null) => {
+    const current = currentTurnResolution?.text ? currentTurnResolution : resolveSgaCurrentTurn(messages);
+    const currentInput = text(current?.text || '').trim();
+    if (!currentInput) return '';
+    const visible = [];
+    for (let index = 0; index < (Array.isArray(messages) ? messages.length : 0); index += 1) {
+      const message = messages[index];
+      const role = currentTurnRole(message);
+      if (!['user', 'assistant'].includes(role)) continue;
+      const rawBody = rawCurrentTurnBody(message);
+      if (!rawBody.trim() || isExternalMemoryInjectionPayload(rawBody) || isBackstageUserPayload(rawBody)) continue;
+      if (role === 'user' && (isLikelyMetaUserMessage(rawBody) || isOthersInfoMessage(rawBody))) continue;
+      const content = role === 'user'
+        ? text(currentInputFrom(rawBody) || stripCurrentInputWrapper(rawBody)).trim()
+        : deriveNarrativeContinuityCopy(rawBody).trim();
+      if (!content) continue;
+      visible.push({ index, role, content });
+    }
+    let currentVisibleIndex = -1;
+    for (let index = visible.length - 1; index >= 0; index -= 1) {
+      if (visible[index].role === 'user' && sameRagChatContent(visible[index].content, currentInput)) {
+        currentVisibleIndex = index;
+        break;
+      }
+    }
+    const requestBoundary = Number.isInteger(current?.requestIndex) && current.requestIndex >= 0
+      ? current.requestIndex
+      : Number.MAX_SAFE_INTEGER;
+    const priorVisible = currentVisibleIndex >= 0
+      ? visible.slice(0, currentVisibleIndex)
+      : visible.filter(message => message.index < requestBoundary);
+    const hasher = createTextHasher()
+      .update(`gradia-draft-checkpoint-match-v${DRAFT_CHECKPOINT_MATCH_VERSION}`)
+      .update(normalizeRequestType(type))
+      .update(draftCheckpointModeSignature(settings));
+    for (const message of priorVisible) {
+      hasher.update(message.role).update(normalizeForLoreMatch(message.content));
+    }
+    hasher.update('current_user').update(normalizeForLoreMatch(currentInput));
+    return hasher.digest();
+  };
+  const draftCheckpointKey = (chatIdentity, requestFingerprintValue) => {
+    const chat = text(chatIdentity || '').trim();
+    const fingerprint = text(requestFingerprintValue || '').trim();
+    if (!chat || !fingerprint) return '';
+    return `checkpoint:${createTextHasher().update(DRAFT_CHECKPOINT_SCHEMA).update(chat).update(fingerprint).digest()}`;
+  };
+  const normalizeDraftCheckpoint = (raw = {}, fallbackKey = '') => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const chatIdentity = compact(raw.chatIdentity || raw.chat_identity || '', 160);
+    const requestFingerprintValue = compact(raw.requestFingerprint || raw.request_fingerprint || '', 160);
+    const key = compact(raw.key || fallbackKey || draftCheckpointKey(chatIdentity, requestFingerprintValue), 200);
+    const injection = boundedDraftCheckpointText(raw.injection, 120000);
+    const finalDraft = boundedDraftCheckpointText(raw.finalDraft || raw.final_draft, 80000);
+    if (!key || !chatIdentity || !requestFingerprintValue || !injection || !finalDraft) return null;
+    const createdAt = Number(raw.createdAt || raw.created_at || raw.storedAt || Date.now());
+    const updatedAt = Number(raw.updatedAt || raw.updated_at || createdAt || Date.now());
+    return {
+      schema: DRAFT_CHECKPOINT_SCHEMA,
+      key,
+      chatIdentity,
+      requestFingerprint: requestFingerprintValue,
+      matchVersion: Math.max(0, Number(raw.matchVersion || raw.match_version || 0)),
+      matchFingerprint: compact(raw.matchFingerprint || raw.match_fingerprint || '', 160),
+      inputHash: compact(raw.inputHash || raw.input_hash || '', 80),
+      inputPreview: compact(raw.inputPreview || raw.input_preview || '', 600),
+      injection,
+      injectionHash: compact(raw.injectionHash || raw.injection_hash || stableDraftHash(injection), 80),
+      finalDraft,
+      finalDraftHash: compact(raw.finalDraftHash || raw.final_draft_hash || stableDraftHash(finalDraft), 80),
+      finalDraftMeta: raw.finalDraftMeta && typeof raw.finalDraftMeta === 'object' && !Array.isArray(raw.finalDraftMeta) ? raw.finalDraftMeta : null,
+      lastSafeStage: raw.lastSafeStage && typeof raw.lastSafeStage === 'object' && !Array.isArray(raw.lastSafeStage) ? raw.lastSafeStage : null,
+      stageCount: Math.max(0, Number(raw.stageCount || raw.stage_count || 0)),
+      createdAt: Number.isFinite(createdAt) && createdAt > 0 ? createdAt : Date.now(),
+      updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : Date.now(),
+      lastUsedAt: Math.max(0, Number(raw.lastUsedAt || raw.last_used_at || 0)),
+      reuseCount: Math.max(0, Number(raw.reuseCount || raw.reuse_count || 0))
+    };
+  };
+  const writeDraftCheckpointStore = async (entries = {}) => {
+    const normalized = Object.entries(entries || {})
+      .map(([key, value]) => normalizeDraftCheckpoint(value, key))
+      .filter(Boolean)
+      .sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0))
+      .slice(0, DRAFT_CHECKPOINT_MAX);
+    return await writeObject(STORAGE_DRAFT_CHECKPOINTS_KEY, {
+      version: DRAFT_CHECKPOINT_STORE_VERSION,
+      savedAt: new Date().toISOString(),
+      checkpoints: Object.fromEntries(normalized.map(entry => [entry.key, entry]))
+    });
+  };
+  const readDraftCheckpointStore = async () => {
+    const raw = await readObject(STORAGE_DRAFT_CHECKPOINTS_KEY, {});
+    const source = unwrapVersionedStore(raw, 'checkpoints');
+    const now = Date.now();
+    const entries = {};
+    let changed = false;
+    for (const [key, value] of Object.entries(source || {})) {
+      const entry = normalizeDraftCheckpoint(value, key);
+      if (!entry || now - Number(entry.updatedAt || entry.createdAt || 0) > DRAFT_CHECKPOINT_TTL_MS) {
+        changed = true;
+        continue;
+      }
+      entries[entry.key] = entry;
+      if (entry.key !== key) changed = true;
+    }
+    const sorted = Object.values(entries)
+      .sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0));
+    if (sorted.length > DRAFT_CHECKPOINT_MAX) {
+      changed = true;
+      for (const entry of sorted.slice(DRAFT_CHECKPOINT_MAX)) delete entries[entry.key];
+    }
+    if (changed) await writeDraftCheckpointStore(entries);
+    return entries;
+  };
+  const discardDraftCheckpoint = async key => {
+    const cleanKey = compact(key || '', 200);
+    if (!cleanKey) return false;
+    // Suppress immediately so an unavailable storage backend cannot make an
+    // explicitly discarded draft eligible again during this runtime session.
+    SuppressedDraftCheckpointKeys.add(cleanKey);
+    const entries = await readDraftCheckpointStore();
+    if (!entries[cleanKey]) return true;
+    delete entries[cleanKey];
+    const saved = await writeDraftCheckpointStore(entries);
+    const verified = saved && !(await readDraftCheckpointStore())[cleanKey];
+    if (verified) {
+      Runtime.draftCheckpoint = {
+        ...(Runtime.draftCheckpoint || {}),
+        discards: Number(Runtime.draftCheckpoint?.discards || 0) + 1,
+        lastKey: cleanKey,
+        lastDecision: 'regenerate',
+        lastAt: Date.now(),
+        discardPersisted: true
+      };
+    } else {
+      Runtime.draftCheckpoint = {
+        ...(Runtime.draftCheckpoint || {}),
+        lastKey: cleanKey,
+        lastDecision: 'regenerate_storage_pending',
+        lastAt: Date.now(),
+        discardPersisted: false
+      };
+    }
+    return verified;
+  };
+  const findDraftCheckpoint = async (chatIdentity, requestFingerprintValue, currentInput = '', matchFingerprintValue = '') => {
+    const key = draftCheckpointKey(chatIdentity, requestFingerprintValue);
+    if (!key) return null;
+    const entries = await readDraftCheckpointStore();
+    const expectedInputHash = stableDraftHash(text(currentInput || '').trim());
+    const expectedChatIdentity = text(chatIdentity || '').trim();
+    const expectedRequestFingerprint = text(requestFingerprintValue || '').trim();
+    const expectedMatchFingerprint = text(matchFingerprintValue || '').trim();
+    const candidates = [
+      entries[key],
+      ...Object.values(entries)
+        .filter(entry => entry?.key !== key
+          && expectedMatchFingerprint
+          && entry?.chatIdentity === expectedChatIdentity
+          && entry?.matchFingerprint === expectedMatchFingerprint
+          && (!entry?.inputHash || entry.inputHash === expectedInputHash))
+        .sort((left, right) => Number(right.updatedAt || right.createdAt || 0) - Number(left.updatedAt || left.createdAt || 0))
+    ].filter(Boolean);
+    for (const entry of candidates) {
+      if (SuppressedDraftCheckpointKeys.has(entry.key)) continue;
+      const exactIdentity = entry.requestFingerprint === expectedRequestFingerprint;
+      const stableTurnIdentity = !!expectedMatchFingerprint && entry.matchFingerprint === expectedMatchFingerprint;
+      const valid = entry.chatIdentity === expectedChatIdentity
+        && (exactIdentity || stableTurnIdentity)
+        && (!entry.inputHash || entry.inputHash === expectedInputHash)
+        && entry.injectionHash === stableDraftHash(entry.injection)
+        && entry.finalDraftHash === stableDraftHash(entry.finalDraft);
+      if (!valid) {
+        Runtime.draftCheckpoint = {
+          ...(Runtime.draftCheckpoint || {}),
+          corruptions: Number(Runtime.draftCheckpoint?.corruptions || 0) + 1,
+          lastKey: entry.key,
+          lastDecision: 'invalid',
+          lastAt: Date.now()
+        };
+        await discardDraftCheckpoint(entry.key);
+        continue;
+      }
+      Runtime.draftCheckpoint = {
+        ...(Runtime.draftCheckpoint || {}),
+        detections: Number(Runtime.draftCheckpoint?.detections || 0) + 1,
+        lastKey: entry.key,
+        lastDecision: 'detected',
+        lastAt: Date.now(),
+        matchKind: exactIdentity ? 'exact_request' : 'stable_turn'
+      };
+      return entry;
+    }
+    return null;
+  };
+  const storeDraftCheckpoint = async value => {
+    const chatIdentity = text(value?.chatIdentity || '').trim();
+    const requestFingerprintValue = text(value?.requestFingerprint || '').trim();
+    const currentInput = text(value?.currentInput || '').trim();
+    const key = draftCheckpointKey(chatIdentity, requestFingerprintValue);
+    const entry = normalizeDraftCheckpoint({
+      ...value,
+      key,
+      chatIdentity,
+      requestFingerprint: requestFingerprintValue,
+      matchVersion: value?.matchFingerprint ? DRAFT_CHECKPOINT_MATCH_VERSION : 0,
+      matchFingerprint: text(value?.matchFingerprint || '').trim(),
+      inputHash: stableDraftHash(currentInput),
+      inputPreview: compact(currentInput, 600),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      lastUsedAt: 0,
+      reuseCount: 0
+    }, key);
+    if (!entry) return null;
+    const entries = await readDraftCheckpointStore();
+    if (entry.matchFingerprint) {
+      for (const existing of Object.values(entries)) {
+        if (existing?.key !== key
+          && existing?.chatIdentity === chatIdentity
+          && existing?.matchFingerprint === entry.matchFingerprint
+          && (!existing?.inputHash || existing.inputHash === entry.inputHash)) {
+          delete entries[existing.key];
+        }
+      }
+    }
+    entries[key] = entry;
+    if (!await writeDraftCheckpointStore(entries)) return null;
+    SuppressedDraftCheckpointKeys.delete(key);
+    Runtime.draftCheckpoint = {
+      ...(Runtime.draftCheckpoint || {}),
+      stores: Number(Runtime.draftCheckpoint?.stores || 0) + 1,
+      lastKey: key,
+      lastDecision: 'stored',
+      lastAt: Date.now()
+    };
+    return entry;
+  };
+  const touchDraftCheckpoint = async entryValue => {
+    const entry = normalizeDraftCheckpoint(entryValue, entryValue?.key || '');
+    if (!entry) return null;
+    const entries = await readDraftCheckpointStore();
+    if (!entries[entry.key]) return null;
+    entries[entry.key] = {
+      ...entry,
+      updatedAt: Date.now(),
+      lastUsedAt: Date.now(),
+      reuseCount: Number(entry.reuseCount || 0) + 1
+    };
+    return await writeDraftCheckpointStore(entries) ? entries[entry.key] : null;
+  };
   const clearRequestReuseCache = () => {
     RequestReuseCache.clear();
     Runtime.requestReuse.lastFingerprint = '';
@@ -28105,6 +28663,8 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
   };
   const scheduleCompletedRequestReuseCleanup = fingerprint => {
     if (!fingerprint) return;
+    const completed = RequestReuseCache.get(fingerprint);
+    if (completed) completed.visibleResponseAt = Date.now();
     if (RequestReuseCleanupTimer) clearTimeout(RequestReuseCleanupTimer);
     RequestReuseCleanupTimer = setTimeout(() => {
       RequestReuseCleanupTimer = null;
@@ -28240,6 +28800,39 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     Runtime.finalDraftMeta = { ...(entry.finalDraftMeta || {}), at: Date.now(), reused: true, requestFingerprint: fingerprint, messageTransport: transportCheck };
     Runtime.lastSafeStage = entry.lastSafeStage || Runtime.lastSafeStage;
     Runtime.last = { at: Date.now(), ok: true, skipped: false, reused: true, reason: 'same_request_retry_reuse', requestFingerprint: fingerprint, stageCount: Number(entry.stageCount || 0) };
+    return injectedMessages;
+  };
+
+  const applyDraftCheckpointEntry = (entry, messages, requestSettings, fingerprint) => {
+    const injectedMessages = applyRequestReuseEntry(entry, messages, requestSettings, fingerprint);
+    if (!injectedMessages) return null;
+    Runtime.lastInjection = entry.injection || '';
+    Runtime.finalDraftMeta = {
+      ...(Runtime.finalDraftMeta || {}),
+      checkpointReuse: true,
+      checkpointKey: entry.key || '',
+      checkpointCreatedAt: Number(entry.createdAt || 0)
+    };
+    Runtime.last = {
+      ...(Runtime.last || {}),
+      at: Date.now(),
+      ok: true,
+      skipped: false,
+      reused: true,
+      checkpointReuse: true,
+      reason: 'draft_checkpoint_reused',
+      requestFingerprint: fingerprint,
+      checkpointKey: entry.key || ''
+    };
+    Runtime.draftCheckpoint = {
+      ...(Runtime.draftCheckpoint || {}),
+      reuses: Number(Runtime.draftCheckpoint?.reuses || 0) + 1,
+      lastKey: entry.key || '',
+      lastDecision: 'reuse',
+      lastAt: Date.now(),
+      prompted: true,
+      promptUnavailable: false
+    };
     return injectedMessages;
   };
 
@@ -29014,7 +29607,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
     const requestSettings = { ...settings, currentTurnResolution };
     const fingerprint = requestFingerprint(messages, type, requestSettings, currentTurnResolution);
     const reused = getRequestReuseEntry(fingerprint);
-    if (reused) {
+    if (reused && !reused.visibleResponseAt) {
       const applied = applyRequestReuseEntry(reused, messages, requestSettings, fingerprint);
       if (applied) {
         await ensurePipelineWorkStatus(requestSettings);
@@ -29024,6 +29617,86 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       }
       RequestReuseCache.delete(fingerprint);
       warn('request_reuse_transport_check_failed', fingerprint);
+    }
+    if (reused?.visibleResponseAt) RequestReuseCache.delete(fingerprint);
+
+    const checkpointChatIdentity = await loadCurrentChatIdentity(false);
+    const checkpointMatchFingerprint = draftCheckpointMatchFingerprint(
+      messages,
+      type,
+      requestSettings,
+      currentTurnResolution
+    );
+    let draftCheckpoint = null;
+    try {
+      draftCheckpoint = await findDraftCheckpoint(
+        checkpointChatIdentity,
+        fingerprint,
+        currentTurnResolution.text,
+        checkpointMatchFingerprint
+      );
+    } catch (error) {
+      warn('draft_checkpoint_lookup_failed', error);
+    }
+    if (draftCheckpoint) {
+      await ensurePipelineWorkStatus(requestSettings);
+      await updatePipelineWorkPanel('동일 인풋을 감지했습니다 · 이전 초안 사용 여부를 확인하세요.', 'draft_checkpoint_confirmation', {
+        busy: true,
+        source: 'draft_checkpoint',
+        currentStage: ''
+      });
+      let checkpointDecision = 'regenerate_unprompted';
+      try {
+        checkpointDecision = await showDraftCheckpointConfirmation(draftCheckpoint);
+      } catch (error) {
+        warn('draft_checkpoint_confirmation_failed', error);
+      }
+      if (checkpointDecision === 'reuse') {
+        const applied = applyDraftCheckpointEntry(draftCheckpoint, messages, requestSettings, fingerprint);
+        if (applied) {
+          try { await touchDraftCheckpoint(draftCheckpoint); }
+          catch (error) { warn('draft_checkpoint_touch_failed', error); }
+          storeRequestReuseEntry(fingerprint, draftCheckpoint);
+          await updatePipelineWorkPanel('이전에 저장한 GRADIA 초안을 다시 전달했습니다 · 응답 모델이 장면을 작성하고 있습니다…', 'awaiting_response', {
+            busy: true,
+            source: 'draft_checkpoint',
+            currentStage: ''
+          });
+          finishCallTelemetry('draft_checkpoint_reused');
+          return applied;
+        }
+        warn('draft_checkpoint_transport_check_failed', draftCheckpoint.key || '');
+        try { await discardDraftCheckpoint(draftCheckpoint.key); } catch (_) {}
+      } else if (checkpointDecision === 'regenerate') {
+        let discardPersisted = false;
+        try { discardPersisted = await discardDraftCheckpoint(draftCheckpoint.key); }
+        catch (error) { warn('draft_checkpoint_discard_failed', error); }
+        if (!discardPersisted) warn('draft_checkpoint_discard_not_persisted', draftCheckpoint.key || '');
+        Runtime.lastInjection = '';
+        Runtime.finalDraft = '';
+        Runtime.lastSafeStage = null;
+        Runtime.finalDraftMeta = {
+          at: Date.now(),
+          skipped: true,
+          reason: 'draft_checkpoint_discarded',
+          checkpointKey: draftCheckpoint.key || '',
+          discardPersisted,
+          requestFingerprint: fingerprint
+        };
+        await updatePipelineWorkPanel(discardPersisted
+          ? '이전 초안을 폐기했습니다 · 새 GRADIA 초안을 작성합니다…'
+          : '이전 초안을 현재 실행에서 제외했습니다 · 저장소 확인에 실패했지만 새 GRADIA 초안을 작성합니다…', 'draft_checkpoint_discarded', {
+          busy: true,
+          source: 'draft_checkpoint',
+          currentStage: ''
+        });
+      } else {
+        await updatePipelineWorkPanel('확인창을 사용할 수 없어 저장 초안을 자동 재사용하지 않고 새 초안을 작성합니다…', 'draft_checkpoint_unavailable', {
+          busy: true,
+          source: 'draft_checkpoint',
+          currentStage: ''
+        });
+      }
     }
 
     if (Runtime.inFlight) {
@@ -29097,6 +29770,24 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
         lastSafeStage: Runtime.lastSafeStage,
         stageCount: result.stages?.length || 0
       });
+      if (checkpointChatIdentity) {
+        try {
+          const savedCheckpoint = await storeDraftCheckpoint({
+            chatIdentity: checkpointChatIdentity,
+            requestFingerprint: fingerprint,
+            matchFingerprint: checkpointMatchFingerprint,
+            currentInput: currentTurnResolution.text,
+            injection: result.injection,
+            finalDraft: Runtime.finalDraft,
+            finalDraftMeta: Runtime.finalDraftMeta,
+            lastSafeStage: Runtime.lastSafeStage,
+            stageCount: result.stages?.length || 0
+          });
+          if (!savedCheckpoint) warn('draft_checkpoint_store_failed', fingerprint);
+        } catch (error) {
+          warn('draft_checkpoint_store_failed', error);
+        }
+      }
       await updatePipelineWorkPanel('GRADIA 초안 작성 완료 · 응답 모델이 장면을 완성하고 있습니다…', 'awaiting_response', {
         currentStage: ''
       });
@@ -30489,6 +31180,7 @@ Use edits: [] when the current draft already satisfies this stage. Never return 
       STORAGE_NARRATIVE_ARCHIVES_KEY,
       STORAGE_NARRATIVE_EMBEDDING_SETTINGS_KEY,
       STORAGE_NATIVE_CHAT_COPY_REGISTRY_KEY,
+      STORAGE_DRAFT_CHECKPOINTS_KEY,
       STORAGE_REFERENCE_BUDGET_MIGRATION_KEY,
       LEGACY_STORAGE_SETTINGS_KEY,
       LEGACY_STORAGE_PRESETS_KEY
@@ -38927,6 +39619,9 @@ const buildNarrativeArchiveViewerPage = () => {
         prompt: formatDraftPatchDocumentForPrompt(document)
       }));
     },
+    debugBuildConstraintBlock(ledger = {}, consumerStageName = 'aide_world') {
+      return buildConstraintBlock(cloneJson(ledger || {}), consumerStageName);
+    },
     debugApplyDraftPatch(value = '', edits = []) {
       return JSON.parse(JSON.stringify(applyDraftPatchOperations(buildDraftPatchDocument(value), edits)));
     },
@@ -38999,10 +39694,18 @@ const buildNarrativeArchiveViewerPage = () => {
     },
     debugBuildFinalOverlay(draft = '', recent = {}, options = {}) {
       const debugLineage = recent.runLineage || { runId: 'debug-run', currentInputHash: stableDraftHash(recent.latestUser || '') };
-      const stage = { stage: 'aide_plot', label: '플롯 AIDE', ok: true, draft: { rp_text: draft }, final_overlay: { final_rp_draft: draft } };
-      stage.twoCallAnalysis = options.twoCallAnalysis || { analysis: { summary: 'Debug current-run analysis.', constraints: [], risks: [] }, rewriteDirectives: [] };
-      stage.lineage = { runId: debugLineage.runId, currentInputHash: debugLineage.currentInputHash };
-      return buildFinalOverlay(stage, [stage], {
+      const aideStage = { stage: 'aide_plot', label: '플롯 AIDE', ok: true, fallback: false, draft: { rp_text: draft }, final_overlay: { final_rp_draft: draft } };
+      aideStage.twoCallAnalysis = options.twoCallAnalysis || { analysis: { summary: 'Debug current-run analysis.', constraints: [], risks: [] }, rewriteDirectives: [] };
+      aideStage.lineage = { runId: debugLineage.runId, currentInputHash: debugLineage.currentInputHash };
+      const engineStage = options.engineCandidateAdopted === true
+        ? { stage: RISU_ENGINE_STAGE, label: 'Risu Response Engine', ok: true, fallback: false, draft: { rp_text: draft }, final_overlay: { final_rp_draft: draft } }
+        : options.engineCandidateFailed === true
+          ? { stage: RISU_ENGINE_STAGE, label: 'Risu Response Engine', ok: false, fallback: true, reason: 'debug_engine_failure', draft: { rp_text: draft } }
+          : null;
+      if (engineStage) engineStage.lineage = { runId: debugLineage.runId, currentInputHash: debugLineage.currentInputHash };
+      const debugStages = engineStage ? [aideStage, engineStage] : [aideStage];
+      const lastStage = engineStage || aideStage;
+      return buildFinalOverlay(lastStage, debugStages, {
         latestUser: recent.latestUser || '',
         latestAssistant: recent.latestAssistant || '',
         terminalVisibleScene: recent.terminalVisibleScene || '',
@@ -39014,6 +39717,8 @@ const buildNarrativeArchiveViewerPage = () => {
         runLineage: debugLineage
       }, {
         outputMode: normalizeChoice(options.outputMode || 'draft_guided', OUTPUT_MODES, 'draft_guided'),
+        writingMode: normalizeWritingMode(options.writingMode, writingModeFromDraftMode(options.shadowDraftMode)),
+        shadowDraftMode: normalizeShadowDraftMode(options.shadowDraftMode),
         internalDraftLanguage: normalizeInternalDraftLanguage(options.internalDraftLanguage),
         informationTransferMode: normalizeChoice(options.informationTransferMode || 'draft_only', INFORMATION_TRANSFER_MODES, 'draft_only'),
         maxInjectionChars: clampInt(options.maxInjectionChars, 1500, 60000, DEFAULT_MAX_INJECTION_CHARS),
@@ -39042,6 +39747,45 @@ const buildNarrativeArchiveViewerPage = () => {
     getRequestReuseStats() { return JSON.parse(JSON.stringify({ ...Runtime.requestReuse, size: RequestReuseCache.size })); },
     clearRequestReuseCache() { clearRequestReuseCache(); return true; },
     fingerprintRequest(messages = [], type = 'model') { const settings = Runtime.settings || {}; const current = resolveSgaCurrentTurn(messages); return requestFingerprint(messages, type, settings, current); },
+    getDraftCheckpointStatus() { return JSON.parse(JSON.stringify(Runtime.draftCheckpoint || {})); },
+    async listDraftCheckpoints() { return JSON.parse(JSON.stringify(Object.values(await readDraftCheckpointStore()))); },
+    async clearDraftCheckpoints() {
+      await RisuCompat.removeItem(STORAGE_DRAFT_CHECKPOINTS_KEY);
+      SuppressedDraftCheckpointKeys.clear();
+      Runtime.draftCheckpoint = { detections: 0, stores: 0, reuses: 0, discards: 0, corruptions: 0, lastKey: '', lastDecision: 'cleared', lastAt: Date.now(), prompted: false, promptUnavailable: false };
+      return true;
+    },
+    debugDraftCheckpointMatchFingerprint(messages = [], type = 'model', settings = {}) {
+      const activeSettings = { ...(Runtime.settings || {}), ...(settings || {}) };
+      const currentTurnResolution = resolveSgaCurrentTurn(messages);
+      return draftCheckpointMatchFingerprint(messages, type, activeSettings, currentTurnResolution);
+    },
+    async debugStoreDraftCheckpoint(value = {}) {
+      const entry = await storeDraftCheckpoint({
+        chatIdentity: value.chatIdentity || '0:0',
+        requestFingerprint: value.requestFingerprint || 'debug-request',
+        matchFingerprint: value.matchFingerprint || '',
+        currentInput: value.currentInput || 'debug input',
+        injection: value.injection || `${INJECTION_HEADER}\ndebug injection`,
+        finalDraft: value.finalDraft || 'debug draft',
+        finalDraftMeta: value.finalDraftMeta || { debug: true },
+        lastSafeStage: value.lastSafeStage || null,
+        stageCount: value.stageCount || 1
+      });
+      return JSON.parse(JSON.stringify(entry));
+    },
+    async debugFindDraftCheckpoint(chatIdentity = '0:0', requestFingerprintValue = 'debug-request', currentInput = 'debug input', matchFingerprintValue = '') {
+      return JSON.parse(JSON.stringify(await findDraftCheckpoint(chatIdentity, requestFingerprintValue, currentInput, matchFingerprintValue)));
+    },
+    async debugDiscardDraftCheckpoint(key = '') { return await discardDraftCheckpoint(key); },
+    debugApplyDraftCheckpoint(entry = {}, messages = [], settings = {}, fingerprint = 'debug-request') {
+      const normalized = normalizeDraftCheckpoint(entry, entry?.key || '');
+      if (!normalized) return null;
+      return applyDraftCheckpointEntry(normalized, messages, settings || {}, fingerprint);
+    },
+    async debugDraftCheckpointConfirmation(finalDraft = '이전에 작성한 초안', createdAt = Date.now()) {
+      return await showDraftCheckpointConfirmation({ finalDraft, createdAt });
+    },
     getAideOrderPlan(value = null) {
       const order = normalizeAideStageOrder(value || Runtime.settings?.aideStageOrder || DEFAULT_AIDE_STAGE_ORDER);
       return JSON.parse(JSON.stringify({ fullOrder: ['shadow_act', ...order], label: `SHADOW ACT → ${aideOrderLabel(order)}` }));
