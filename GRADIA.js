@@ -1,7 +1,7 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.58
+//@display-name GRADIA v0.25.60
 //@api 3.0
-//@version 0.25.58
+//@version 0.25.60
 
 /* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
 //@allowed-ipc flashback_hayaku_bridge
@@ -827,6 +827,8 @@
  * v0.25.56 replaces Novel/RP final-injection continuation prompts with one density-invariant same-turn finalization kernel. The originating user request is explicitly distinguished from a post-candidate turn, candidate event semantics and terminal beat are locked, Novel and player-controlled RP receive bounded mode-specific contracts, successful Engine output alone enters preservation mode, and failed Engine runs fall back to ordinary candidate integration instead of being mislabeled as already synthesized.
  * v0.25.57 hardens reroll/rollback draft checkpoints with a stable visible-turn match fingerprint that ignores transient system/module prompt changes while retaining chat, prior-turn, writing-mode, and language boundaries. Explicit No is now an idempotent, read-back-verified discard with an in-memory tombstone fallback, Escape can no longer silently discard a draft, and confirmation restoration always settles.
  * v0.25.58 prevents serial AIDEs from replaying repairs already embodied in the current draft. Completed AIDE summaries, domain notes, constraints, and rewrite directives are no longer forwarded as unresolved work; only durable do-not-reveal and POV/knowledge guards survive. Structural patch application also suppresses normalized exact duplicate inserts/replacements as a successful no-op while preserving repetitions that were already present in the source draft.
+ * v0.25.59 fixes the Narrative Archive embedding provider selector. The shared select callback passes both the mutable draft and selected value; provider defaults now consume that exact contract, retain every selected provider through rerender, and durably reload Voyage Context and its matching endpoint/model instead of collapsing unknown object input to OpenAI-compatible API.
+ * v0.25.60 adds explicit Story Arc cold-start maintenance shared by the Story Arc and Narrative Archive pages. “최근 완료 5턴으로 기준 생성” analyzes the latest complete canonical five-turn window even off-boundary, while the full cold start processes only missing canonical windows in chronological order, saves every successful window immediately to Narrative Archive, keeps the newest result as the active Story Arc, resumes after failure without repeating stored windows, and confirms the estimated Arc Director/document-embedding calls before execution.
  * v0.25.51 fixes copy/manual-send clipboard delivery in iframe/WebView runtimes. The copy action now runs inside the originating button click before any modal restore/hide await can consume transient user activation; it tries synchronous selection/execCommand first, then navigator.clipboard, records the method for diagnostics, and keeps the dialog open with the generated text selected when browser policy blocks automated copying.
  *
  * v0.25.23 hardens those contracts after review: unavailable or cross-chat Arc state now
@@ -915,7 +917,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.58';
+  const PLUGIN_VERSION = '0.25.60';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -944,6 +946,7 @@
   const STORAGE_REFERENCE_BUDGET_MIGRATION_KEY = 'serial_gradation_agents_for_rp:migration:v3';
   const STORAGE_WRITER_DESIGNS_KEY = 'serial_gradation_agents_for_rp:writer_designs:v1';
   const STORAGE_STORY_ARCS_KEY = 'serial_gradation_agents_for_rp:story_arcs:v2';
+  const STORAGE_ARC_COLD_START_JOBS_KEY = 'serial_gradation_agents_for_rp:arc_cold_start_jobs:v1';
   const STORAGE_NARRATIVE_ARCHIVES_KEY = 'serial_gradation_agents_for_rp:narrative_archives:v1';
   const STORAGE_NARRATIVE_SHARED_ARCHIVES_KEY = 'serial_gradation_agents_for_rp:narrative_shared_archives:v1'; // legacy monolith
   const STORAGE_NARRATIVE_SHARED_ARCHIVE_INDEX_KEY = 'serial_gradation_agents_for_rp:narrative_shared_archive_index:v1';
@@ -1436,6 +1439,8 @@
   const ARC_CONTINUITY_LOCK_MAX = 18;
   const ARC_CONTINUITY_HISTORY_MAX = 12;
   const ARC_DIRECTOR_STORE_MAX_SCOPES = 12;
+  const ARC_COLD_START_JOB_SCHEMA = 'gradia.story_arc.cold_start_job.v1';
+  const ARC_COLD_START_JOB_STORE_MAX_SCOPES = 12;
   const NARRATIVE_ARCHIVE_SCHEMA = 'gradia.narrative_archive.v1';
   const NARRATIVE_SHARED_ARCHIVE_SCHEMA = 'gradia.narrative_shared_archive.v1';
   const NARRATIVE_SHARED_ARCHIVE_REF_SCHEMA = 'gradia.narrative_shared_archive_ref.v1';
@@ -5161,6 +5166,24 @@ const narrativeEmbeddingStableHash = value => {
     });
   };
 
+  const readArcColdStartJobStore = async () => {
+    const raw = await readObject(STORAGE_ARC_COLD_START_JOBS_KEY, {});
+    const source = unwrapVersionedStore(raw, 'jobs');
+    return source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+  };
+
+  const writeArcColdStartJobStore = async (jobs = {}) => {
+    const entries = Object.entries(jobs || {})
+      .filter(([key, value]) => key && value && typeof value === 'object' && !Array.isArray(value))
+      .sort((a, b) => Number(b[1]?.updatedAt || 0) - Number(a[1]?.updatedAt || 0))
+      .slice(0, ARC_COLD_START_JOB_STORE_MAX_SCOPES);
+    return await writeObject(STORAGE_ARC_COLD_START_JOBS_KEY, {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      jobs: Object.fromEntries(entries)
+    });
+  };
+
 
 
 const NARRATIVE_EMBEDDING_DEFAULTS = Object.freeze({
@@ -6798,6 +6821,109 @@ const narrativeArchiveEntryBranchValid = (entry, turns, scopeKey) => {
   return arcCanonicalChatHash(turns.slice(0, turnEnd)) === expected;
 };
 
+const arcColdStartBoundaryEnd = completedTurnCount => Math.floor(Math.max(0, Number(completedTurnCount || 0)) / ARC_DIRECTOR_UPDATE_INTERVAL) * ARC_DIRECTOR_UPDATE_INTERVAL;
+
+const arcColdStartWindowSpecs = completedTurnCount => {
+  const boundaryEnd = arcColdStartBoundaryEnd(completedTurnCount);
+  const windows = [];
+  for (let end = ARC_DIRECTOR_UPDATE_INTERVAL; end <= boundaryEnd; end += ARC_DIRECTOR_UPDATE_INTERVAL) {
+    windows.push({ start: end - ARC_DIRECTOR_UPDATE_INTERVAL + 1, end, label: `T${end - ARC_DIRECTOR_UPDATE_INTERVAL + 1}-${end}` });
+  }
+  return windows;
+};
+
+const arcColdStartArcBranchValid = (arc, turns = [], throughTurn = null) => {
+  if (!arc || storyArcPackageIssue(arc, ARC_DIRECTOR_UPDATE_INTERVAL)) return false;
+  const through = Math.max(0, Number(arc?.basis?.throughTurn || 0));
+  const expectedThrough = throughTurn == null ? through : Math.max(0, Number(throughTurn || 0));
+  if (!through || through !== expectedThrough || through > turns.length) return false;
+  const expectedHash = text(arc?.basis?.chatHash || '').trim();
+  return !!expectedHash && expectedHash === arcCanonicalChatHash(turns.slice(0, through));
+};
+
+const buildArcColdStartPlanFromRecords = ({
+  turns = [],
+  entries = [],
+  currentArc = null,
+  scopeKey = '',
+  mode = 'missing_history',
+  embeddingReady = false
+} = {}) => {
+  const canonicalTurns = Array.isArray(turns) ? turns : [];
+  const allWindows = arcColdStartWindowSpecs(canonicalTurns.length);
+  const boundaryEnd = allWindows[allWindows.length - 1]?.end || 0;
+  const normalizedMode = mode === 'recent_window' ? 'recent_window' : 'missing_history';
+  if (!boundaryEnd) {
+    return {
+      mode: normalizedMode,
+      operationLabel: normalizedMode === 'recent_window' ? '최근 완료 5턴으로 기준 생성' : '누락된 과거 5턴 콜드스타트',
+      available: false,
+      reason: 'arc_cold_start_requires_five_completed_turns',
+      completedTurnCount: canonicalTurns.length,
+      boundaryEnd: 0,
+      nextWindowStart: 0,
+      nextWindowEnd: 0,
+      windows: [],
+      actions: [],
+      llmCalls: 0,
+      embeddingCalls: 0,
+      archiveWrites: 0
+    };
+  }
+  const targetWindows = normalizedMode === 'recent_window' ? allWindows.slice(-1) : allWindows;
+  const archiveEntries = Array.isArray(entries) ? entries : [];
+  const actions = targetWindows.map(window => {
+    const entry = archiveEntries.find(item => item?.inherited !== true
+      && item?.archiveReferenceOnly !== true
+      && Number(item?.turnEnd || 0) === window.end
+      && Number(item?.turnStart || window.start) === window.start
+      && narrativeArchiveEntryBranchValid(item, canonicalTurns.slice(0, boundaryEnd), scopeKey));
+    const activeArc = arcColdStartArcBranchValid(currentArc, canonicalTurns.slice(0, boundaryEnd), window.end);
+    let action = 'analyze';
+    if (normalizedMode === 'missing_history') {
+      if (entry && (window.end < boundaryEnd || activeArc)) action = 'skip';
+      else if (!entry && activeArc) action = 'archive_only';
+    }
+    return {
+      ...window,
+      action,
+      archivePresent: !!entry,
+      activeArcPresent: activeArc
+    };
+  });
+  const llmCalls = actions.filter(item => item.action === 'analyze').length;
+  const archiveWrites = actions.filter(item => item.action !== 'skip').length;
+  return {
+    mode: normalizedMode,
+    operationLabel: normalizedMode === 'recent_window' ? '최근 완료 5턴으로 기준 생성' : '누락된 과거 5턴 콜드스타트',
+    available: true,
+    reason: '',
+    completedTurnCount: canonicalTurns.length,
+    boundaryEnd,
+    nextWindowStart: boundaryEnd + 1,
+    nextWindowEnd: boundaryEnd + ARC_DIRECTOR_UPDATE_INTERVAL,
+    windows: targetWindows,
+    actions,
+    llmCalls,
+    embeddingCalls: embeddingReady ? archiveWrites : 0,
+    archiveWrites
+  };
+};
+
+const arcColdStartSnapshotThrough = (snapshot, turns = [], throughTurn = 0) => {
+  const selected = (Array.isArray(turns) ? turns : []).slice(0, Math.max(0, Number(throughTurn || 0)));
+  return {
+    ...(snapshot || {}),
+    actualChatContext: {
+      ...(snapshot?.actualChatContext || {}),
+      messages: selected.flatMap(item => [
+        { role: 'user', content: text(item?.user || '') },
+        { role: 'assistant', content: text(item?.assistant || '') }
+      ])
+    }
+  };
+};
+
 const inspectNarrativeArchiveScope = async (scopeKey = Runtime.arcDirector?.scopeKey || '', embeddingSettings = null) => {
   const key = text(scopeKey || '').trim();
   const settings = embeddingSettings || await readNarrativeEmbeddingSettings();
@@ -7359,9 +7485,11 @@ const rebuildNarrativeArchiveVectors = async (scopeKey = Runtime.arcDirector?.sc
     }
     const previousThrough = Math.max(0, Number(previousArc?.basis?.throughTurn || 0));
     const skippedGap = previousArc ? Math.max(0, turns.length - previousThrough - ARC_DIRECTOR_UPDATE_INTERVAL) : Math.max(0, turns.length - ARC_DIRECTOR_UPDATE_INTERVAL);
-    const archiveRecall = previousArc
-      ? await recallNarrativeArchiveForBoundary(previousArc, snapshot, window)
-      : { ok: true, active: false, entries: [], promptBlock: '', reason: 'archive_unavailable_without_previous_arc' };
+    const archiveRecall = settings?.skipNarrativeArchiveRecall === true
+      ? { ok: true, active: false, entries: [], promptBlock: '', reason: 'archive_recall_skipped_for_cold_start' }
+      : previousArc
+        ? await recallNarrativeArchiveForBoundary(previousArc, snapshot, window)
+        : { ok: true, active: false, entries: [], promptBlock: '', reason: 'archive_unavailable_without_previous_arc' };
     const variationBlock = arcControlledVariationPromptBlock(settings, [arcCanonicalChatHash(turns), previousArc?.revision || 0, turns.length, 'bounded_rebase'].join('|'));
     const userPrompt = [
       `[BOUNDED REBASE REASON] ${reason}`,
@@ -7370,6 +7498,11 @@ const rebuildNarrativeArchiveVectors = async (scopeKey = Runtime.arcDirector?.sc
       skippedGap > 0 ? `[UNREAD FOREGROUND GAP] ${skippedGap} older completed turn(s) are intentionally NOT reread during normal response generation. Never invent their details. Treat the latest canonical five-turn window as current-state authority and use only still-compatible previous DB/archive continuity as background.` : '',
       previousArc ? `[PREVIOUS STORY ARC DB — advisory only; discard any field contradicted by the latest canonical window]
 ${compact(JSON.stringify(previousArc), 16000)}` : '',
+      !previousArc && text(settings?.coldStartPreviousArchiveDocument || '').trim()
+        ? `[PREVIOUS COLD-START ARCHIVE BOUNDARY — historical advisory only]
+${compact(settings.coldStartPreviousArchiveDocument, 6800)}
+Carry forward only still-compatible continuity into the new complete Story Arc state. The current canonical five-turn window remains authoritative.`
+        : '',
       previousArc?.destination?.locked === true ? `[LOCKED ARC DESTINATION — preserve exactly unless literal impossibility must be reported as a warning]
 ${JSON.stringify(previousArc.destination)}` : '',
       archiveRecall.promptBlock || '',
@@ -7468,7 +7601,9 @@ ${JSON.stringify(previousArc.destination)}` : '',
       return { ok: false, reason: `arc_batch_size_invalid:${newTurns.length}`, arc: existingArc, turns, updated: false };
     }
     const variationBlock = arcControlledVariationPromptBlock(settings, [arcCanonicalChatHash(turns), existingArc?.revision || 0, turns.length, 'five_turn_update'].join('|'));
-    const archiveRecall = await recallNarrativeArchiveForBoundary(existingArc, snapshot, newTurns);
+    const archiveRecall = settings?.skipNarrativeArchiveRecall === true
+      ? { ok: true, active: false, entries: [], promptBlock: '', reason: 'archive_recall_skipped_for_cold_start' }
+      : await recallNarrativeArchiveForBoundary(existingArc, snapshot, newTurns);
     const userPrompt = [
       '[PREVIOUS STORY ARC DB — soft reference only]',
       compact(JSON.stringify(existingArc), 16000),
@@ -7553,6 +7688,228 @@ ${JSON.stringify(previousArc.destination)}` : '',
       parsed: { kind: 'arc_five_turn_update', previousThrough, observedThrough: turns.length, revision: arc.revision, nextWindow: [turns.length + 1, turns.length + ARC_DIRECTOR_UPDATE_INTERVAL], archiveRecall: { reason: archiveRecall.reason, count: archiveRecall.entries?.length || 0, entries: archiveRecall.entries || [] }, arc }
     });
     return { ok: true, reason: 'FIVE_TURN_UPDATED', arc, turns, updated: true };
+  };
+
+  const prepareArcColdStartContext = async (snapshot, settings, mode = 'missing_history') => {
+    const turns = arcCanonicalCompletedTurns(snapshot);
+    const scopeKey = arcDirectorScopeKey(snapshot);
+    const storyStore = await readStoryArcStore();
+    const rawArc = storyStore[scopeKey];
+    const currentArc = rawArc ? normalizeStoryArcPackage(rawArc, rawArc) : null;
+    const archiveStore = await readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [scopeKey] });
+    const archiveScope = normalizeNarrativeArchiveScope(archiveStore[scopeKey], scopeKey);
+    const embeddingSettings = await readNarrativeEmbeddingSettings();
+    const embeddingReady = embeddingSettings.enabled === true
+      && NarrativeEmbeddingProviderRegistry.validateConfig(embeddingSettings).ok === true;
+    const plan = buildArcColdStartPlanFromRecords({
+      turns,
+      entries: archiveScope.entries,
+      currentArc,
+      scopeKey,
+      mode,
+      embeddingReady
+    });
+    return { snapshot, settings, turns, scopeKey, currentArc, archiveEntries: archiveScope.entries, embeddingSettings, plan };
+  };
+
+  const compatibleArcColdStartJob = async (scopeKey, boundaryEnd, boundaryHash, turns = []) => {
+    const jobs = await readArcColdStartJobStore();
+    const job = jobs[scopeKey];
+    if (!job || text(job.schema || '') !== ARC_COLD_START_JOB_SCHEMA
+      || Number(job.boundaryEnd || 0) !== Number(boundaryEnd || 0)
+      || text(job.boundaryHash || '') !== text(boundaryHash || '')) return { jobs, job: null };
+    const resumeArc = job.resumeArc ? normalizeStoryArcPackage(job.resumeArc, job.resumeArc) : null;
+    if (!resumeArc || !arcColdStartArcBranchValid(resumeArc, turns, Number(resumeArc?.basis?.throughTurn || 0))) return { jobs, job: null };
+    return { jobs, job: { ...job, resumeArc } };
+  };
+
+  const persistArcColdStartJob = async (jobs, scopeKey, value = null) => {
+    const next = { ...(jobs || {}) };
+    if (value) next[scopeKey] = value;
+    else delete next[scopeKey];
+    if (!await writeArcColdStartJobStore(next)) throw new Error('Story Arc 콜드스타트 재시도 상태를 저장하지 못했습니다.');
+    const verified = await readArcColdStartJobStore();
+    if (value) {
+      const saved = verified[scopeKey];
+      if (!saved || text(saved.boundaryHash || '') !== text(value.boundaryHash || '')
+        || Number(saved.boundaryEnd || 0) !== Number(value.boundaryEnd || 0)) {
+        throw new Error('Story Arc 콜드스타트 재시도 상태 readback 검증에 실패했습니다.');
+      }
+    } else if (verified[scopeKey]) {
+      throw new Error('완료된 Story Arc 콜드스타트 재시도 상태를 제거하지 못했습니다.');
+    }
+    return next;
+  };
+
+  const clearArcColdStartJobForScope = async scopeKey => {
+    const jobs = await readArcColdStartJobStore();
+    if (!jobs[scopeKey]) return true;
+    delete jobs[scopeKey];
+    return await writeArcColdStartJobStore(jobs);
+  };
+
+  const saveArcColdStartActiveArc = async (scopeKey, arc, turns, options = {}) => {
+    const store = await readStoryArcStore();
+    const rawCurrent = store[scopeKey];
+    const current = rawCurrent ? normalizeStoryArcPackage(rawCurrent, rawCurrent) : null;
+    const currentThrough = Math.max(0, Number(current?.basis?.throughTurn || 0));
+    const nextThrough = Math.max(0, Number(arc?.basis?.throughTurn || 0));
+    const replace = options.force === true
+      || !arcColdStartArcBranchValid(current, turns, currentThrough)
+      || nextThrough >= currentThrough;
+    if (replace) {
+      store[scopeKey] = arc;
+      if (!await writeStoryArcStore(store)) throw new Error(`T${nextThrough} Story Arc 기준을 저장하지 못했습니다.`);
+      const verifiedStore = await readStoryArcStore();
+      const verifiedRaw = verifiedStore[scopeKey];
+      const verified = verifiedRaw ? normalizeStoryArcPackage(verifiedRaw, verifiedRaw) : null;
+      if (!arcColdStartArcBranchValid(verified, turns, nextThrough)) throw new Error(`T${nextThrough} Story Arc 기준 readback 검증에 실패했습니다.`);
+    }
+    return replace ? arc : current;
+  };
+
+  const executeArcColdStartContext = async context => {
+    const { snapshot, settings, turns, scopeKey, currentArc, archiveEntries = [], plan } = context || {};
+    if (!plan?.available) throw new Error('완료된 정규 5턴 구간이 없습니다. 최소 5개의 완료 U+A가 필요합니다.');
+    const boundaryTurns = turns.slice(0, plan.boundaryEnd);
+    const boundaryHash = arcCanonicalChatHash(boundaryTurns);
+    let { jobs, job } = await compatibleArcColdStartJob(scopeKey, plan.boundaryEnd, boundaryHash, boundaryTurns);
+    let previousArc = job?.resumeArc || null;
+    if (!previousArc && arcColdStartArcBranchValid(currentArc, boundaryTurns, Number(currentArc?.basis?.throughTurn || 0))) {
+      const currentThrough = Math.max(0, Number(currentArc?.basis?.throughTurn || 0));
+      const firstWorkEnd = plan.actions.find(item => item.action !== 'skip')?.end || plan.boundaryEnd;
+      if (currentThrough <= firstWorkEnd) previousArc = currentArc;
+    }
+    const completedWindowEnds = new Set((Array.isArray(job?.completedWindowEnds) ? job.completedWindowEnds : []).map(Number));
+    const results = [];
+    Runtime.arcDirector = {
+      ...Runtime.arcDirector,
+      coldStartRunning: true,
+      coldStartMode: plan.mode,
+      coldStartCompleted: 0,
+      coldStartTotal: plan.actions.filter(item => item.action !== 'skip').length,
+      coldStartCurrentWindow: '',
+      lastError: ''
+    };
+    for (const item of plan.actions) {
+      if (item.action === 'skip') {
+        const currentThrough = Math.max(0, Number(previousArc?.basis?.throughTurn || 0));
+        if (currentThrough < item.end) previousArc = null;
+        results.push({ ...item, ok: true, skipped: true });
+        continue;
+      }
+      Runtime.arcDirector = { ...Runtime.arcDirector, coldStartCurrentWindow: item.label };
+      queueGuiRender(0);
+      const partialSnapshot = arcColdStartSnapshotThrough(snapshot, boundaryTurns, item.end);
+      const partialTurns = boundaryTurns.slice(0, item.end);
+      let arc = null;
+      let outcome = null;
+      try {
+        if (item.action === 'archive_only' && arcColdStartArcBranchValid(currentArc, partialTurns, item.end)) {
+          arc = currentArc;
+          outcome = { ok: true, reason: 'arc_cold_start_archive_from_active_arc', arc, updated: false };
+        } else {
+          const previousThrough = Math.max(0, Number(previousArc?.basis?.throughTurn || 0));
+          const previousUsable = previousArc && previousThrough < item.end
+            && arcColdStartArcBranchValid(previousArc, partialTurns, previousThrough);
+          const previousArchive = !previousUsable
+            ? (Array.isArray(archiveEntries) ? archiveEntries : [])
+              .filter(entry => entry?.inherited !== true
+                && entry?.archiveReferenceOnly !== true
+                && Number(entry?.turnEnd || 0) < item.end
+                && narrativeArchiveEntryBranchValid(entry, partialTurns, scopeKey))
+              .sort((left, right) => Number(right?.turnEnd || 0) - Number(left?.turnEnd || 0))[0]
+            : null;
+          if (plan.mode === 'missing_history' && previousUsable && previousThrough === item.end - ARC_DIRECTOR_UPDATE_INTERVAL) {
+            outcome = await runArcDirectorFiveTurnUpdate(
+              previousArc,
+              partialSnapshot,
+              {
+                ...settings,
+                arcHorizonTurns: ARC_DIRECTOR_UPDATE_INTERVAL,
+                skipNarrativeArchiveRecall: true
+              },
+              `manual_cold_start_window_${item.start}_${item.end}`
+            );
+          } else {
+            outcome = await runArcDirectorBoundedRebase(
+              partialSnapshot,
+              {
+                ...settings,
+                arcHorizonTurns: ARC_DIRECTOR_UPDATE_INTERVAL,
+                skipNarrativeArchiveRecall: true,
+                coldStartPreviousArchiveDocument: text(previousArchive?.document || '')
+              },
+              previousUsable ? previousArc : (plan.mode === 'recent_window' ? currentArc : null),
+              plan.mode === 'recent_window'
+                ? `manual_latest_completed_window_basis_${item.start}_${item.end}`
+                : `manual_cold_start_window_${item.start}_${item.end}`
+            );
+          }
+          if (!outcome?.ok || !outcome?.arc) throw new Error(outcome?.reason || `${item.label} Arc Director 분석 실패`);
+          arc = outcome.arc;
+        }
+        const archive = await upsertNarrativeArchiveBoundary(
+          arc,
+          partialTurns,
+          previousArc,
+          plan.mode === 'recent_window' ? 'manual_latest_completed_window_basis' : 'manual_story_arc_cold_start'
+        );
+        if (!archive?.ok) throw new Error(archive?.reason || `${item.label} Narrative Archive 저장 실패`);
+        const archiveReadbackStore = await readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [scopeKey] });
+        const archiveReadbackScope = normalizeNarrativeArchiveScope(archiveReadbackStore[scopeKey], scopeKey);
+        const archiveReadback = archiveReadbackScope.entries.find(entry => entry.id === archive.entry?.id
+          && text(entry.documentHash || '') === text(archive.entry?.documentHash || ''));
+        if (!archiveReadback) throw new Error(`${item.label} Narrative Archive readback 검증에 실패했습니다.`);
+        const activeArc = await saveArcColdStartActiveArc(scopeKey, arc, boundaryTurns, {
+          force: plan.mode === 'recent_window' || item.end === plan.boundaryEnd
+        });
+        completedWindowEnds.add(item.end);
+        previousArc = arc;
+        jobs = await persistArcColdStartJob(jobs, scopeKey, {
+          schema: ARC_COLD_START_JOB_SCHEMA,
+          scopeKey,
+          mode: plan.mode,
+          boundaryEnd: plan.boundaryEnd,
+          boundaryHash,
+          completedWindowEnds: Array.from(completedWindowEnds).sort((a, b) => a - b),
+          failedWindowEnd: 0,
+          resumeArc: arc,
+          activeArcThrough: Number(activeArc?.basis?.throughTurn || 0),
+          updatedAt: Date.now()
+        });
+        Runtime.arcDirector = {
+          ...Runtime.arcDirector,
+          coldStartCompleted: Number(Runtime.arcDirector?.coldStartCompleted || 0) + 1
+        };
+        queueGuiRender(0);
+        results.push({ ...item, ok: true, skipped: false, archiveReason: archive.reason, throughTurn: Number(arc?.basis?.throughTurn || 0) });
+      } catch (error) {
+        const reason = compact(error?.message || error, 700);
+        jobs = await persistArcColdStartJob(jobs, scopeKey, {
+          schema: ARC_COLD_START_JOB_SCHEMA,
+          scopeKey,
+          mode: plan.mode,
+          boundaryEnd: plan.boundaryEnd,
+          boundaryHash,
+          completedWindowEnds: Array.from(completedWindowEnds).sort((a, b) => a - b),
+          failedWindowEnd: item.end,
+          resumeArc: previousArc,
+          updatedAt: Date.now()
+        });
+        Runtime.arcDirector = { ...Runtime.arcDirector, coldStartRunning: false, coldStartCurrentWindow: item.label, lastError: reason };
+        return { ok: false, reason, failedWindow: item, plan, results };
+      }
+    }
+    await persistArcColdStartJob(jobs, scopeKey, null);
+    Runtime.arcDirector = {
+      ...Runtime.arcDirector,
+      coldStartRunning: false,
+      coldStartCurrentWindow: '',
+      lastReason: plan.mode === 'recent_window' ? 'latest_completed_window_basis_created' : 'missing_history_cold_start_completed',
+      lastError: ''
+    };
+    return { ok: true, reason: Runtime.arcDirector.lastReason, plan, results };
   };
 
   const storyArcEffectiveBeatSlots = (arc, completedTurnCount = null) => {
@@ -30615,6 +30972,120 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
     };
   };
 
+  const showArcColdStartConfirmation = async plan => {
+    const question = [
+      `${plan.operationLabel}을 실행하시겠습니까?`,
+      `분석 구간: ${plan.actions.filter(item => item.action !== 'skip').map(item => item.label).join(', ') || '없음'}`,
+      `예상 Arc Director LLM 호출: ${plan.llmCalls}회`,
+      `예상 문서 임베딩 호출: ${plan.embeddingCalls}회`
+    ].join('\n');
+    if (typeof document === 'undefined') {
+      try { return typeof globalThis?.confirm === 'function' ? globalThis.confirm(question) === true : false; }
+      catch (_) { return false; }
+    }
+    if (Gui.confirmationVisible) throw new Error('이미 다른 확인창이 열려 있습니다.');
+    const settingsWasVisible = Gui.visible === true;
+    try {
+      const guiApi = getLiveApi(['showContainer']);
+      if (typeof guiApi?.showContainer === 'function') await guiApi.showContainer('fullscreen');
+    } catch (_) {}
+    if (!Gui.root || !document.getElementById('sga-rp-gui-root')) await initSettingsGui();
+    Gui.visible = true;
+    Gui.confirmationVisible = true;
+    const clearRoot = () => {
+      if (typeof Gui.root?.replaceChildren === 'function') Gui.root.replaceChildren();
+      else while (Gui.root?.firstChild) Gui.root.removeChild(Gui.root.firstChild);
+    };
+    clearRoot();
+    return await new Promise(resolve => {
+      let settled = false;
+      const restore = async () => {
+        Gui.confirmationVisible = false;
+        Gui.app = null;
+        clearRoot();
+        if (settingsWasVisible) {
+          Gui.visible = true;
+          await renderSettingsGui();
+          forceTransparentGuiSurface();
+        } else {
+          Gui.visible = false;
+          try {
+            const guiApi = getLiveApi(['hideContainer']);
+            if (typeof guiApi?.hideContainer === 'function') await guiApi.hideContainer();
+          } catch (_) {}
+        }
+      };
+      const finish = async accepted => {
+        if (settled) return;
+        settled = true;
+        document.removeEventListener('keydown', keyHandler);
+        try { await restore(); }
+        catch (error) { warn('arc_cold_start_confirmation_restore_failed', error); }
+        resolve(accepted === true);
+      };
+      const keyHandler = event => {
+        if (event?.key === 'Escape') { event.preventDefault?.(); void finish(false); }
+      };
+      document.addEventListener('keydown', keyHandler);
+      const workLabels = plan.actions.filter(item => item.action !== 'skip').map(item => item.label);
+      const app = guiEl('div', { class: 'sga-input-compact-app', dataset: { arcColdStartDialog: '' } }, [
+        guiEl('section', { class: 'sga-card wide', style: { width: '100%', margin: '0', padding: '18px', display: 'grid', gap: '14px' } }, [
+          guiEl('div', {}, [
+            guiEl('h2', { text: plan.operationLabel }),
+            guiEl('p', { class: 'sga-note', text: plan.mode === 'recent_window'
+              ? `최근 완성된 정규 구간 T${plan.boundaryEnd - ARC_DIRECTOR_UPDATE_INTERVAL + 1}-${plan.boundaryEnd}을 Story Arc 기준으로 다시 분석합니다. 현재 완료 턴이 T${plan.completedTurnCount}이어도 불완전한 나머지 턴은 이 작업에 섞지 않습니다.`
+              : '정본 U+A를 5턴씩 순서대로 처리합니다. 성공한 구간은 즉시 Narrative Archive에 저장되며, 실패하면 이미 저장된 구간은 다음 실행에서 다시 호출하지 않습니다.' })
+          ]),
+          guiEl('div', { class: 'sga-code', text: [
+            `대상 구간: ${workLabels.join(', ') || '없음'}`,
+            `최종 Story Arc 기준: T${plan.boundaryEnd}`,
+            `다음 비트 범위: T${plan.nextWindowStart}-${plan.nextWindowEnd}`,
+            `예상 Arc Director LLM 호출: ${plan.llmCalls}회`,
+            `예상 문서 임베딩 호출: ${plan.embeddingCalls}회`,
+            `Narrative Archive 저장: ${plan.archiveWrites}구간`
+          ].join('\n') }),
+          guiEl('div', { class: 'sga-callout', text: plan.embeddingCalls
+            ? '임베딩 호출 수는 현재 연결 설정이 유효하다는 전제의 예상치입니다. 분석 저장은 임베딩 실패와 분리되어 보존됩니다.'
+            : '현재 설정에서는 문서 임베딩 호출을 예상하지 않습니다. Narrative Archive 텍스트 기록은 그대로 저장됩니다.' }),
+          guiEl('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' } }, [
+            guiEl('button', { class: 'sga-btn ghost', text: '취소', dataset: { arcColdStartCancel: '' }, onClick: () => { void finish(false); } }),
+            guiEl('button', { class: 'sga-btn primary', text: '분석 시작', dataset: { arcColdStartConfirm: '' }, onClick: () => { void finish(true); } })
+          ])
+        ])
+      ]);
+      Gui.app = app;
+      Gui.root.appendChild(app);
+      forceTransparentGuiSurface();
+    });
+  };
+
+  const runArcColdStartFromGui = async (mode = 'missing_history') => {
+    const settings = await settingsForArcDirectorGui();
+    if (!settings.arcDirectorEnabled) throw new Error('먼저 Story Arc 자동 관리를 활성화하세요.');
+    if (Runtime.arcDirector?.coldStartRunning === true) throw new Error('Story Arc 콜드스타트가 이미 진행 중입니다.');
+    const snapshot = await loadArcDirectorCanonicalSnapshot(settings, []);
+    if (!snapshot) throw new Error('현재 캐릭터와 채팅의 정본 U+A를 읽지 못했습니다.');
+    const context = await prepareArcColdStartContext(snapshot, settings, mode);
+    const plan = context.plan;
+    if (!plan.available) throw new Error('완료된 정규 5턴 구간이 없습니다. 최소 5개의 완료 U+A가 필요합니다.');
+    if (plan.mode === 'missing_history' && plan.llmCalls === 0 && plan.archiveWrites === 0) {
+      return { ok: true, reason: 'arc_cold_start_already_complete', plan, results: [] };
+    }
+    if (!await showArcColdStartConfirmation(plan)) return { ok: false, cancelled: true, reason: 'arc_cold_start_cancelled', plan, results: [] };
+    Runtime.arcDirector = { ...Runtime.arcDirector, coldStartRunning: true, coldStartMode: plan.mode, lastError: '' };
+    queueGuiRender(0);
+    const result = await executeArcColdStartContext(context);
+    Gui.narrativeArchiveEntries = [];
+    Gui.narrativeArchiveViewerLoaded = false;
+    await hydrateArcDirectorRuntimeFromStore();
+    try { await hydrateNarrativeArchiveViewerGuiState(); }
+    catch (error) { warn('arc_cold_start_archive_viewer_refresh_failed', error); }
+    if (!result.ok) {
+      throw new Error(`${result.failedWindow?.label || '5턴 구간'} 분석에 실패했습니다: ${result.reason}. 앞서 저장된 성공 구간은 다음 실행에서 재사용됩니다.`);
+    }
+    return result;
+  };
+
   const hydrateArcDirectorRuntimeFromStore = async () => {
     try { await ensureNativeChatCopyAdopted(); }
     catch (error) { warn('native_chat_copy_arc_hydration_probe_failed', error); }
@@ -30805,6 +31276,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
     const existed = !!store[scopeKey];
     delete store[scopeKey];
     await writeStoryArcStore(store);
+    await clearArcColdStartJobForScope(scopeKey);
     Runtime.arcDirector = {
       ...Runtime.arcDirector,
       enabled: settings.arcDirectorEnabled === true,
@@ -31177,6 +31649,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       STORAGE_PROMPT_OVERRIDES_KEY,
       STORAGE_WRITER_DESIGNS_KEY,
       STORAGE_STORY_ARCS_KEY,
+      STORAGE_ARC_COLD_START_JOBS_KEY,
       STORAGE_NARRATIVE_ARCHIVES_KEY,
       STORAGE_NARRATIVE_EMBEDDING_SETTINGS_KEY,
       STORAGE_NATIVE_CHAT_COPY_REGISTRY_KEY,
@@ -36626,19 +37099,26 @@ const buildNarrativeEmbeddingPage = () => {
   const providers = NarrativeEmbeddingProviderRegistry.list();
   const status = Gui.narrativeArchiveStatus || Runtime.narrativeArchive || {};
   const allowedDims = NarrativeEmbeddingProviderRegistry.allowedDimensionsFor(normalized.provider, normalized.model);
-  const setProviderDefaults = provider => {
+  const setProviderDefaults = (draftRef, providerValue) => {
+    const provider = NarrativeEmbeddingProviderRegistry.normalizeProvider(providerValue);
     const nextCaps = NarrativeEmbeddingProviderRegistry.getCapabilities(provider);
-    draft.provider = provider;
-    draft.url = nextCaps.defaultUrl || '';
-    draft.model = nextCaps.models?.[0] || '';
-    draft.dimensions = 'auto';
-    draft.batchSize = nextCaps.supportsBatch ? 8 : 1;
-    draft.queryTask = '';
-    draft.documentTask = '';
-    draft.queryPrefix = '';
-    draft.documentPrefix = '';
+    draftRef.provider = provider;
+    draftRef.url = nextCaps.defaultUrl || '';
+    draftRef.model = nextCaps.models?.[0] || '';
+    draftRef.dimensions = 'auto';
+    draftRef.batchSize = nextCaps.supportsBatch ? 8 : 1;
+    draftRef.queryTask = '';
+    draftRef.documentTask = '';
+    draftRef.queryPrefix = '';
+    draftRef.documentPrefix = '';
     Gui.narrativeEmbeddingOllamaModels = [];
   };
+  const providerSelect = embeddingDraftSelect(normalized.provider, 'provider', providers.map(item => [item.provider, item.label]), setProviderDefaults);
+  providerSelect.dataset.narrativeEmbeddingProvider = 'true';
+  const modelInput = embeddingDraftInput(normalized.model, 'model', { placeholder: caps.models?.[0] || 'embedding model id' });
+  modelInput.dataset.narrativeEmbeddingModel = 'true';
+  const urlInput = embeddingDraftInput(normalized.url, 'url', { placeholder: caps.defaultUrl || 'https://...' });
+  urlInput.dataset.narrativeEmbeddingUrl = 'true';
   const configProfileId = narrativeEmbeddingConfigFingerprint(normalized);
   const panelChildren = [
     guiEl('div', { class: 'sga-redesign-notice', style: { borderColor: 'rgba(139,92,255,.46)' } }, [
@@ -36666,11 +37146,11 @@ const buildNarrativeEmbeddingPage = () => {
         guiEl('span', { text: 'Narrative Archive 임베딩 검색 사용' })
       ]),
       guiEl('div', { class: 'sga-row2' }, [
-        fieldNode('프로바이더', embeddingDraftSelect(normalized.provider, 'provider', providers.map(item => [item.provider, item.label]), setProviderDefaults)),
-        fieldNode('모델', embeddingDraftInput(normalized.model, 'model', { placeholder: caps.models?.[0] || 'embedding model id' }))
+        fieldNode('프로바이더', providerSelect),
+        fieldNode('모델', modelInput)
       ]),
       guiEl('div', { class: 'sga-row2' }, [
-        fieldNode('Endpoint / Base URL', embeddingDraftInput(normalized.url, 'url', { placeholder: caps.defaultUrl || 'https://...' })),
+        fieldNode('Endpoint / Base URL', urlInput),
         fieldNode('API Key / Token', embeddingDraftInput(normalized.key, 'key', { type: 'password', autocomplete: 'new-password', placeholder: caps.requiresKey ? 'API key' : '선택 사항' }), '비밀값은 가능한 경우 기기 로컬 저장소에만 보관합니다.')
       ]),
       guiEl('div', { class: 'sga-row2' }, [
@@ -36725,7 +37205,7 @@ const buildNarrativeEmbeddingPage = () => {
         ])
       ]) : null,
       guiEl('div', { class: 'sga-actions', style: { marginTop: '12px' } }, [
-        guiEl('button', { class: 'sga-btn', text: '프로바이더 기본값', onClick: () => { setProviderDefaults(normalized.provider); queueGuiRender(0); } }),
+        guiEl('button', { class: 'sga-btn', text: '프로바이더 기본값', onClick: () => { setProviderDefaults(draft, normalized.provider); queueGuiRender(0); } }),
         guiEl('button', { class: 'sga-btn', text: '연결 테스트', onClick: async () => {
           try {
             guiSetStatus('Narrative Archive 임베딩 연결을 테스트하고 있습니다…', false, true);
@@ -36863,6 +37343,9 @@ const hydrateNarrativeArchiveViewerGuiState = async () => {
 const buildNarrativeArchiveViewerPage = () => {
   const entries = Array.isArray(Gui.narrativeArchiveEntries) ? Gui.narrativeArchiveEntries : [];
   const status = Gui.narrativeArchiveStatus || Runtime.narrativeArchive || {};
+  const completed = Math.max(0, Number(Runtime.arcDirector?.completedTurnCount || 0));
+  const arcColdStartBusy = Runtime.arcDirector?.coldStartRunning === true;
+  const arcEnabled = Gui.state?.runtime?.arcDirectorEnabled === true;
   const limit = Math.max(1, Number(Gui.narrativeArchiveVisibleLimit || 24));
   const visible = entries.slice(0, limit);
   const entryCards = visible.map(entry => {
@@ -36931,6 +37414,33 @@ const buildNarrativeArchiveViewerPage = () => {
       Gui.narrativeArchiveViewerLoading ? guiEl('div', { class: 'sga-callout', text: '현재 채팅의 Narrative Archive를 불러오는 중입니다…' }) : null,
       Gui.narrativeArchiveViewerError ? guiEl('div', { class: 'sga-callout', text: `Archive를 읽지 못했습니다: ${Gui.narrativeArchiveViewerError}` }) : null
     ].filter(Boolean)),
+    guiEl('div', { class: 'sga-card wide', dataset: { arcColdStartSharedCard: '' } }, [
+      guiEl('div', { class: 'sga-agent-head' }, [
+        guiEl('div', {}, [
+          guiEl('h3', { text: 'Story Arc 연동 · 누락된 과거 5턴 채우기' }),
+          guiEl('div', { class: 'sga-note', text: 'Archive 전용 분석기를 따로 실행하지 않습니다. Story Arc와 같은 콜드스타트 작업이 정본 U+A를 5턴씩 분석하고, 가장 최근 완성 구간을 활성 Story Arc로 유지하면서 각 성공 구간을 Narrative Archive에 즉시 저장합니다.' })
+        ]),
+        guiEl('span', { class: `sga-badge ${arcEnabled ? 'good' : 'off'}`, text: arcEnabled ? `${completed}턴 확인` : 'Story Arc 꺼짐' })
+      ]),
+      guiEl('div', { class: 'sga-actions' }, [
+        guiEl('button', { class: 'sga-btn primary', type: 'button', dataset: { arcMissingHistoryColdStart: '' }, disabled: !arcEnabled || completed < ARC_DIRECTOR_UPDATE_INTERVAL || arcColdStartBusy, text: arcColdStartBusy ? '콜드스타트 중…' : '누락된 과거 5턴 콜드스타트', onClick: async () => {
+          try {
+            const result = await runArcColdStartFromGui('missing_history');
+            await renderSettingsGui();
+            if (result.cancelled) return guiSetStatus('과거 5턴 콜드스타트를 취소했습니다.');
+            if (result.reason === 'arc_cold_start_already_complete') return guiSetStatus('누락된 정규 5턴 구간이 없습니다. Story Arc와 Narrative Archive가 이미 연결되어 있습니다.', false, true);
+            guiSetStatus(`과거 5턴 콜드스타트 완료 · Arc Director ${result.plan.llmCalls}회 · Archive ${result.plan.archiveWrites}구간`, false, true);
+          } catch (error) {
+            Runtime.arcDirector = { ...Runtime.arcDirector, coldStartRunning: false, lastError: compact(error?.message || error, 700) };
+            await renderSettingsGui();
+            guiSetStatus(`과거 5턴 콜드스타트 실패: ${error?.message || error}`, true, true);
+          }
+        } })
+      ]),
+      guiEl('div', { class: 'sga-callout', text: completed >= ARC_DIRECTOR_UPDATE_INTERVAL
+        ? `현재 T${completed}. 마지막 완성 경계는 T${arcColdStartBoundaryEnd(completed)}이며 그 이후 불완전 구간은 콜드스타트 분석에 포함하지 않습니다.`
+        : '최소 5개의 완료 U+A가 있어야 실행할 수 있습니다.' })
+    ]),
     ...entryCards,
     !Gui.narrativeArchiveViewerLoading && Gui.narrativeArchiveViewerLoaded && !entries.length ? guiEl('div', { class: 'sga-card wide' }, [guiEl('div', { class: 'sga-note', text: '현재 채팅에는 아직 Narrative Archive 기록이 없습니다. Arc Director가 5턴 경계를 처리하면 기록이 생성됩니다.' })]) : null,
     entries.length > visible.length ? guiEl('div', { class: 'sga-actions' }, [guiEl('button', { class: 'sga-btn', text: `더 보기 · ${Math.min(entries.length, limit + 24)}/${entries.length}`, onClick: () => { Gui.narrativeArchiveVisibleLimit = limit + 24; queueGuiRender(0); } })]) : null
@@ -37030,6 +37540,7 @@ const buildNarrativeArchiveViewerPage = () => {
         guiEl('span', { text: '다음 갱신 경계' }), guiEl('strong', { text: `T${nextBoundary}` })
       ]),
       stale ? guiEl('div', { class: 'sga-callout', text: `리롤·롤백 등으로 기존 DB의 정본 기반이 바뀌었습니다. 5턴 주기 규칙을 지키기 위해 지금은 DB 참조를 중지하며, 다음 5턴 경계(T${nextBoundary})에서 자동 재기반화합니다.` }) : null,
+      control.coldStartRunning === true ? guiEl('div', { class: 'sga-callout', dataset: { arcColdStartProgress: '' }, text: `5턴 분석 진행 중 · ${control.coldStartCurrentWindow || '구간 준비'} · 저장 ${Number(control.coldStartCompleted || 0)}/${Number(control.coldStartTotal || 0)}` }) : null,
       guiEl('div', { class: 'sga-actions', style: { marginTop: '10px' } }, [
         guiEl('button', { class: 'sga-btn primary', type: 'button', disabled: control.busy === true || runtime.arcDirectorEnabled !== true || !atBoundary, text: control.busy ? 'Story Arc 갱신 중…' : '현재 5턴 경계에서 DB 재생성', onClick: async () => {
           try {
@@ -37040,6 +37551,31 @@ const buildNarrativeArchiveViewerPage = () => {
             Runtime.arcDirector = { ...Runtime.arcDirector, busy: false, lastError: compact(error?.message || error, 700) };
             await renderSettingsGui();
             guiSetStatus(`스토리 아크 생성 실패: ${error?.message || error}`, true, true);
+          }
+        } }),
+        guiEl('button', { class: 'sga-btn', type: 'button', dataset: { arcRecentWindowBasis: '' }, disabled: control.busy === true || control.coldStartRunning === true || runtime.arcDirectorEnabled !== true || completed < ARC_DIRECTOR_UPDATE_INTERVAL, text: control.coldStartRunning === true ? '5턴 분석 중…' : '최근 완료 5턴으로 기준 생성', onClick: async () => {
+          try {
+            const result = await runArcColdStartFromGui('recent_window');
+            await renderSettingsGui();
+            if (result.cancelled) return guiSetStatus('최근 완료 5턴 기준 생성을 취소했습니다.');
+            guiSetStatus(`T${result.plan.boundaryEnd - ARC_DIRECTOR_UPDATE_INTERVAL + 1}-${result.plan.boundaryEnd}을 기준으로 Story Arc와 Narrative Archive를 갱신했습니다.`, false, true);
+          } catch (error) {
+            Runtime.arcDirector = { ...Runtime.arcDirector, coldStartRunning: false, lastError: compact(error?.message || error, 700) };
+            await renderSettingsGui();
+            guiSetStatus(`최근 완료 5턴 기준 생성 실패: ${error?.message || error}`, true, true);
+          }
+        } }),
+        guiEl('button', { class: 'sga-btn', type: 'button', dataset: { arcMissingHistoryColdStart: '' }, disabled: control.busy === true || control.coldStartRunning === true || runtime.arcDirectorEnabled !== true || completed < ARC_DIRECTOR_UPDATE_INTERVAL, text: control.coldStartRunning === true ? '콜드스타트 중…' : '누락된 과거 5턴 콜드스타트', onClick: async () => {
+          try {
+            const result = await runArcColdStartFromGui('missing_history');
+            await renderSettingsGui();
+            if (result.cancelled) return guiSetStatus('과거 5턴 콜드스타트를 취소했습니다.');
+            if (result.reason === 'arc_cold_start_already_complete') return guiSetStatus('누락된 정규 5턴 구간이 없습니다. Story Arc와 Narrative Archive가 이미 연결되어 있습니다.', false, true);
+            guiSetStatus(`과거 5턴 콜드스타트 완료 · Arc Director ${result.plan.llmCalls}회 · Archive ${result.plan.archiveWrites}구간`, false, true);
+          } catch (error) {
+            Runtime.arcDirector = { ...Runtime.arcDirector, coldStartRunning: false, lastError: compact(error?.message || error, 700) };
+            await renderSettingsGui();
+            guiSetStatus(`과거 5턴 콜드스타트 실패: ${error?.message || error}`, true, true);
           }
         } }),
         guiEl('button', { class: 'sga-btn', type: 'button', disabled: control.busy === true, text: '저장된 DB 다시 불러오기', onClick: async () => {
@@ -37060,7 +37596,7 @@ const buildNarrativeArchiveViewerPage = () => {
           guiEl('div', { class: 'sga-note', text: arc ? `정본 U+A T${arc.basis?.throughTurn || 0}까지 분석 · 다음 계획 T${arc.basis?.nextWindowStart || '?'}-T${arc.basis?.nextWindowEnd || '?'} · revision ${arc.revision}` : stale ? '저장 DB는 있지만 정본 변경 때문에 다음 5턴 경계까지 참조를 중지합니다.' : '아직 사용 가능한 Story Arc DB가 없습니다.' })
         ]),
         guiEl('div', { class: 'sga-actions' }, [
-          control.busy ? guiEl('span', { class: 'sga-badge warn', text: '관리 작업 중' }) : null,
+          control.busy || control.coldStartRunning ? guiEl('span', { class: 'sga-badge warn', text: control.coldStartRunning ? '콜드스타트 중' : '관리 작업 중' }) : null,
           stale ? guiEl('span', { class: 'sga-badge warn', text: 'STALE' }) : guiEl('span', { class: `sga-badge ${arc ? 'good' : 'off'}`, text: arc ? '사용 가능' : '대기' })
         ])
       ]),
@@ -38716,6 +39252,13 @@ const buildNarrativeArchiveViewerPage = () => {
     },
     async debugLoadNarrativeArchiveEntryVector(entry = {}) { return await loadNarrativeArchiveEntryVector(entry); },
     debugFoldNarrativeVectorSketch(vector = []) { return foldNarrativeVectorSketch(vector); },
+    async debugReloadNarrativeEmbeddingGuiState() {
+      const settings = await hydrateNarrativeEmbeddingGuiState();
+      if (Gui.visible && Gui.pageId === 'embedding') await renderSettingsGui();
+      const safe = narrativeEmbeddingSafeClone(settings) || {};
+      safe.key = safe.key ? '[configured]' : '';
+      return safe;
+    },
     async debugNativeChatCopy(options = {}) {
       const result = await ensureNativeChatCopyAdopted({ force: options.force !== false });
       return JSON.parse(JSON.stringify({
@@ -39142,6 +39685,41 @@ const buildNarrativeArchiveViewerPage = () => {
     debugArcCanonicalCompletedTurns(messages = []) {
       return JSON.parse(JSON.stringify(arcCanonicalCompletedTurns({ actualChatContext: { messages } })));
     },
+    debugArcCanonicalChatHash(messages = []) {
+      const turns = arcCanonicalCompletedTurns({ actualChatContext: { messages } });
+      return arcCanonicalChatHash(turns);
+    },
+    debugArcColdStartPlan(messages = [], entries = [], value = null, mode = 'missing_history', embeddingReady = false, scopeKey = 'debug-arc-cold-start') {
+      const turns = arcCanonicalCompletedTurns({ actualChatContext: { messages } });
+      const arc = value && typeof value === 'object' ? normalizeStoryArcPackage(value, value) : null;
+      return JSON.parse(JSON.stringify(buildArcColdStartPlanFromRecords({ turns, entries, currentArc: arc, scopeKey, mode, embeddingReady: embeddingReady === true })));
+    },
+    async debugArcColdStartConfirmation(plan = {}) {
+      return await showArcColdStartConfirmation({
+        operationLabel: text(plan.operationLabel || '누락된 과거 5턴 콜드스타트'),
+        mode: plan.mode === 'recent_window' ? 'recent_window' : 'missing_history',
+        completedTurnCount: Math.max(0, Number(plan.completedTurnCount || 28)),
+        boundaryEnd: Math.max(ARC_DIRECTOR_UPDATE_INTERVAL, Number(plan.boundaryEnd || 25)),
+        nextWindowStart: Math.max(ARC_DIRECTOR_UPDATE_INTERVAL + 1, Number(plan.nextWindowStart || 26)),
+        nextWindowEnd: Math.max(ARC_DIRECTOR_UPDATE_INTERVAL * 2, Number(plan.nextWindowEnd || 30)),
+        llmCalls: Math.max(0, Number(plan.llmCalls || 0)),
+        embeddingCalls: Math.max(0, Number(plan.embeddingCalls || 0)),
+        archiveWrites: Math.max(0, Number(plan.archiveWrites || 0)),
+        actions: Array.isArray(plan.actions) ? plan.actions.map(item => ({ ...item })) : []
+      });
+    },
+    async debugRunArcColdStart(messages = [], mode = 'missing_history', scopeId = 'default') {
+      const settings = await loadSettings();
+      if (settings.arcDirectorEnabled !== true) throw new Error('Arc Director is disabled.');
+      const snapshot = {
+        character: { id: 'gradia-debug-arc-cold-start-character', name: 'GRADIA Debug Character' },
+        characterInfo: { character: { id: 'gradia-debug-arc-cold-start-character', name: 'GRADIA Debug Character' } },
+        chatInfo: { chat: { id: `gradia-debug-arc-cold-start-${text(scopeId || 'default')}`, name: 'GRADIA Debug Cold Start' }, identity: text(scopeId || 'default') },
+        actualChatContext: { available: true, messages: Array.isArray(messages) ? messages.map(item => ({ ...item })) : [] }
+      };
+      const context = await prepareArcColdStartContext(snapshot, settings, mode);
+      return JSON.parse(JSON.stringify(await executeArcColdStartContext(context)));
+    },
     debugNormalizeStoryArc(value = {}, meta = {}) {
       return JSON.parse(JSON.stringify(normalizeStoryArcPackage(value, meta)));
     },
@@ -39206,6 +39784,7 @@ const buildNarrativeArchiveViewerPage = () => {
       const store = await readStoryArcStore();
       delete store[scopeKey];
       const ok = await writeStoryArcStore(store);
+      await clearArcColdStartJobForScope(scopeKey);
       if (Runtime.arcDirector?.scopeKey === scopeKey) Runtime.arcDirector = {
         ...Runtime.arcDirector,
         arc: null,
