@@ -1,7 +1,7 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.62
+//@display-name GRADIA v0.25.64
 //@api 3.0
-//@version 0.25.62
+//@version 0.25.64
 
 /* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
 //@allowed-ipc flashback_hayaku_bridge
@@ -831,6 +831,8 @@
  * v0.25.59 fixes the Narrative Archive embedding provider selector. The shared select callback passes both the mutable draft and selected value; provider defaults now consume that exact contract, retain every selected provider through rerender, and durably reload Voyage Context and its matching endpoint/model instead of collapsing unknown object input to OpenAI-compatible API.
  * v0.25.61 parses RisuAI's leading @@ and fallback @@@ lore decorators before module/character lore activation. Decorator-only control entries are excluded instead of entering reranking or canonical reference packets, while entries with a real body retain their body and parsed activation metadata.
  * v0.25.62 replaces the module lore card grid with a two-pane browser: entry-level lore controls on the left and active modules on the right. Selecting a module enables every usable entry by default; per-entry exclusions, select-all, and clear-all are durably stored without changing legacy module selections.
+ * v0.25.63 repairs condition-gated module lore delivery without assuming access to RisuAI's private global toggle store. Host-formatted request evidence recovers the exact non-empty CBS branch, independent activation drops unresolved or false empty bodies before reranking, and lore diagnostics distinguish source, rendered, and retrieved character counts.
+ * v0.25.64 matches RisuAI's moduleIntergration contract by splitting comma-delimited module references before module-lore filtering, while retaining legacy array and object forms.
  * v0.25.60 adds explicit Story Arc cold-start maintenance shared by the Story Arc and Narrative Archive pages. “최근 완료 5턴으로 기준 생성” analyzes the latest complete canonical five-turn window even off-boundary, while the full cold start processes only missing canonical windows in chronological order, saves every successful window immediately to Narrative Archive, keeps the newest result as the active Story Arc, resumes after failure without repeating stored windows, and confirms the estimated Arc Director/document-embedding calls before execution.
  * v0.25.51 fixes copy/manual-send clipboard delivery in iframe/WebView runtimes. The copy action now runs inside the originating button click before any modal restore/hide await can consume transient user activation; it tries synchronous selection/execCommand first, then navigator.clipboard, records the method for diagnostics, and keeps the dialog open with the generated text selected when browser policy blocks automated copying.
  *
@@ -920,7 +922,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.62';
+  const PLUGIN_VERSION = '0.25.64';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -11995,8 +11997,25 @@ function mergeAgentCbsWarnings(...warningLists) {
         }
       } else add(value);
     };
+    const visitModuleIntegration = (value) => {
+      if (typeof value === 'string') {
+        value.split(',').forEach(add);
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach(item => {
+          if (typeof item === 'string') visitModuleIntegration(item);
+          else visit(item);
+        });
+        return;
+      }
+      visit(value);
+    };
     visit(db?.enabledModules);
-    visit(db?.moduleIntergration);
+    // RisuAI stores this legacy field as one comma-delimited string and splits
+    // it before resolving modules. Keep array/object compatibility for older
+    // or externally-authored database snapshots while matching that contract.
+    visitModuleIntegration(db?.moduleIntergration);
     // Character/chat/persona-bound modules are available through documented
     // getCharacter/getChatFromIndex/getDatabase objects and are folded into the
     // same enabled reference set without calling undocumented plugin APIs.
@@ -12490,6 +12509,106 @@ function mergeAgentCbsWarnings(...warningLists) {
     .replace(/\s+/g, ' ')
     .trim();
 
+  const RISU_HOST_LORE_CBS_VARIANT_LIMIT = 32;
+
+  const risuLoreCbsGlobalVarNames = value => {
+    const names = [];
+    const seen = new Set();
+    const pattern = /\{\{getglobalvar::\s*([^{}]+?)\s*\}\}/gi;
+    let match = null;
+    while ((match = pattern.exec(text(value || ''))) !== null) {
+      const name = text(match[1] || '').trim();
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      names.push(name);
+    }
+    return names;
+  };
+
+  const risuLoreCbsMissingGlobalVars = (value, cbsContext = null) => {
+    const globalVars = cbsContext?.globalVars && typeof cbsContext.globalVars === 'object'
+      ? cbsContext.globalVars
+      : {};
+    return risuLoreCbsGlobalVarNames(value).filter(name => !Object.prototype.hasOwnProperty.call(globalVars, name));
+  };
+
+  const risuLoreCbsCandidateValues = (value, variableName) => {
+    const source = text(value || '');
+    const escaped = text(variableName || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const found = [];
+    const add = raw => {
+      const clean = text(raw || '').trim().replace(/^["']|["']$/g, '');
+      if (!clean || clean.length > 64 || found.includes(clean)) return;
+      found.push(clean);
+    };
+    const patterns = [
+      new RegExp(`\\{\\{getglobalvar::\\s*${escaped}\\s*\\}\\}\\s*(?:={1,2}|!=|>=|<=|>|<)\\s*([^\\s}\\r\\n]+)`, 'gi'),
+      new RegExp(`\\{\\{(?:equal|notequal|greater|less|greaterequal|lessequal)::\\s*\\{\\{getglobalvar::\\s*${escaped}\\s*\\}\\}\\s*::\\s*([^{}\\r\\n]+?)\\}\\}`, 'gi')
+    ];
+    for (const pattern of patterns) {
+      let match = null;
+      while ((match = pattern.exec(source)) !== null) add(match[1]);
+    }
+    add('0');
+    add('1');
+    return found.slice(0, 4);
+  };
+
+  const buildRisuHostRenderedLoreVariants = (clean, cbsContext = null, label = 'lore') => {
+    const source = text(clean || '').trim();
+    if (!source) return [];
+    const baseContext = cbsContext || { globalVars: {} };
+    const knownGlobals = baseContext?.globalVars && typeof baseContext.globalVars === 'object'
+      ? baseContext.globalVars
+      : {};
+    const missingGlobals = risuLoreCbsMissingGlobalVars(source, baseContext);
+    const variants = [];
+    const seen = new Set();
+    const addVariant = (rendered, route, assumedGlobalVars = {}) => {
+      const content = text(rendered || '').trim();
+      const normalized = normalizeRisuSelectedLoreText(content);
+      if (!content || !normalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      variants.push({ content, normalized, route, assumedGlobalVars });
+    };
+    if (!missingGlobals.length) {
+      addVariant(renderRagCbsText(source, baseContext, `risu-selected:${label}`), 'resolved', {});
+      return variants;
+    }
+
+    const valuesByName = missingGlobals.map(name => ({
+      name,
+      values: risuLoreCbsCandidateValues(source, name)
+    }));
+    const combinationCount = valuesByName.reduce((total, item) => total * Math.max(1, item.values.length), 1);
+    if (combinationCount > RISU_HOST_LORE_CBS_VARIANT_LIMIT) return [];
+    let attemptedVariants = 0;
+    const visit = (index, assumed) => {
+      if (attemptedVariants >= RISU_HOST_LORE_CBS_VARIANT_LIMIT) return;
+      if (index >= valuesByName.length) {
+        attemptedVariants += 1;
+        const assumedGlobalVars = { ...assumed };
+        const variantContext = {
+          ...baseContext,
+          globalVars: { ...knownGlobals, ...assumedGlobalVars }
+        };
+        addVariant(
+          renderRagCbsText(source, variantContext, `risu-selected:${label}:host-proof`),
+          'host_proven_global_variant',
+          assumedGlobalVars
+        );
+        return;
+      }
+      const current = valuesByName[index];
+      for (const candidateValue of current.values) {
+        visit(index + 1, { ...assumed, [current.name]: candidateValue });
+        if (attemptedVariants >= RISU_HOST_LORE_CBS_VARIANT_LIMIT) break;
+      }
+    };
+    visit(0, {});
+    return variants.sort((left, right) => right.normalized.length - left.normalized.length);
+  };
+
   const reuseRisuSelectedLorebooks = (requestMessages = [], candidates = [], cbsContext = null) => {
     const requestBlocks = (Array.isArray(requestMessages) ? requestMessages : [])
       .map((message, index) => ({
@@ -12515,29 +12634,31 @@ function mergeAgentCbsWarnings(...warningLists) {
       if (!candidate || candidate.mode === 'folder') continue;
       const clean = stripLoreHiddenKeys(stripLoreDecorators(candidate.content)).trim();
       if (!clean) continue;
-      const rendered = renderRagCbsText(clean, cbsContext, `risu-selected:${candidate.label || candidate.id || 'lore'}`).trim();
-      const variants = Array.from(new Set([rendered, clean]
-        .map(normalizeRisuSelectedLoreText)
-        .filter(Boolean)));
+      const variants = buildRisuHostRenderedLoreVariants(clean, cbsContext, candidate.label || candidate.id || 'lore');
       let evidence = null;
+      let selectedVariant = null;
       for (const block of requestBlocks) {
         const matchingVariant = variants.find(variant => (
-          variant.length >= 18
-            ? block.normalized.includes(variant)
-            : block.normalized === variant
+          variant.normalized.length >= 18
+            ? block.normalized.includes(variant.normalized)
+            : block.normalized === variant.normalized
         ));
         if (!matchingVariant) continue;
+        selectedVariant = matchingVariant;
         evidence = {
           route: 'risu_request_selected',
           requestMessageIndex: block.index,
-          requestCharOffset: Math.max(0, block.normalized.indexOf(matchingVariant)),
+          requestCharOffset: Math.max(0, block.normalized.indexOf(matchingVariant.normalized)),
           requestRole: block.role || 'unknown',
-          matchedChars: matchingVariant.length,
-          exactRenderedContent: matchingVariant === normalizeRisuSelectedLoreText(rendered)
+          matchedChars: matchingVariant.normalized.length,
+          exactRenderedContent: true,
+          hostVariantRoute: matchingVariant.route,
+          assumedGlobalVars: Object.keys(matchingVariant.assumedGlobalVars || {})
         };
         break;
       }
-      if (!evidence) continue;
+      if (!evidence || !selectedVariant?.content) continue;
+      const rendered = selectedVariant.content;
       matched.push({
         ...candidate,
         content: rendered,
@@ -12545,7 +12666,16 @@ function mergeAgentCbsWarnings(...warningLists) {
         tokens: estimateTokensFromText(rendered),
         activationRoute: 'risu_request_selected',
         continuityEligible: false,
-        activationEvidence: evidence
+        activationEvidence: evidence,
+        cbsRender: {
+          state: selectedVariant.route === 'resolved' ? 'resolved' : 'host_recovered',
+          sourceChars: clean.length,
+          renderedChars: rendered.length,
+          missingGlobalVars: selectedVariant.route === 'resolved'
+            ? []
+            : Object.keys(selectedVariant.assumedGlobalVars || {}),
+          hostProven: true
+        }
       });
     }
 
@@ -12578,6 +12708,85 @@ function mergeAgentCbsWarnings(...warningLists) {
     };
   };
 
+  const renderIndependentActiveLorebooks = (activeLore = [], requestMessages = [], cbsContext = null) => {
+    const source = Array.isArray(activeLore) ? activeLore : [];
+    const unresolved = source.filter(lore => risuLoreCbsMissingGlobalVars(lore?.content, cbsContext).length > 0);
+    const hostRecovery = unresolved.length && Array.isArray(requestMessages) && requestMessages.length
+      ? reuseRisuSelectedLorebooks(requestMessages, unresolved, cbsContext)
+      : { activeLore: [], requestMessageCount: 0, matchedCandidateCount: 0, selectedCount: 0 };
+    const recoveredByIdentity = new Map((hostRecovery.activeLore || []).map(lore => [loreContinuityIdentity(lore), lore]));
+    const renderedLore = [];
+    const dropped = [];
+
+    for (const lore of source) {
+      const sourceContent = text(lore?.content || '').trim();
+      const missingGlobalVars = risuLoreCbsMissingGlobalVars(sourceContent, cbsContext);
+      if (missingGlobalVars.length) {
+        const recovered = recoveredByIdentity.get(loreContinuityIdentity(lore));
+        const recoveredContent = text(recovered?.content || '').trim();
+        if (!recoveredContent) {
+          dropped.push({
+            id: loreContinuityIdentity(lore),
+            label: lore?.label || '',
+            source: lore?.source || '',
+            reason: 'global_toggle_unavailable',
+            sourceChars: sourceContent.length,
+            renderedChars: 0,
+            missingGlobalVars
+          });
+          continue;
+        }
+        renderedLore.push({
+          ...lore,
+          content: recoveredContent,
+          prompt: recoveredContent,
+          tokens: estimateTokensFromText(recoveredContent),
+          activationEvidence: {
+            ...(lore.activationEvidence || {}),
+            hostCbsRecovery: recovered.activationEvidence || null
+          },
+          cbsRender: {
+            state: 'host_recovered',
+            sourceChars: sourceContent.length,
+            renderedChars: recoveredContent.length,
+            missingGlobalVars,
+            hostProven: true
+          }
+        });
+        continue;
+      }
+
+      const renderedContent = text(renderRagCbsText(sourceContent, cbsContext, `lore:${lore?.label || lore?.id || 'unknown'}`) || '').trim();
+      if (!renderedContent) {
+        dropped.push({
+          id: loreContinuityIdentity(lore),
+          label: lore?.label || '',
+          source: lore?.source || '',
+          reason: 'cbs_condition_false_or_empty',
+          sourceChars: sourceContent.length,
+          renderedChars: 0,
+          missingGlobalVars: []
+        });
+        continue;
+      }
+      renderedLore.push({
+        ...lore,
+        content: renderedContent,
+        prompt: renderedContent,
+        tokens: estimateTokensFromText(renderedContent),
+        cbsRender: {
+          state: 'resolved',
+          sourceChars: sourceContent.length,
+          renderedChars: renderedContent.length,
+          missingGlobalVars: [],
+          hostProven: false
+        }
+      });
+    }
+
+    return { activeLore: renderedLore, dropped, hostRecovery };
+  };
+
   const risuStaticSettingsHash = (settings = {}) => stableDraftHash(JSON.stringify({
     selectedModuleLoreIds: normalizeSelectedModuleLoreIds(settings.selectedModuleLoreIds),
     excludedModuleLoreIds: normalizeExcludedModuleLoreIds(settings.excludedModuleLoreIds),
@@ -12593,13 +12802,13 @@ function mergeAgentCbsWarnings(...warningLists) {
     const characterInfo = await loadCurrentCharacterForRisuContext(settings.debugLog);
     const character = characterInfo.character;
     // plugins.md is authoritative: request only documented database keys.
+    // globalChatVariables is intentionally not exposed to plugins. Conditional
+    // lore therefore uses host-formatted request evidence instead of treating
+    // an unavailable global toggle as false.
     const baseDb = typeof API.getDatabase === 'function'
       ? await safeApi('getDatabase', () => API.getDatabase(['personas', 'selectedPersona', 'modules', 'enabledModules', 'moduleIntergration']), settings.debugLog)
       : null;
-    const optionalGlobalDb = typeof API.getDatabase === 'function'
-      ? await safeApi('getDatabase.globalChatVariables', () => API.getDatabase(['globalChatVariables']), false)
-      : null;
-    const db = { ...(baseDb || {}), ...(optionalGlobalDb || {}) };
+    const db = { ...(baseDb || {}) };
     const chatInfo = await loadCurrentChatForRisuContext(character, settings.debugLog);
     const persona = selectedPersonaFromDb(db, chatInfo.chat);
     const candidates = collectRisuLorebookCandidates(character, db, chatInfo.chat, persona, {
@@ -12641,7 +12850,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     const loreActivationMode = inputAssistTerminalPath
       ? inputAssistLoreActivationMode
       : mainLoreActivationMode;
-    const independentlyActivatedLore = loreActivationMode !== 'risu_selected'
+    const independentlyActivatedRaw = loreActivationMode !== 'risu_selected'
       ? activeRisuLorebooks(ragRecent, candidates, {
           ...settings,
           loreBookDepth: clampInt(loreSettings.scanDepth ?? loreSettings.scan_depth ?? settings.turnWindow, 1, 128, settings.turnWindow || DEFAULT_RECENT_TURNS),
@@ -12650,14 +12859,21 @@ function mergeAgentCbsWarnings(...warningLists) {
           loreRecursiveScanning: loreSettings.recursiveScanning !== false && loreSettings.recursive_scanning !== false,
           loreContinuityTurns: inputAssistTerminalPath ? 0 : DEFAULT_LORE_CONTINUITY_TURNS,
           loreContinuityActiveIds
-        }).map(lore => ({ ...lore, content: renderRagCbsText(lore.content, cbsContext, `lore:${lore.label}`) }))
+        })
       : [];
+    const independentRendering = loreActivationMode !== 'risu_selected'
+      ? renderIndependentActiveLorebooks(independentlyActivatedRaw, requestMessages, cbsContext)
+      : {
+          activeLore: [],
+          dropped: [],
+          hostRecovery: { activeLore: [], requestMessageCount: 0, matchedCandidateCount: 0, selectedCount: 0 }
+        };
     const hostLoreSelection = loreActivationMode === 'risu_selected'
       ? reuseRisuSelectedLorebooks(requestMessages, candidates, cbsContext)
-      : { activeLore: [], requestMessageCount: 0, matchedCandidateCount: 0, selectedCount: 0 };
+      : independentRendering.hostRecovery;
     const activeLore = loreActivationMode === 'risu_selected'
       ? hostLoreSelection.activeLore
-      : independentlyActivatedLore;
+      : independentRendering.activeLore;
     if (!inputAssistTerminalPath) {
       writeLoreContinuityIds(loreContinuityScope, activeLore, ragRecent.latestUser);
     }
@@ -12701,6 +12917,8 @@ function mergeAgentCbsWarnings(...warningLists) {
         hostRequestMessageCount: hostLoreSelection.requestMessageCount,
         hostMatchedCandidateCount: hostLoreSelection.matchedCandidateCount,
         hostSelectedCount: hostLoreSelection.selectedCount,
+        cbsRenderDrops: independentRendering.dropped.slice(0, 64),
+        cbsRenderDropCount: independentRendering.dropped.length,
         preRequestFallback: false,
         activationPolicyVersion: LORE_ACTIVATION_POLICY_VERSION,
         continuityTurns: inputAssistTerminalPath ? 0 : DEFAULT_LORE_CONTINUITY_TURNS,
@@ -13656,13 +13874,30 @@ function mergeAgentCbsWarnings(...warningLists) {
 
   const rerankLoreForStage = (activeLore = [], stageName = 'shadow_act', options = {}) => {
     const rerankerStage = loreRerankerStageName(stageName);
-    const source = Array.isArray(activeLore) ? activeLore : [];
+    const rawSource = Array.isArray(activeLore) ? activeLore : [];
+    const source = rawSource.filter(lore => (
+      text(lore?.content || '').trim()
+      || text(lore?.retrievedContent || '').trim()
+    ));
+    const emptyDropped = rawSource.filter(lore => !(
+      text(lore?.content || '').trim()
+      || text(lore?.retrievedContent || '').trim()
+    )).map(lore => ({
+      id: loreContinuityIdentity(lore),
+      label: lore?.label || '',
+      source: lore?.source || '',
+      sourceType: lore?.sourceType || 'unknown',
+      score: 0,
+      rank: 0,
+      reason: 'empty_content',
+      protectedActivation: false
+    }));
     if (!rerankerStage) {
       return {
         enabled: false, engine: STAGE_LORE_RERANKER_VERSION, stage: text(stageName || ''), profileStage: '',
         topK: source.length, absoluteFloor: 0, relativeFloor: 0, effectiveFloor: 0,
-        candidateCount: source.length, selectedCount: source.length, droppedCount: 0,
-        selected: source.slice(), dropped: []
+        inputCount: rawSource.length, candidateCount: source.length, selectedCount: source.length, droppedCount: emptyDropped.length,
+        selected: source.slice(), dropped: emptyDropped
       };
     }
     const def = STAGE_LORE_RERANKER_DEFS[rerankerStage] || STAGE_LORE_RERANKER_DEFS.shadow_act;
@@ -13700,7 +13935,7 @@ function mergeAgentCbsWarnings(...warningLists) {
         components: Object.fromEntries(Object.entries(entry.components).map(([key, value]) => [key, Number(Number(value || 0).toFixed(4))]))
       }
     }));
-    const dropped = ranked.filter(entry => !selectedOrders.has(entry.order)).map((entry, index) => {
+    const rankedDropped = ranked.filter(entry => !selectedOrders.has(entry.order)).map((entry, index) => {
       const passedFloor = entry.protectedActivation
         || entry.score >= effectiveFloor
         || Number(entry.components.identity || 0) >= Number(def.identityBypass || 1);
@@ -13715,6 +13950,7 @@ function mergeAgentCbsWarnings(...warningLists) {
         protectedActivation: entry.protectedActivation === true
       };
     });
+    const dropped = [...emptyDropped, ...rankedDropped];
     return {
       enabled: true,
       engine: STAGE_LORE_RERANKER_VERSION,
@@ -13725,6 +13961,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       relativeFloor: Number(def.relativeFloor || 0),
       effectiveFloor: Number(effectiveFloor.toFixed(4)),
       bestScore: Number(bestScore.toFixed(4)),
+      inputCount: rawSource.length,
       candidateCount: source.length,
       selectedCount: selected.length,
       droppedCount: dropped.length,
@@ -13935,9 +14172,11 @@ function mergeAgentCbsWarnings(...warningLists) {
     stage: result.stage || '',
     profileStage: result.profileStage || '',
     topK: Number(result.topK || 0),
+    inputCount: Number(result.inputCount ?? result.candidateCount ?? 0),
     candidateCount: Number(result.candidateCount || 0),
     selectedCount: Number(result.selectedCount || 0),
     droppedCount: Number(result.droppedCount || 0),
+    emptyDroppedCount: (result.dropped || []).filter(item => item.reason === 'empty_content').length,
     absoluteFloor: Number(result.absoluteFloor || 0),
     relativeFloor: Number(result.relativeFloor || 0),
     effectiveFloor: Number(result.effectiveFloor || 0),
@@ -14143,11 +14382,12 @@ function mergeAgentCbsWarnings(...warningLists) {
         chatLength: recent?.visibleMessageCount || source.actualChatContext?.messageCount || 1
       }
     );
-    const activeLore = promoted.activeLore.map(lore => (
-      lore.activationRoute === 'jaccard_current_input' || lore.activationRoute === 'terminal_entity'
-        ? { ...lore, content: renderRagCbsText(lore.content, source.cbsContext, `lore:${lore.label}`) }
-        : lore
-    ));
+    const promotedRendering = renderIndependentActiveLorebooks(promoted.activeLore, messages, source.cbsContext);
+    const activeLore = promotedRendering.activeLore;
+    const loreRenderDrops = [
+      ...(Array.isArray(source.loreSettings?.cbsRenderDrops) ? source.loreSettings.cbsRenderDrops : []),
+      ...(promotedRendering.dropped || [])
+    ];
     if (!inputAssistTerminalPath && source.loreSettings?.continuityScope) {
       writeLoreContinuityIds(source.loreSettings.continuityScope, activeLore, recent?.latestUser || '');
     }
@@ -14240,6 +14480,8 @@ function mergeAgentCbsWarnings(...warningLists) {
               : 'risu_recent_context_activation_keys'
       ),
       activationPolicyVersion: LORE_ACTIVATION_POLICY_VERSION,
+      cbsRenderDrops: loreRenderDrops.slice(0, 64),
+      cbsRenderDropCount: loreRenderDrops.length,
       activationRoutes: activeLore.reduce((acc, lore) => {
         const route = lore.activationRoute || 'unknown';
         acc[route] = (acc[route] || 0) + 1;
@@ -14325,6 +14567,10 @@ function mergeAgentCbsWarnings(...warningLists) {
         entityAnchor: lore.retrieval?.entityAnchor || 0,
         matchedSections: lore.retrieval?.matchedSections || [],
         fallback: lore.retrieval?.fallback === true,
+        sourceChars: Number(lore.cbsRender?.sourceChars ?? text(lore.rawContent || lore.content).length),
+        renderedChars: Number(lore.cbsRender?.renderedChars ?? text(lore.content).length),
+        bodyState: lore.cbsRender?.state || 'plain',
+        hostRecovered: lore.cbsRender?.state === 'host_recovered',
         rawChars: lore.retrieval?.rawChars || text(lore.content).length,
         excerptChars: lore.retrieval?.excerptChars || 0,
         rank: lore.retrieval?.rank || 0,
@@ -40172,6 +40418,18 @@ const buildNarrativeArchiveViewerPage = () => {
     },
     debugReuseRisuSelectedLorebooks(messages = [], candidates = [], cbsContext = null) {
       return JSON.parse(JSON.stringify(reuseRisuSelectedLorebooks(messages, candidates, cbsContext)));
+    },
+    debugRenderIndependentLorebooks(messages = [], activeLore = [], context = {}) {
+      const cbsContext = {
+        characterName: context.characterName || '', userName: context.userName || 'User', personaText: context.personaText || '',
+        personality: context.personality || '', description: context.description || '', scenario: context.scenario || '',
+        exampleDialogue: context.exampleDialogue || '', authorNote: context.authorNote || '',
+        chatVars: normalizeAgentCbsChatVars(context.chatVars || {}), globalVars: normalizeAgentCbsGlobalVars(context.globalVars || {}),
+        defaultVars: context.defaultVars || {}, enabledModules: new Set(context.enabledModules || []), messages: context.messages || [],
+        lastUser: context.lastUser || '', lastChar: context.lastChar || '', lastMessage: context.lastMessage || '',
+        randomSeedText: context.randomSeedText || 'debug', randomMessageCount: Number(context.randomMessageCount || 0)
+      };
+      return JSON.parse(JSON.stringify(renderIndependentActiveLorebooks(activeLore, messages, cbsContext)));
     },
     getLoreContinuity() {
       return JSON.parse(JSON.stringify(Runtime.loreContinuity || { scopes: {} }));
