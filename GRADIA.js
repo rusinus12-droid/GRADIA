@@ -1,7 +1,7 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.65
+//@display-name GRADIA v0.25.66
 //@api 3.0
-//@version 0.25.65
+//@version 0.25.66
 
 /* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
 //@allowed-ipc flashback_hayaku_bridge
@@ -834,6 +834,7 @@
  * v0.25.63 repairs condition-gated module lore delivery without assuming access to RisuAI's private global toggle store. Host-formatted request evidence recovers the exact non-empty CBS branch, independent activation drops unresolved or false empty bodies before reranking, and lore diagnostics distinguish source, rendered, and retrieved character counts.
  * v0.25.64 matches RisuAI's moduleIntergration contract by splitting comma-delimited module references before module-lore filtering, while retaining legacy array and object forms.
  * v0.25.65 fixes reasoning-output budgeting and GLM/Z.ai thinking recovery. Reasoning-enabled stage calls reserve visible-output headroom instead of reusing the prose-only budget, explicit GLM thinking-off settings now emit `thinking.type=disabled`, and thinking-only length recovery expands the completion budget while sending a real GLM disable payload instead of omitting it.
+ * v0.25.66 adds a deterministic current-input hard-commitment guard with contradiction-only recovery, gives the final serial candidate a second guard before injection, enables Vertex/Gemini explicit CachedContent when an exact shared-prefix hash is projected to recur across lightweight stages, fixes explicit Input Writer/Continue call accounting, and links lore labels to profile Name aliases for current-cast detection.
  * v0.25.60 adds explicit Story Arc cold-start maintenance shared by the Story Arc and Narrative Archive pages. “최근 완료 5턴으로 기준 생성” analyzes the latest complete canonical five-turn window even off-boundary, while the full cold start processes only missing canonical windows in chronological order, saves every successful window immediately to Narrative Archive, keeps the newest result as the active Story Arc, resumes after failure without repeating stored windows, and confirms the estimated Arc Director/document-embedding calls before execution.
  * v0.25.51 fixes copy/manual-send clipboard delivery in iframe/WebView runtimes. The copy action now runs inside the originating button click before any modal restore/hide await can consume transient user activation; it tries synchronous selection/execCommand first, then navigator.clipboard, records the method for diagnostics, and keeps the dialog open with the generated text selected when browser policy blocks automated copying.
  *
@@ -923,7 +924,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.65';
+  const PLUGIN_VERSION = '0.25.66';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -10061,8 +10062,14 @@ ${text(paired.leadingAssistant.content || '')}
           )
         ) add(primary, candidateAliases);
       }
+      // Character cards often expose an English `Name:` inside a lore entry while the
+      // RisuAI lore label itself is localized (for example Cecilia <-> 세실리아).
+      // Keep the label/key aliases attached to that explicit profile name so the
+      // request continuity ledger can recognize either spelling in the live input.
+      const explicitProfileName = content.match(/^\s*(?:Name|이름)\s*[:：]\s*([^\n,;|]{2,80})/im);
+      if (explicitProfileName) add(explicitProfileName[1], candidateAliases);
       const stageNameMatches = content.matchAll(/^\s*(?:Stage\s*Name|활동명|이름|Name)\s*[:：]\s*([^\n,;|]{2,80})/gim);
-      for (const match of stageNameMatches) add(match[1]);
+      for (const match of stageNameMatches) add(match[1], candidateAliases);
       const roleNameMatches = content.matchAll(/^\s*[-*]\s+[^:\n]{1,60}\s*[:：]\s*([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+){1,3})(?:\s*\([^)\n]*\))?/gm);
       for (const match of roleNameMatches) add(match[1]);
       const memberMatches = content.matchAll(/^\s*\d{1,2}[.)]\s+([^–—\-\n:：]{2,50})(?:\s*[–—\-:：]|$)/gm);
@@ -10151,6 +10158,122 @@ ${text(paired.leadingAssistant.content || '')}
       if (aliases.some((alias) => continuityTextContainsAlias(narrativeText, alias))) found.push(entry.canonical);
     });
     return uniqueContinuityStrings(found).slice(0, 24);
+  };
+
+  const AUTHORITATIVE_COMMITMENT_GUARD_VERSION = 'gradia_authoritative_commitment_guard_v1';
+  const normalizeCommitmentScanText = value => text(value || '')
+    .normalize('NFKC')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+  const commitmentEvidence = (value, pattern) => {
+    const body = normalizeCommitmentScanText(value);
+    const match = body.match(pattern);
+    return match ? compact(match[0], 220) : '';
+  };
+  const commitmentNarrativeScanText = value => normalizeCommitmentScanText(value)
+    // Interface/status/code strings can legitimately mention forbidden actions as
+    // warnings or options (for example `Terminate? Y/N`) without the story doing them.
+    .replace(/`[^`\n]{1,500}`/g, ' ')
+    .replace(/\[[^\]\n]{1,500}\]/g, ' ')
+    .replace(/\s+/g, ' ');
+  const maskNegatedCommitmentMentions = value => commitmentNarrativeScanText(value)
+    .replace(/(?:중단|정지|멈추|그만두|포기|끊|종료)[^.!?\n]{0,18}(?:지\s*(?:않|못|말)|하지\s*(?:않|못)|않는|않는다|않았다)/gi, ' ')
+    .replace(/(?:stop|pause|halt|quit|give\s+up|terminate)[^.!?\n]{0,18}(?:not|never)|(?:do(?:es|ne)?|did)\s+not\s+(?:stop|pause|halt|quit|terminate)/gi, ' ')
+    .replace(/\s+/g, ' ');
+  const AUTHORITATIVE_COMMITMENT_RULES = Object.freeze([
+    {
+      id: 'continue_vs_stop',
+      label: '계속/중단',
+      desired: 'continue',
+      input: /(?:(?:끝내|끝까지|계속(?:해서|하여|적으로)?|절대)[^.!?\n]{0,42})?(?:중단|정지|멈추|그만두|포기|끊|종료)[^.!?\n]{0,16}(?:지\s*않|하지\s*않|않는|않는다)|(?:keep(?:s|ing)?|continue(?:s|d|ing)?)[^.!?\n]{0,30}(?:without\s+(?:stopping|pausing)|despite)|(?:does?|did)\s+not\s+(?:stop|pause|halt|quit|terminate)/i,
+      conflict: /(?:일시\s*)?(?:중단(?:했|한다|하고|시키|시켜|시켰|되었|됐다|되는)|정지(?:했|한다|하고|시키|시켜|시켰|되었|됐다)|멈췄|멈춘|멈춘다|그만뒀|그만두(?:었|고|며|는|다)|포기(?:했|한다|하고)|끊(?:었|는다|고)|종료(?:했|한다|하고)|\b(?:stopp(?:ed|ing)|paus(?:ed|ing)|halt(?:ed|ing)|quit|terminated?)\b)/i,
+      conflictScan: maskNegatedCommitmentMentions,
+      repair: '현재 입력은 해당 행동을 중단·정지·포기하지 않는다고 고정한다. 초안에서 자발적/의도적 중단, 일시정지, 종료로 뒤집지 말고 계속되는 상태를 유지한다.'
+    },
+    {
+      id: 'reject_vs_accept',
+      label: '거부/수락',
+      desired: 'reject',
+      input: /(?:절대[^.!?\n]{0,24})?(?:수락|동의|허락|받아들이)[^.!?\n]{0,14}(?:지\s*않|하지\s*않|않는다)|(?:거부|거절)(?:한다|했다|하며|하고)|(?:refuse|reject|decline)(?:s|d|ing)?|(?:does?|did)\s+not\s+(?:accept|agree|consent)/i,
+      conflict: /(?:수락(?:했|한다|하고)|동의(?:했|한다|하고)|허락(?:했|한다|하고)|받아들(?:였|인다|이고)|\b(?:accept(?:ed|s|ing)|agree(?:d|s|ing)|consent(?:ed|s|ing))\b)/i,
+      repair: '현재 입력이 거부/비동의를 고정한 경우 초안이 이를 수락·동의·허락으로 바꾸지 않는다.'
+    },
+    {
+      id: 'stay_vs_leave',
+      label: '잔류/이탈',
+      desired: 'stay',
+      input: /(?:떠나|나가|이탈|출발)[^.!?\n]{0,14}(?:지\s*않|하지\s*않|않는다)|(?:남아\s*있|머무른|머문다|잔류한다)|(?:does?|did)\s+not\s+leave|(?:stay|remain)(?:s|ed|ing)?/i,
+      conflict: /(?:떠났|떠난다|떠나버|나갔|나간다|이탈(?:했|한다)|출발(?:했|한다)|\b(?:left|leaves|departed|exited)\b)/i,
+      repair: '현재 입력이 남아 있음/떠나지 않음을 고정한 경우 초안이 이탈·출발·퇴장으로 바꾸지 않는다.'
+    },
+    {
+      id: 'preserve_vs_destroy',
+      label: '보존/파괴',
+      desired: 'preserve',
+      input: /(?:삭제|파괴|폐기|지우|없애)[^.!?\n]{0,14}(?:지\s*않|하지\s*않|않는다)|(?:보존|유지)(?:한다|했다|하며|하고)|(?:does?|did)\s+not\s+(?:delete|destroy|erase)|(?:preserve|retain|keep)(?:s|ed|ing)?/i,
+      conflict: /(?:삭제(?:했|한다|하고)|파괴(?:했|한다|하고)|폐기(?:했|한다|하고)|지워(?:버렸|냈|진)|없애(?:버렸|버린|는)|\b(?:deleted|destroyed|erased|discarded)\b)/i,
+      repair: '현재 입력이 보존/비삭제를 고정한 경우 초안이 해당 대상을 삭제·파괴·폐기한 것으로 바꾸지 않는다.'
+    },
+    {
+      id: 'spare_vs_kill',
+      label: '생존/살해',
+      desired: 'spare',
+      input: /(?:죽이|살해|처단)[^.!?\n]{0,14}(?:지\s*않|하지\s*않|않는다)|(?:살려\s*둔|살려둔다|목숨을\s*살린)|(?:does?|did)\s+not\s+kill|(?:spare|keep\s+alive)(?:s|d|ing)?/i,
+      conflict: /(?:죽였|죽인다|살해(?:했|한다)|처단(?:했|한다)|목숨을\s*끊|\b(?:killed|kills|executed|slain)\b)/i,
+      repair: '현재 입력이 생존/비살해를 고정한 경우 초안이 살해·처단으로 바꾸지 않는다.'
+    }
+  ]);
+  const authoritativeCommitmentLocks = currentInputValue => {
+    const currentInput = normalizeCommitmentScanText(currentInputValue);
+    if (!currentInput) return [];
+    return AUTHORITATIVE_COMMITMENT_RULES.map(rule => {
+      const evidence = commitmentEvidence(currentInput, rule.input);
+      return evidence ? { ...rule, evidence } : null;
+    }).filter(Boolean);
+  };
+  const detectAuthoritativeCommitmentViolations = (currentInputValue, draftValue) => {
+    const locks = authoritativeCommitmentLocks(currentInputValue);
+    const draft = normalizeCommitmentScanText(draftValue);
+    if (!locks.length || !draft) return [];
+    return locks.map(lock => {
+      const scan = typeof lock.conflictScan === 'function' ? lock.conflictScan(draft) : commitmentNarrativeScanText(draft);
+      const evidence = commitmentEvidence(scan, lock.conflict);
+      return evidence ? {
+        id: lock.id,
+        label: lock.label,
+        desired: lock.desired,
+        inputEvidence: lock.evidence,
+        draftEvidence: evidence,
+        repair: lock.repair
+      } : null;
+    }).filter(Boolean);
+  };
+  const buildAuthoritativeCommitmentGuardBlock = (currentInputValue, draftValue = '') => {
+    const locks = authoritativeCommitmentLocks(currentInputValue);
+    if (!locks.length) return '';
+    const violations = draftValue ? detectAuthoritativeCommitmentViolations(currentInputValue, draftValue) : [];
+    return [
+      `[CURRENT INPUT HARD COMMITMENT GUARD — ${AUTHORITATIVE_COMMITMENT_GUARD_VERSION}]`,
+      'These are literal highest-authority commitments extracted only from the current submitted input. Story Arc, memory, lore, skills, prior drafts, and stylistic preferences cannot reverse them.',
+      ...locks.map(lock => `- ${lock.label}: ${lock.repair}\n  current_input_evidence: ${lock.evidence}`),
+      violations.length ? '[DETECTED CANDIDATE CONFLICTS]' : '',
+      ...violations.map(item => `- ${item.label}: candidate conflict = ${item.draftEvidence}`),
+      'Before returning the candidate, verify that no later sentence semantically reverses these commitments. A temporary warning, risk, temptation, or external pressure is allowed; the forbidden reversal itself is not.'
+    ].filter(Boolean).join('\n');
+  };
+  const validateAuthoritativeCommitments = (currentInputValue, draftValue) => {
+    const locks = authoritativeCommitmentLocks(currentInputValue);
+    const violations = detectAuthoritativeCommitmentViolations(currentInputValue, draftValue);
+    return {
+      schema: AUTHORITATIVE_COMMITMENT_GUARD_VERSION,
+      ok: violations.length === 0,
+      lockCount: locks.length,
+      violationCount: violations.length,
+      locks: locks.map(lock => ({ id: lock.id, label: lock.label, evidence: lock.evidence })),
+      violations
+    };
   };
 
   const detectGradiaSceneBoundary = (currentInput) => {
@@ -20715,7 +20838,9 @@ function mergeAgentCbsWarnings(...warningLists) {
     pinnedToDeliveryCycle: pinnedToDeliveryCycle === true,
     startedAt: Date.now(),
     completedAt: 0,
-    expected: expectedTotalCallPlan(settings, { includeInputAssist: /input_assist/i.test(text(source || '')) }),
+    expected: expectedTotalCallPlan(settings, {
+      includeInputAssist: /(?:input_assist|explicit_continue_button|explicit_input_writer)/i.test(text(source || ''))
+    }),
     actualLogicalCalls: 0,
     providerAttempts: 0,
     recoveryLogicalCalls: 0,
@@ -20856,7 +20981,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       promptCacheDisabled: options.promptCacheDisabled === true
         || settings?.sharedReferencePromptCacheEnabled === false,
       geminiExplicitCacheEligible: (mode === 'gemini' || mode === 'vertex_gemini')
-        && normalizeMultiPipelineMode(settings?.multiPipelineMode) === 'heavyweight',
+        && settings?.sharedReferencePromptCacheEnabled === true,
       maxTokens: options.maxTokens || stageOutputTokenBudget(settings, stageName, systemPrompt, preset, options)
     };
     const tracedOptions = { ...effectiveOptions, traceMeta: { stageName, presetName: name, provider, model: preset.model, promptPhase, reasoningPolicy } };
@@ -24190,6 +24315,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       presetName: stage.presetName || '',
       model: stage.model || '',
       elapsedMs: stage.elapsedMs || 0,
+      authoritativeCommitmentGuard: stage.authoritativeCommitmentGuard || stage.lineage?.commitmentGuard || null,
       lineage: stage.lineage || null
     };
   };
@@ -25456,6 +25582,8 @@ Begin directly with the in-world response and finish the complete same-turn draf
       '[현재 유저 인풋 U[n]]',
       submittedCurrentInput(recent) || '(최신 유저 입력 없음)',
       '',
+      buildAuthoritativeCommitmentGuardBlock(submittedCurrentInput(recent)),
+      '',
       '[EXACT TERMINAL SCENE STATE — retain at prompt tail]',
       terminalScene,
       recent.inputAssistGeneratedContinuation
@@ -25519,6 +25647,8 @@ Begin directly with the in-world response and finish the complete same-turn draf
       '',
       '[유저 인풋 / 동일 run의 원 요청]',
       submittedCurrentInput(recent) || '(최신 유저 입력 없음)',
+      '',
+      buildAuthoritativeCommitmentGuardBlock(submittedCurrentInput(recent), previousDraft),
       '',
       [
         `${STAGE_DEF_MAP[stageName]?.label || stageName} 단계로 CURRENT_SAME_TURN_DRAFT를 같은 턴의 더 나은 complete RP response_draft로 전체 재작성하라.`,
@@ -26357,6 +26487,78 @@ Begin directly with the in-world response and finish the complete same-turn draf
     };
   };
 
+  const retryAuthoritativeCommitmentRewrite = async (settings, stageName, recent, previous, candidateStage, validation, recoveryKind = 'stage') => {
+    const currentInput = submittedCurrentInput(recent);
+    const candidateDraft = stageDraft(candidateStage);
+    const guard = buildAuthoritativeCommitmentGuardBlock(currentInput, candidateDraft);
+    if (!currentInput || !candidateDraft || validation?.ok !== false || !guard) return null;
+    const system = [
+      fullDraftStageSystemShell(stageName, settings),
+      guard,
+      'AUTHORITATIVE COMMITMENT RECOVERY MODE:',
+      'The candidate below is from this same turn but deterministically contradicts a literal current-input hard commitment.',
+      'Repair the smallest semantic span necessary while preserving every unaffected actor, event, causal link, image/status command, style choice, and ending boundary.',
+      'Do not continue the scene and do not introduce a new resolution. Return one complete replacement candidate as plain in-world prose only.'
+    ].join('\n\n');
+    const user = [
+      '[CURRENT USER INPUT — HIGHEST AUTHORITY]',
+      currentInput,
+      '',
+      guard,
+      '',
+      '[PRE-DRAFT TERMINAL SCENE — STARTING STATE ONLY]',
+      compactMiddle(recent?.terminalVisibleScene || recent?.inputAssistTerminalVisibleScene || recent?.sceneAnchor || '', INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS),
+      '',
+      '[REJECTED SAME-TURN CANDIDATE — REPAIR, DO NOT CONTINUE]',
+      candidateDraft,
+      '',
+      '[DETERMINISTIC CONFLICTS]',
+      (validation?.violations || []).map(item => `- ${item.label}: current=${item.inputEvidence} | candidate=${item.draftEvidence}`).join('\n'),
+      '',
+      'Return the complete repaired same-turn candidate only.'
+    ].join('\n');
+    const result = await callLLMWithPreset(settings, stageName, system, user, {
+      temp: 0.1,
+      promptPhase: 'repair',
+      forceNoThinking: true,
+      promptCacheDisabled: true,
+      telemetryRetryKind: 'authoritative_commitment_recovery'
+    });
+    if (!result?.ok) return null;
+    const parsed = relaxedJsonParse(result.content);
+    let normalized = normalizeStageData(parsed, stageName, candidateDraft);
+    if (!parsed && !hasCompleteStageDraft(normalized)) normalized = normalizePlainTextFullDraft(stageName, result.content, candidateDraft);
+    if (!isUsableStage(normalized)) return null;
+    const nextCommitmentValidation = validateAuthoritativeCommitments(currentInput, stageDraft(normalized));
+    if (!nextCommitmentValidation.ok) return null;
+    const lineageValidation = validateStageDraftLineage(stageName, normalized, recent, previous);
+    if (!lineageValidation.ok) return null;
+    attachStageLineage(normalized, stageName, recent, previous, lineageValidation, {
+      recovered: true,
+      recoveryKind: 'authoritative_commitment',
+      commitmentGuard: nextCommitmentValidation,
+      rejectedCommitmentGuard: validation
+    });
+    normalized.authoritativeCommitmentGuard = {
+      ...nextCommitmentValidation,
+      recovered: true,
+      recoveryKind,
+      previousViolationCount: Number(validation?.violationCount || 0)
+    };
+    normalized.provider = result.provider;
+    normalized.presetName = result.presetName;
+    normalized.model = result.model;
+    normalized.elapsedMs = result.elapsedMs || 0;
+    return {
+      result,
+      normalized,
+      validation: nextCommitmentValidation,
+      lineageValidation,
+      system: result.effectiveSystemPrompt || system,
+      user: result.effectiveUserPrompt || user
+    };
+  };
+
   const runStage = async (stageName, recent, previous, settings, ledger) => {
     const prompts = stagePrompt(stageName, recent, previous, settings, ledger);
     const fallbackDraft = stageDraft(previous);
@@ -26414,8 +26616,31 @@ Begin directly with the in-world response and finish the complete same-turn draf
           return fb;
         }
       }
+      let commitmentValidation = validateAuthoritativeCommitments(submittedCurrentInput(recent), stageDraft(normalized));
+      let commitmentRecovered = normalized?.authoritativeCommitmentGuard?.recovered === true;
+      if (stageName === 'shadow_act' && !commitmentValidation.ok) {
+        warn('authoritative_commitment_violation', `${stageName}: ${commitmentValidation.violations.map(item => `${item.label}:${item.draftEvidence}`).join(' | ')}`);
+        const recovered = await retryAuthoritativeCommitmentRewrite(settings, stageName, recent, previous, normalized, commitmentValidation, 'shadow_pre_aide');
+        if (recovered) {
+          result = recovered.result;
+          normalized = recovered.normalized;
+          lineageValidation = recovered.lineageValidation;
+          commitmentValidation = recovered.validation;
+          traceSystemPrompt = recovered.system;
+          traceUserPrompt = recovered.user;
+          commitmentRecovered = true;
+        }
+      }
       const existingLineage = normalized.lineage || {};
-      attachStageLineage(normalized, stageName, recent, previous, lineageValidation, existingLineage.recovered ? { recovered: true, rejectedReason: existingLineage.rejectedReason || '' } : {});
+      attachStageLineage(normalized, stageName, recent, previous, lineageValidation, {
+        ...(existingLineage.recovered ? { recovered: true, rejectedReason: existingLineage.rejectedReason || '' } : {}),
+        commitmentGuard: commitmentValidation
+      });
+      normalized.authoritativeCommitmentGuard = {
+        ...commitmentValidation,
+        recovered: commitmentRecovered,
+        recoveryKind: commitmentRecovered ? 'shadow_pre_aide' : ''
+      };
       normalized.analysisMode = stageName === 'shadow_act'
         ? 'integrated_private_planning_draft'
         : 'integrated_draft';
@@ -26423,7 +26648,7 @@ Begin directly with the in-world response and finish the complete same-turn draf
       normalized.presetName = result.presetName;
       normalized.model = result.model;
       normalized.elapsedMs = result.elapsedMs || (Date.now() - startedAt);
-      recordStageTrace({ stage: stageName, ok: true, reason: normalized.lineage?.recovered ? 'lineage_recovery_success' : '', pipelineMode: 'lightweight', integratedMode: true, lineageValidation: normalized.lineage?.validation || null, provider: result.provider || '', presetName: result.presetName || '', model: result.model || '', elapsedMs: normalized.elapsedMs, systemPrompt: traceSystemPrompt, userPrompt: traceUserPrompt, rawResponse: result.content || '', parsed: normalized });
+      recordStageTrace({ stage: stageName, ok: true, reason: normalized.authoritativeCommitmentGuard?.recovered ? 'authoritative_commitment_recovery_success' : normalized.lineage?.recovered ? 'lineage_recovery_success' : '', pipelineMode: 'lightweight', integratedMode: true, lineageValidation: normalized.lineage?.validation || null, authoritativeCommitmentGuard: normalized.authoritativeCommitmentGuard || null, provider: result.provider || '', presetName: result.presetName || '', model: result.model || '', elapsedMs: normalized.elapsedMs, systemPrompt: traceSystemPrompt, userPrompt: traceUserPrompt, rawResponse: result.content || '', parsed: normalized });
       return normalized;
     } catch (error) {
       warn(`${stageName}_failed`, error);
@@ -26996,6 +27221,8 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       '',
       '[CURRENT USER INPUT — AUTHORITATIVE INTENT]',
       compactMiddle(submittedCurrentInput(recent), 3200),
+      '',
+      buildAuthoritativeCommitmentGuardBlock(submittedCurrentInput(recent), previousDraft),
       '',
       '[LATEST TERMINAL SCENE STATE]',
       compactMiddle(
@@ -28098,7 +28325,12 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
           task: preservationMode
             ? 'Perform one preservation-only surface finish.'
             : 'Produce a polished replacement of the supplied candidate inside the same event interval. Do not continue from its ending.',
-          hardConstraints: [languageContract, buildNovelAuthorshipContract(settings, 'final'), synthesisContract],
+          hardConstraints: [
+            languageContract,
+            buildNovelAuthorshipContract(settings, 'final'),
+            buildAuthoritativeCommitmentGuardBlock(submittedCurrentInput(recent), draft),
+            synthesisContract
+          ],
           outputContract: 'Begin directly in-world. Output no reasoning, process text, review, labels, or <Thoughts> block.',
           successCriteria: preservationMode
             ? 'Events, order, positions, explicit author-reserved decisions, ending, and scene boundary remain unchanged.'
@@ -28274,6 +28506,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
             continuityGuard,
             hardTransfer,
             turnHandoff,
+            buildAuthoritativeCommitmentGuardBlock(submittedCurrentInput(recent), draft),
             candidateAudit
           ],
           optionalCriteria: '',
@@ -29727,7 +29960,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       projectedCalls: entry.calls,
       providerModelProjectedCalls: projectedCacheTotals.get(entry.key) || entry.calls,
       enabled: entry.calls > 1,
-      reason: entry.calls > 1 ? 'same_stage_exact_prefix_reused' : 'single_stage_call_no_explicit_cache'
+      reason: entry.calls > 1 ? 'same_stage_exact_prefix_reused' : 'awaiting_exact_shared_prefix_projection'
     }]));
     // SHADOW ACT still decides which reference categories are allowed for this run.
     // The expensive source scan/activation pass is built once, then each draft stage
@@ -29803,6 +30036,51 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
         referenceCapacity: sharedRisuContext.referenceCapacity || null,
         meta: sharedRisuContext.meta
       };
+      // v0.25.66: decide Gemini/Vertex explicit caching by the exact rendered shared-prefix
+      // hash, not by whether one individual stage happens to make two calls. Lightweight
+      // SHADOW/World/Plot frequently reuse the same 80k+ prefix and should share one
+      // CachedContent resource, while a Character-specific lore view with a unique hash
+      // stays implicit and avoids a useless one-off cache creation.
+      const cacheViewProjections = [];
+      for (const entry of projectedCacheCalls.filter(item => item.stageName !== RISU_ENGINE_STAGE)) {
+        const previewSettings = scopedSettingsForStage(settings, entry.stageName);
+        const previewRecent = attachInputAssistContinuityState(buildRecentChat(messages, previewSettings), settings);
+        previewRecent.runLineage = runLineage;
+        try {
+          const previewView = materializeSharedRisuContext(sharedRisuContext, previewRecent, previewSettings, sharedRisuRefs);
+          cacheViewProjections.push({
+            ...entry,
+            sharedPrefixHash: previewView.referencePacketHash || '',
+            sharedPrefixChars: text(previewView.referencePacketBlock || previewView.block || '').length
+          });
+        } catch (error) {
+          cacheViewProjections.push({ ...entry, sharedPrefixHash: '', sharedPrefixChars: 0, projectionError: compact(error?.message || error, 240) });
+        }
+      }
+      const exactPrefixTotals = cacheViewProjections.reduce((map, entry) => {
+        const cacheKey = `${entry.key}|${entry.sharedPrefixHash || '(none)'}`;
+        map.set(cacheKey, (map.get(cacheKey) || 0) + Math.max(1, Number(entry.calls || 1)));
+        return map;
+      }, new Map());
+      for (const entry of cacheViewProjections) {
+        const cacheKey = `${entry.key}|${entry.sharedPrefixHash || '(none)'}`;
+        const exactPrefixProjectedCalls = exactPrefixTotals.get(cacheKey) || Math.max(1, Number(entry.calls || 1));
+        const geminiLike = entry.provider === 'gemini' || entry.provider === 'vertex';
+        const enabled = !!entry.sharedPrefixHash && (entry.calls > 1 || (geminiLike && exactPrefixProjectedCalls > 1));
+        promptCachePlan[entry.stageName] = {
+          ...(promptCachePlan[entry.stageName] || {}),
+          sharedPrefixHash: entry.sharedPrefixHash || '',
+          sharedPrefixChars: entry.sharedPrefixChars || 0,
+          exactPrefixProjectedCalls,
+          enabled,
+          reason: enabled
+            ? (entry.calls > 1 ? 'same_stage_exact_prefix_reused' : 'cross_stage_exact_prefix_reused')
+            : entry.projectionError
+              ? 'shared_prefix_projection_failed'
+              : 'single_exact_prefix_use'
+        };
+      }
+      Runtime.pipelineTimings.sharedContext.promptCachePlan = promptCachePlan;
     } else {
       Runtime.pipelineTimings.sharedContext.completedAt = sharedContextStartedAt;
       Runtime.pipelineTimings.sharedContext.skipped = true;
@@ -30111,6 +30389,49 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
     ) {
       warn('reference_packet_final_view_mismatch', JSON.stringify(Runtime.lastRisuContext.comparison));
     }
+
+    // Final deterministic gate: a later AIDE or engine must not reintroduce a polarity
+    // reversal that SHADOW already fixed. Recovery is invoked only when a literal
+    // current-input hard commitment is actually contradicted.
+    let finalCommitmentValidation = validateAuthoritativeCommitments(submittedCurrentInput(finalRecent), stageDraft(safeStage));
+    if (!finalCommitmentValidation.ok && stageDraft(safeStage)) {
+      const recoveryStageName = settings.enablePlotAide !== false ? 'aide_plot' : (safeStage?.stage || 'shadow_act');
+      const recoverySettings = scopedSettingsForStage(settings, recoveryStageName);
+      warn('authoritative_commitment_final_violation', `${recoveryStageName}: ${finalCommitmentValidation.violations.map(item => `${item.label}:${item.draftEvidence}`).join(' | ')}`);
+      const recovered = await retryAuthoritativeCommitmentRewrite(
+        recoverySettings,
+        recoveryStageName,
+        finalRecent,
+        safeStage,
+        safeStage,
+        finalCommitmentValidation,
+        'final_serial_gate'
+      );
+      if (recovered) {
+        const recoveredStage = recovered.normalized;
+        recoveredStage.elapsedMs = Number(recovered.result?.elapsedMs || recoveredStage.elapsedMs || 0);
+        stages.push(recoveredStage);
+        current = recoveredStage;
+        safeStage = recoveredStage;
+        finalCommitmentValidation = recovered.validation;
+        recordStageTrace({
+          stage: recoveryStageName,
+          ok: true,
+          reason: 'authoritative_commitment_final_recovery_success',
+          recovery: true,
+          authoritativeCommitmentGuard: recovered.validation,
+          provider: recovered.result?.provider || '',
+          presetName: recovered.result?.presetName || '',
+          model: recovered.result?.model || '',
+          elapsedMs: recovered.result?.elapsedMs || 0,
+          systemPrompt: recovered.system,
+          userPrompt: recovered.user,
+          rawResponse: recovered.result?.content || '',
+          parsed: recoveredStage
+        });
+      }
+    }
+    finalRecent.authoritativeCommitmentGuard = finalCommitmentValidation;
     Runtime.lastSafeStage = publicStageView(safeStage);
     Runtime.finalDraft = compact(stageDraft(safeStage) || stageDraft(current) || '', 80000);
     const completedDrafts = [];
@@ -30134,6 +30455,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       stage: safeStage?.stage || current?.stage || '', chars: Runtime.finalDraft.length,
       runId: runLineage.runId, previousRunId: runLineage.previousRunId || '', currentInputHash: runLineage.currentInputHash,
       finalDraftHash: stableDraftHash(Runtime.finalDraft),
+      authoritativeCommitmentGuard: finalCommitmentValidation,
       playerAgencyGuard: isPlayerControlledDraftMode(settings) ? {
         inputAssist: settings.inputAssistMode === 'off' ? 'direct_user_input' : 'three_user_action_choices',
         shadowAct: 'hard_ledger',
@@ -40931,6 +41253,15 @@ const buildNarrativeArchiveViewerPage = () => {
         ].filter(Boolean).join('\n\n');
       }
       return fullDraftStageSystemShell(safeStage, debugSettings);
+    },
+    debugAuthoritativeCommitmentGuard(currentInput = '', draft = '') {
+      return JSON.parse(JSON.stringify({
+        block: buildAuthoritativeCommitmentGuardBlock(currentInput, draft),
+        validation: validateAuthoritativeCommitments(currentInput, draft)
+      }));
+    },
+    debugContinuityEntityCatalog(snapshot = {}) {
+      return JSON.parse(JSON.stringify(buildContinuityEntityCatalog(snapshot)));
     },
     debugStageOutputTokenBudget(profileId = 'balanced', stageName = 'shadow_act', isAnalysis = true) {
       return stageOutputTokenBudget(
