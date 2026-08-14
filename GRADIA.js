@@ -1,7 +1,7 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.60
+//@display-name GRADIA v0.25.62
 //@api 3.0
-//@version 0.25.60
+//@version 0.25.62
 
 /* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
 //@allowed-ipc flashback_hayaku_bridge
@@ -51,6 +51,7 @@
 //@arg skill_router_top_k int Maximum full SKILL.md documents injected per stage; default 2, maximum 3
 //@arg skill_router_references string true|false — allow at most one relevant reference document under each selected skill; default true
 //@arg selected_module_lore_ids string JSON/comma-separated IDs or namespaces of module lorebooks GRADIA may read
+//@arg excluded_module_lore_ids string JSON/comma-separated stable IDs of entries inside selected module lorebooks GRADIA must not read
 //@arg excluded_character_lore_ids string JSON/comma-separated stable IDs of character lorebook entries GRADIA must never read
 //@arg excluded_hypa_record_ids string JSON/comma-separated stable IDs of HypaV3 records GRADIA must never read
 //@arg aide_stage_order string JSON/comma-separated order for Character, World, Plot AIDE; SHADOW ACT is always first
@@ -828,6 +829,8 @@
  * v0.25.57 hardens reroll/rollback draft checkpoints with a stable visible-turn match fingerprint that ignores transient system/module prompt changes while retaining chat, prior-turn, writing-mode, and language boundaries. Explicit No is now an idempotent, read-back-verified discard with an in-memory tombstone fallback, Escape can no longer silently discard a draft, and confirmation restoration always settles.
  * v0.25.58 prevents serial AIDEs from replaying repairs already embodied in the current draft. Completed AIDE summaries, domain notes, constraints, and rewrite directives are no longer forwarded as unresolved work; only durable do-not-reveal and POV/knowledge guards survive. Structural patch application also suppresses normalized exact duplicate inserts/replacements as a successful no-op while preserving repetitions that were already present in the source draft.
  * v0.25.59 fixes the Narrative Archive embedding provider selector. The shared select callback passes both the mutable draft and selected value; provider defaults now consume that exact contract, retain every selected provider through rerender, and durably reload Voyage Context and its matching endpoint/model instead of collapsing unknown object input to OpenAI-compatible API.
+ * v0.25.61 parses RisuAI's leading @@ and fallback @@@ lore decorators before module/character lore activation. Decorator-only control entries are excluded instead of entering reranking or canonical reference packets, while entries with a real body retain their body and parsed activation metadata.
+ * v0.25.62 replaces the module lore card grid with a two-pane browser: entry-level lore controls on the left and active modules on the right. Selecting a module enables every usable entry by default; per-entry exclusions, select-all, and clear-all are durably stored without changing legacy module selections.
  * v0.25.60 adds explicit Story Arc cold-start maintenance shared by the Story Arc and Narrative Archive pages. “최근 완료 5턴으로 기준 생성” analyzes the latest complete canonical five-turn window even off-boundary, while the full cold start processes only missing canonical windows in chronological order, saves every successful window immediately to Narrative Archive, keeps the newest result as the active Story Arc, resumes after failure without repeating stored windows, and confirms the estimated Arc Director/document-embedding calls before execution.
  * v0.25.51 fixes copy/manual-send clipboard delivery in iframe/WebView runtimes. The copy action now runs inside the originating button click before any modal restore/hide await can consume transient user activation; it tries synchronous selection/execCommand first, then navigator.clipboard, records the method for diagnostics, and keeps the dialog open with the generated text selected when browser policy blocks automated copying.
  *
@@ -917,7 +920,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.60';
+  const PLUGIN_VERSION = '0.25.62';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -2298,6 +2301,7 @@
   };
 
   const normalizeExcludedHypaRecordIds = value => normalizeExcludedCharacterLoreIds(value);
+  const normalizeExcludedModuleLoreIds = value => normalizeExcludedCharacterLoreIds(value);
 
   const moduleSelectionKey = module => firstFilled(
     module?.id,
@@ -2311,6 +2315,20 @@
     moduleSelectionKey(module),
     ...identityValues(module)
   ].map(item => text(item || '').trim()).filter(Boolean)));
+
+  const moduleLoreEntrySelectionKey = (lore = {}, sourceMeta = {}) => {
+    const moduleKey = text(sourceMeta?.moduleKey || sourceMeta?.moduleId || sourceMeta?.moduleNamespace || sourceMeta?.moduleName || 'unknown-module').trim();
+    const moduleScope = createTextHasher().update(`module-lore-scope:${moduleKey}`).digest();
+    const explicit = firstFilled(lore?.id, lore?._id, lore?.uid, lore?.uuid);
+    if (explicit) return `module-lore:${moduleScope}:id:${explicit}`;
+    const signature = [
+      firstFilled(lore?.comment, lore?.name, lore?.displayName),
+      firstFilled(lore?.key, lore?.keys, lore?.keywords),
+      firstFilled(lore?.secondkey, lore?.secondKey, lore?.secondary_keys, lore?.secondaryKeys),
+      text(loreContent(lore)).trim()
+    ].join('\n');
+    return `module-lore:${moduleScope}:entry:${createTextHasher().update(signature).digest()}`;
+  };
 
   const moduleSelectedForLore = (module, selectedSet) => {
     if (!module || !(selectedSet instanceof Set) || selectedSet.size === 0) return false;
@@ -3277,7 +3295,7 @@
     'input_assist_target_chars', 'input_assist_confirmation_mode', 'input_assist_lore_activation_mode',
     'information_transfer_mode', 'nsfw_mode', 'nsfw_guidance_enabled', 'lore_activation_mode',
     'lore_reranker_top_k', 'skill_router_enabled', 'skill_router_top_k',
-    'skill_router_references', 'selected_module_lore_ids', 'excluded_character_lore_ids',
+    'skill_router_references', 'selected_module_lore_ids', 'excluded_module_lore_ids', 'excluded_character_lore_ids',
     'excluded_hypa_record_ids', 'aide_stage_order', 'enable_shadow_act',
     'enable_character_aide', 'enable_world_aide', 'enable_plot_aide', 'shadow_prompt_extra',
     'character_prompt_extra', 'world_prompt_extra', 'plot_prompt_extra', 'shadow_prompt_mode',
@@ -4970,7 +4988,7 @@ const narrativeEmbeddingStableHash = value => {
       backendHosting: 'backendHosting', backendHostingMode: 'backend_hosting_mode', backendHostingUrl: 'backend_hosting_url', backendHostingToken: 'backend_hosting_token', backendHostingAutoDetected: 'backend_hosting_auto_detected', backendHostingLastDetectedAt: 'backend_hosting_last_detected_at', backendHostingLastManifest: 'backend_hosting_last_manifest',
       writerEnabled: 'writer_enabled', writerReviewIntervalTurns: 'writer_review_interval_turns', writerMaxSourceChars: 'writer_max_source_chars',
       arcDirectorEnabled: 'arc_director_enabled', arcHorizonTurns: 'arc_horizon_turns', arcAutoReplan: 'arc_auto_replan', arcNoveltyLevel: 'arc_novelty_level',
-      selectedModuleLoreIds: 'selected_module_lore_ids',
+      selectedModuleLoreIds: 'selected_module_lore_ids', excludedModuleLoreIds: 'excluded_module_lore_ids',
       loreActivationMode: 'lore_activation_mode', loreRerankerTopK: 'lore_reranker_top_k', skillRouterEnabled: 'skill_router_enabled', skillRouterTopK: 'skill_router_top_k', skillRouterReferences: 'skill_router_references', skillCustomLibrary: 'skill_custom_library', skillPriorityOverrides: 'skill_priority_overrides',
       excludedCharacterLoreIds: 'excluded_character_lore_ids',
       excludedHypaRecordIds: 'excluded_hypa_record_ids'
@@ -9093,6 +9111,7 @@ ${JSON.stringify(previousArc.destination)}` : '',
       writerReviewIntervalTurns: clampInt(await runtimeCfg('writer_review_interval_turns', WRITER_DEFAULT_REVIEW_INTERVAL_TURNS), 1, 64, WRITER_DEFAULT_REVIEW_INTERVAL_TURNS),
       writerMaxSourceChars: clampInt(await runtimeCfg('writer_max_source_chars', WRITER_DEFAULT_MAX_SOURCE_CHARS), 6000, 100000, WRITER_DEFAULT_MAX_SOURCE_CHARS),
       selectedModuleLoreIds: normalizeSelectedModuleLoreIds(await runtimeCfg('selected_module_lore_ids', runtimeStored.selected_module_lore_ids || [])),
+      excludedModuleLoreIds: normalizeExcludedModuleLoreIds(await runtimeCfg('excluded_module_lore_ids', runtimeStored.excluded_module_lore_ids || [])),
       excludedCharacterLoreIds: normalizeExcludedCharacterLoreIds(await runtimeCfg('excluded_character_lore_ids', runtimeStored.excluded_character_lore_ids || [])),
       excludedHypaRecordIds: normalizeExcludedHypaRecordIds(await runtimeCfg('excluded_hypa_record_ids', runtimeStored.excluded_hypa_record_ids || [])),
       stagePresetNames: {
@@ -11719,6 +11738,115 @@ function mergeAgentCbsWarnings(...warningLists) {
     .map(part => part.trim())
     .filter(Boolean);
 
+  const applyRisuLoreDecorator = (meta, rawName, rawArgs = []) => {
+    const name = text(rawName).trim().toLowerCase();
+    const args = (Array.isArray(rawArgs) ? rawArgs : [rawArgs]).map(arg => text(arg).trim()).filter(Boolean);
+    const intArg = (fallback = 0) => {
+      const n = Number.parseInt(args[0], 10);
+      return Number.isFinite(n) ? n : fallback;
+    };
+    switch (name) {
+      case 'end':
+        meta.position = 'depth';
+        meta.depth = 0;
+        return true;
+      case 'depth':
+      case 'reverse_depth':
+        meta.position = name;
+        meta.depth = intArg(0);
+        return true;
+      case 'role':
+        if (['system', 'user', 'assistant'].includes(args[0])) meta.role = args[0];
+        return true;
+      case 'scan_depth':
+        meta.scanDepth = intArg(null);
+        return true;
+      case 'position':
+        meta.position = compact(args.join(' '), 80);
+        return true;
+      case 'additional_keys':
+        meta.additionalKeys.push(...splitLoreKeys(args));
+        return true;
+      case 'exclude_keys':
+        meta.excludeKeys.push(...splitLoreKeys(args));
+        return true;
+      case 'exclude_keys_all':
+        meta.excludeKeysAll.push(...splitLoreKeys(args));
+        return true;
+      case 'match_full_word':
+        meta.fullWordMatching = true;
+        return true;
+      case 'match_partial_word':
+        meta.fullWordMatching = false;
+        return true;
+      case 'activate':
+        meta.forceState = 'activate';
+        return true;
+      case 'dont_activate':
+        meta.forceState = 'deactivate';
+        return true;
+      case 'priority':
+        meta.priority = intArg(null);
+        return true;
+      case 'ignore_on_max_context':
+        meta.ignoreOnMaxContext = true;
+        meta.priority = -1000;
+        return true;
+      case 'recursive':
+        meta.recursive = true;
+        return true;
+      case 'unrecursive':
+        meta.recursive = false;
+        return true;
+      case 'no_recursive_search':
+        meta.dontSearchWhenRecursive = true;
+        return true;
+      case 'activate_only_after':
+        meta.activationMin = intArg(0);
+        return true;
+      case 'activate_only_every':
+        meta.activationEvery = intArg(0);
+        return true;
+      case 'inject_lore':
+        meta.inject = { operation: meta.inject?.operation || 'append', location: args.join(' '), param: meta.inject?.param || '', lore: true };
+        return true;
+      case 'inject_at':
+        meta.inject = { operation: meta.inject?.operation || 'append', location: args.join(' '), param: meta.inject?.param || '', lore: false };
+        return true;
+      case 'inject_replace':
+        meta.inject = { operation: 'replace', location: meta.inject?.location || '', param: args.join(' '), lore: meta.inject?.lore || false };
+        return true;
+      case 'inject_prepend':
+        meta.inject = { operation: 'prepend', location: meta.inject?.location || '', param: args.join(' '), lore: meta.inject?.lore || false };
+        return true;
+      case 'probability':
+        if (Math.random() * 100 > intArg(100)) meta.forceState = 'deactivate';
+        return true;
+      default:
+        return false;
+    }
+  };
+
+  // Match RisuAI/CCardLib's decorator.parse contract: only the leading
+  // decorator run is consumed, comma separates arguments, and @@@ lines are
+  // fallbacks that run only after an unknown @@ decorator. @@@end is special.
+  const parseRisuLineLoreDecorators = (content, onDecorator) => {
+    const lines = text(content || '').trim().split(/\r?\n/);
+    let useFallback = false;
+    for (let index = 0; index < lines.length; index += 1) {
+      let line = lines[index].trim();
+      if (line === '@@@end') line = '@@end';
+      if (!line.startsWith('@@')) return lines.slice(index).join('\n').trim();
+      if (line.startsWith('@@@') && !useFallback) continue;
+      const separator = line.indexOf(' ');
+      const end = separator === -1 ? line.length : separator;
+      const name = line.slice(line.startsWith('@@@') ? 3 : 2, end);
+      const args = line.slice(end).split(',').map(arg => arg.trim()).filter(Boolean);
+      useFallback = name ? onDecorator(name, args) === false : false;
+    }
+    return '';
+  };
+
   const parseRisuLoreDecorators = (content) => {
     const meta = {
       position: '',
@@ -11738,94 +11866,10 @@ function mergeAgentCbsWarnings(...warningLists) {
       inject: null,
       ignoreOnMaxContext: false
     };
-    const body = text(content || '').replace(/\{\{\s*([a-zA-Z_][\w-]*)(?:::([^{}]*))?\s*\}\}/g, (match, rawName, rawArgs = '') => {
-      const name = text(rawName).trim().toLowerCase();
-      const args = parseLoreDecoratorArgs(rawArgs);
-      const intArg = (fallback = 0) => {
-        const n = Number.parseInt(args[0], 10);
-        return Number.isFinite(n) ? n : fallback;
-      };
-      switch (name) {
-        case 'end':
-          meta.position = 'depth';
-          meta.depth = 0;
-          return '';
-        case 'depth':
-        case 'reverse_depth':
-          meta.position = name;
-          meta.depth = intArg(0);
-          return '';
-        case 'role':
-          if (['system', 'user', 'assistant'].includes(args[0])) meta.role = args[0];
-          return '';
-        case 'scan_depth':
-          meta.scanDepth = intArg(null);
-          return '';
-        case 'position':
-          meta.position = compact(args.join(' '), 80);
-          return '';
-        case 'additional_keys':
-          meta.additionalKeys.push(...splitLoreKeys(args));
-          return '';
-        case 'exclude_keys':
-          meta.excludeKeys.push(...splitLoreKeys(args));
-          return '';
-        case 'exclude_keys_all':
-          meta.excludeKeysAll.push(...splitLoreKeys(args));
-          return '';
-        case 'match_full_word':
-          meta.fullWordMatching = true;
-          return '';
-        case 'match_partial_word':
-          meta.fullWordMatching = false;
-          return '';
-        case 'activate':
-          meta.forceState = 'activate';
-          return '';
-        case 'dont_activate':
-          meta.forceState = 'deactivate';
-          return '';
-        case 'priority':
-          meta.priority = intArg(null);
-          return '';
-        case 'ignore_on_max_context':
-          meta.ignoreOnMaxContext = true;
-          meta.priority = -1000;
-          return '';
-        case 'recursive':
-          meta.recursive = true;
-          return '';
-        case 'unrecursive':
-          meta.recursive = false;
-          return '';
-        case 'no_recursive_search':
-          meta.dontSearchWhenRecursive = true;
-          return '';
-        case 'activate_only_after':
-          meta.activationMin = intArg(0);
-          return '';
-        case 'activate_only_every':
-          meta.activationEvery = intArg(0);
-          return '';
-        case 'inject_lore':
-          meta.inject = { operation: meta.inject?.operation || 'append', location: args.join(' '), param: meta.inject?.param || '', lore: true };
-          return '';
-        case 'inject_at':
-          meta.inject = { operation: meta.inject?.operation || 'append', location: args.join(' '), param: meta.inject?.param || '', lore: false };
-          return '';
-        case 'inject_replace':
-          meta.inject = { operation: 'replace', location: meta.inject?.location || '', param: args.join(' '), lore: meta.inject?.lore || false };
-          return '';
-        case 'inject_prepend':
-          meta.inject = { operation: 'prepend', location: meta.inject?.location || '', param: args.join(' '), lore: meta.inject?.lore || false };
-          return '';
-        case 'probability':
-          if (Math.random() * 100 > intArg(100)) meta.forceState = 'deactivate';
-          return '';
-        default:
-          return match;
-      }
-    }).replace(/\{\{\/\/[\s\S]*?\}\}/g, '').replace(/\{\{comment:[\s\S]*?\}\}/gi, '').trim();
+    const risuBody = parseRisuLineLoreDecorators(content, (name, args) => applyRisuLoreDecorator(meta, name, args));
+    const body = risuBody.replace(/\{\{\s*([a-zA-Z_][\w-]*)(?:::([^{}]*))?\s*\}\}/g, (match, rawName, rawArgs = '') => (
+      applyRisuLoreDecorator(meta, rawName, parseLoreDecoratorArgs(rawArgs)) ? '' : match
+    )).replace(/\{\{\/\/[\s\S]*?\}\}/g, '').replace(/\{\{comment:[\s\S]*?\}\}/gi, '').trim();
     meta.content = body;
     return meta;
   };
@@ -11882,14 +11926,15 @@ function mergeAgentCbsWarnings(...warningLists) {
       moduleName: text(sourceMeta?.moduleName || ''),
       moduleNamespace: text(sourceMeta?.moduleNamespace || ''),
       moduleKey: text(sourceMeta?.moduleKey || ''),
+      moduleLoreSelectionKey: sourceType === 'module' ? moduleLoreEntrySelectionKey(lore, sourceMeta) : '',
       characterLoreExclusionKey: text(sourceMeta?.characterLoreExclusionKey || ''),
-      content: decorator.content || content,
+      content: decorator.content,
       rawContent: content,
       key: keys.join(', '),
       keys,
       secondaryKeys,
       additionalKeys: decorator.additionalKeys,
-      hiddenKeys: extractLoreHiddenKeys(decorator.content || content),
+      hiddenKeys: extractLoreHiddenKeys(decorator.content),
       excludeKeys: decorator.excludeKeys,
       excludeKeysAll: decorator.excludeKeysAll,
       useRegex: lore?.useRegex === true || lore?.regex === true,
@@ -11969,15 +12014,36 @@ function mergeAgentCbsWarnings(...warningLists) {
     return identityValues(module).some(id => enabledRefs.has(id));
   };
 
-  const moduleLoreEntryCount = module => [
+  const moduleLoreSources = module => [
     module?.lore, module?.lorebook, module?.loreBook, module?.lorebooks, module?.entries,
     module?.data?.lore, module?.data?.lorebook, module?.data?.loreBook, module?.data?.lorebooks,
     module?.data?.characterBook?.entries, module?.data?.character_book?.entries,
     module?.extensions?.characterBook?.entries, module?.extensions?.character_book?.entries
-  ].reduce((count, source) => {
-    if (source && typeof source === 'object' && loreContent(source)) return count + (isLoreDisabled(source) ? 0 : 1);
-    return count + collectionFrom(source, 'module-lore-count').filter(item => !isLoreDisabled(item) && !!loreContent(item)).length;
-  }, 0);
+  ];
+
+  const selectableModuleLoreEntries = (module, sourceMeta = {}) => {
+    const entries = [];
+    const seen = new Set();
+    const add = (lore, label, sourceType, sourceOrder = 0, meta = {}) => {
+      if (!lore || isLoreDisabled(lore) || isLibraManagedLore(lore) || text(lore?.mode || '').toLowerCase() === 'child') return;
+      const candidate = normalizeLoreCandidate(lore, label, sourceType, sourceOrder, entries.length, meta);
+      if (!text(candidate.content).trim() || !candidate.moduleLoreSelectionKey || seen.has(candidate.moduleLoreSelectionKey)) return;
+      seen.add(candidate.moduleLoreSelectionKey);
+      entries.push({
+        key: candidate.moduleLoreSelectionKey,
+        id: candidate.id,
+        name: firstFilled(candidate.label, candidate.key, `로어 ${entries.length + 1}`),
+        activationKey: candidate.key,
+        alwaysActive: candidate.alwaysActive === true,
+        mode: candidate.mode || 'normal',
+        priority: candidate.priority,
+        position: candidate.position || '',
+        contentPreview: compact(text(candidate.content || '').replace(/\s+/g, ' '), 300)
+      });
+    };
+    moduleLoreSources(module).forEach((source, index) => addLoreCollection(add, source, sourceMeta.moduleName || 'module', 'module', index * 1000, sourceMeta));
+    return entries;
+  };
 
   const buildSelectableModuleCatalog = (db, character = null, currentChat = null, persona = null) => {
     const enabledRefs = enabledModuleReferenceSet(db, character, currentChat, persona);
@@ -11989,15 +12055,19 @@ function mergeAgentCbsWarnings(...warningLists) {
       if (!key || seen.has(key)) return;
       seen.add(key);
       const active = embedded || moduleIsEnabled(module, enabledRefs);
+      const name = firstFilled(module?.name, module?.displayName, module?.id, module?.namespace, embedded ? 'embedded' : 'unknown');
+      const sourceMeta = { moduleId: module?.id || '', moduleName: name, moduleNamespace: module?.namespace || '', moduleKey: key };
+      const loreEntries = selectableModuleLoreEntries(module, sourceMeta);
       catalog.push({
         key,
         id: text(module?.id || ''),
         namespace: text(module?.namespace || ''),
-        name: firstFilled(module?.name, module?.displayName, module?.id, module?.namespace, embedded ? 'embedded' : 'unknown'),
+        name,
         description: compact(module?.description || '', 260),
         active,
         embedded,
-        loreCount: moduleLoreEntryCount(module),
+        loreCount: loreEntries.length,
+        loreEntries,
         aliases: moduleSelectionAliases(module)
       });
     };
@@ -12029,6 +12099,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     const candidates = [];
     const seen = new Set();
     const selectedModules = new Set(normalizeSelectedModuleLoreIds(options.selectedModuleLoreIds));
+    const excludedModuleLore = new Set(normalizeExcludedModuleLoreIds(options.excludedModuleLoreIds));
     const excludedCharacterLore = new Set(normalizeExcludedCharacterLoreIds(options.excludedCharacterLoreIds));
     const chatSources = [
       currentChat?.localLore, currentChat?.globalLore, currentChat?.lore, currentChat?.lorebook, currentChat?.loreBook, currentChat?.lorebooks,
@@ -12059,17 +12130,20 @@ function mergeAgentCbsWarnings(...warningLists) {
         ? characterLoreExclusionKey(effectiveLore, character)
         : '';
       if (characterExclusionKey && excludedCharacterLore.has(characterExclusionKey)) return;
-      const dedupe = normalizeForLoreMatch(`${sourceType}\n${firstFilled(effectiveLore.comment, effectiveLore.name, label)}\n${firstFilled(effectiveLore.key, effectiveLore.keys, effectiveLore.keywords)}\n${content}`);
-      if (seen.has(dedupe)) return;
-      seen.add(dedupe);
-      candidates.push(normalizeLoreCandidate(
+      const candidate = normalizeLoreCandidate(
         effectiveLore,
         label,
         sourceType,
         sourceOrder,
         candidates.length,
         characterExclusionKey ? { ...sourceMeta, characterLoreExclusionKey: characterExclusionKey } : sourceMeta
-      ));
+      );
+      if (!text(candidate.content).trim()) return;
+      if (candidate.moduleLoreSelectionKey && excludedModuleLore.has(candidate.moduleLoreSelectionKey)) return;
+      const dedupe = normalizeForLoreMatch(`${sourceType}\n${firstFilled(effectiveLore.comment, effectiveLore.name, label)}\n${firstFilled(effectiveLore.key, effectiveLore.keys, effectiveLore.keywords)}\n${content}`);
+      if (seen.has(dedupe)) return;
+      seen.add(dedupe);
+      candidates.push(candidate);
     };
     const characterSources = [
       character?.globalLore, character?.lore, character?.lorebook, character?.loreBook, character?.lorebooks,
@@ -12093,12 +12167,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       const moduleName = firstFilled(module?.name, module?.displayName, module?.id, module?.namespace, 'unknown');
       const moduleLabel = `모듈 로어북: ${moduleName}`;
       const sourceMeta = { moduleId: module?.id || '', moduleName, moduleNamespace: module?.namespace || '', moduleKey };
-      [
-        module?.lore, module?.lorebook, module?.loreBook, module?.lorebooks, module?.entries,
-        module?.data?.lore, module?.data?.lorebook, module?.data?.loreBook, module?.data?.lorebooks,
-        module?.data?.characterBook?.entries, module?.data?.character_book?.entries,
-        module?.extensions?.characterBook?.entries, module?.extensions?.character_book?.entries
-      ].forEach((source, idx) => addLoreCollection(add, source, moduleLabel, 'module', idx * 1000, sourceMeta));
+      moduleLoreSources(module).forEach((source, idx) => addLoreCollection(add, source, moduleLabel, 'module', idx * 1000, sourceMeta));
     }
     [persona?.embeddedModule, ...(Array.isArray(persona?.embeddedModules) ? persona.embeddedModules : [])].filter(Boolean).forEach((module, moduleIndex) => {
       if (!moduleSelectedForLore(module, selectedModules)) return;
@@ -12106,12 +12175,12 @@ function mergeAgentCbsWarnings(...warningLists) {
       const moduleName = firstFilled(module?.name, module?.displayName, module?.id, 'embedded');
       const moduleLabel = `페르소나 내장 모듈 로어북: ${moduleName}`;
       const sourceMeta = { moduleId: module?.id || '', moduleName, moduleNamespace: module?.namespace || '', moduleKey };
-      [module?.lore, module?.lorebook, module?.loreBook, module?.lorebooks, module?.entries].forEach((source, idx) => addLoreCollection(add, source, moduleLabel, 'module', 900000 + moduleIndex * 1000 + idx, sourceMeta));
+      moduleLoreSources(module).forEach((source, idx) => addLoreCollection(add, source, moduleLabel, 'module', 900000 + moduleIndex * 1000 + idx, sourceMeta));
     });
     return candidates;
   };
 
-  const stripLoreDecorators = (content) => parseRisuLoreDecorators(content).content || text(content || '').trim();
+  const stripLoreDecorators = (content) => text(parseRisuLoreDecorators(content).content || '').trim();
 
   const loreSearchableMessage = (message) => {
     const data = normalizeForLoreMatch(message?.data || message?.content || '');
@@ -12511,6 +12580,7 @@ function mergeAgentCbsWarnings(...warningLists) {
 
   const risuStaticSettingsHash = (settings = {}) => stableDraftHash(JSON.stringify({
     selectedModuleLoreIds: normalizeSelectedModuleLoreIds(settings.selectedModuleLoreIds),
+    excludedModuleLoreIds: normalizeExcludedModuleLoreIds(settings.excludedModuleLoreIds),
     excludedCharacterLoreIds: normalizeExcludedCharacterLoreIds(settings.excludedCharacterLoreIds),
     excludedHypaRecordIds: normalizeExcludedHypaRecordIds(settings.excludedHypaRecordIds),
     loreActivationMode: normalizeLoreActivationMode(settings.loreActivationMode),
@@ -12534,6 +12604,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     const persona = selectedPersonaFromDb(db, chatInfo.chat);
     const candidates = collectRisuLorebookCandidates(character, db, chatInfo.chat, persona, {
       selectedModuleLoreIds: settings.selectedModuleLoreIds,
+      excludedModuleLoreIds: settings.excludedModuleLoreIds,
       excludedCharacterLoreIds: settings.excludedCharacterLoreIds
     });
     return {
@@ -12603,6 +12674,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     return {
       ...staticSource,
       selectedModuleLoreIds: normalizeSelectedModuleLoreIds(settings.selectedModuleLoreIds),
+      excludedModuleLoreIds: normalizeExcludedModuleLoreIds(settings.excludedModuleLoreIds),
       excludedCharacterLoreIds: normalizeExcludedCharacterLoreIds(settings.excludedCharacterLoreIds),
       excludedHypaRecordIds: normalizeExcludedHypaRecordIds(settings.excludedHypaRecordIds),
       candidates,
@@ -13994,6 +14066,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       mainLoreActivationMode: normalizeLoreActivationMode(settings?.loreActivationMode),
       inputAssistLoreActivationMode: normalizeInputAssistLoreActivationMode(settings?.inputAssistLoreActivationMode),
       selectedModuleLoreIds: normalizeSelectedModuleLoreIds(settings?.selectedModuleLoreIds),
+      excludedModuleLoreIds: normalizeExcludedModuleLoreIds(settings?.excludedModuleLoreIds),
       excludedCharacterLoreIds: normalizeExcludedCharacterLoreIds(settings?.excludedCharacterLoreIds),
       excludedHypaRecordIds: normalizeExcludedHypaRecordIds(settings?.excludedHypaRecordIds),
       characterSource: 'missing',
@@ -14433,6 +14506,7 @@ function mergeAgentCbsWarnings(...warningLists) {
         references: fallbackReferences,
         selection: {
           selectedModuleLoreIds: normalizeSelectedModuleLoreIds(settings.selectedModuleLoreIds),
+          excludedModuleLoreIds: normalizeExcludedModuleLoreIds(settings.excludedModuleLoreIds),
           excludedCharacterLoreIds: normalizeExcludedCharacterLoreIds(settings.excludedCharacterLoreIds),
           excludedHypaRecordIds: normalizeExcludedHypaRecordIds(settings.excludedHypaRecordIds),
           selectedIds: referencePacketBlock ? [`legacy-risu-context:${referencePacketHash}`] : [],
@@ -17458,6 +17532,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     allocated.selected.forEach(item => references[referenceGroupForItem(item)].push(item));
     const normalizedSelection = {
       selectedModuleLoreIds: normalizeSelectedModuleLoreIds(settings.selectedModuleLoreIds),
+      excludedModuleLoreIds: normalizeExcludedModuleLoreIds(settings.excludedModuleLoreIds),
       excludedCharacterLoreIds: normalizeExcludedCharacterLoreIds(settings.excludedCharacterLoreIds),
       excludedHypaRecordIds: normalizeExcludedHypaRecordIds(settings.excludedHypaRecordIds),
       selectedIds: candidateSelection.unique.map(item => item.id),
@@ -17470,6 +17545,7 @@ function mergeAgentCbsWarnings(...warningLists) {
         loreMode,
         references: candidateSelection.unique.map(item => [item.id, item.normalizedHash]),
         selectedModuleLoreIds: normalizedSelection.selectedModuleLoreIds,
+        excludedModuleLoreIds: normalizedSelection.excludedModuleLoreIds,
         excludedCharacterLoreIds: normalizedSelection.excludedCharacterLoreIds,
         excludedHypaRecordIds: normalizedSelection.excludedHypaRecordIds
       }))
@@ -17478,6 +17554,12 @@ function mergeAgentCbsWarnings(...warningLists) {
       .update(stableReferenceJson(allocated.selected.map(item => [item.id, item.normalizedHash, item.chars])))
       .digest();
     const userExclusionOmissions = [
+      ...normalizedSelection.excludedModuleLoreIds.map(id => ({
+        id,
+        sourceType: 'lore',
+        chars: 0,
+        reason: 'excluded_by_user'
+      })),
       ...normalizedSelection.excludedCharacterLoreIds.map(id => ({
         id,
         sourceType: 'lore',
@@ -29073,6 +29155,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       writerReviewIntervalTurns: settings?.writerReviewIntervalTurns,
       writerMaxSourceChars: settings?.writerMaxSourceChars,
       selectedModuleLoreIds: normalizeSelectedModuleLoreIds(settings?.selectedModuleLoreIds),
+      excludedModuleLoreIds: normalizeExcludedModuleLoreIds(settings?.excludedModuleLoreIds),
       excludedCharacterLoreIds: normalizeExcludedCharacterLoreIds(settings?.excludedCharacterLoreIds),
       excludedHypaRecordIds: normalizeExcludedHypaRecordIds(settings?.excludedHypaRecordIds),
       aideStageOrder: settings?.aideStageOrder,
@@ -30259,6 +30342,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
     scrollState: null,
     inputRenderTimer: null,
     moduleCatalog: [],
+    moduleCatalogFocusedKey: '',
     moduleCatalogLoading: false,
     moduleCatalogError: '',
     moduleCatalogLoadedAt: 0,
@@ -30505,7 +30589,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
     if (/writingMode|novelShadowDraftMode/.test(path)) return '작성 모드';
     if (/^agents\.|^prompts\.|aideStageOrder|multiPipelineMode|shadowDraftMode/.test(path)) return '초안 파이프라인';
     if (/skillRouter|skillCustomLibrary|skillPriorityOverrides/.test(path)) return 'Skill';
-    if (/selectedModuleLoreIds|excludedCharacterLoreIds|excludedHypaRecordIds|loreActivationMode|loreRerankerTopK/.test(path)) return '참고 자료';
+    if (/selectedModuleLoreIds|excludedModuleLoreIds|excludedCharacterLoreIds|excludedHypaRecordIds|loreActivationMode|loreRerankerTopK/.test(path)) return '참고 자료';
     if (/informationTransferMode|outputMode/.test(path)) return '정보 전달과 메인 응답';
     if (/nsfw/.test(path)) return '응답 옵션';
     if (/quickProfile|targetDraft|internalDraftLanguage/.test(path)) return '빠른 설정';
@@ -30621,6 +30705,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
     writerReviewIntervalTurns: settings.writerReviewIntervalTurns || WRITER_DEFAULT_REVIEW_INTERVAL_TURNS,
     writerMaxSourceChars: settings.writerMaxSourceChars || WRITER_DEFAULT_MAX_SOURCE_CHARS,
     selectedModuleLoreIds: normalizeSelectedModuleLoreIds(settings.selectedModuleLoreIds),
+    excludedModuleLoreIds: normalizeExcludedModuleLoreIds(settings.excludedModuleLoreIds),
     excludedCharacterLoreIds: normalizeExcludedCharacterLoreIds(settings.excludedCharacterLoreIds),
     excludedHypaRecordIds: normalizeExcludedHypaRecordIds(settings.excludedHypaRecordIds),
     targetDraftMinChars: settings.targetDraftMinChars,
@@ -30810,6 +30895,12 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       const persona = selectedPersonaFromDb(db || {}, chatInfo.chat);
       if (discardWhenStale && (requestEpoch !== Gui.renderEpoch || Gui.pageId !== 'references' || Gui.pageSubview !== 'modules')) return Gui.moduleCatalog;
       Gui.moduleCatalog = buildSelectableModuleCatalog(db || {}, character, chatInfo.chat, persona);
+      const activeModules = Gui.moduleCatalog.filter(item => item.active && item.loreCount > 0);
+      if (!activeModules.some(item => item.key === Gui.moduleCatalogFocusedKey)) {
+        const selected = new Set(normalizeSelectedModuleLoreIds(Gui.state?.runtime?.selectedModuleLoreIds));
+        const preferred = activeModules.find(item => selected.has(item.key) || (item.aliases || []).some(alias => selected.has(alias))) || activeModules[0];
+        Gui.moduleCatalogFocusedKey = preferred?.key || '';
+      }
       Gui.moduleCatalogLoadedAt = Date.now();
       return Gui.moduleCatalog;
     } catch (error) {
@@ -31614,6 +31705,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
         writer_review_interval_turns: String(runtime.writerReviewIntervalTurns || WRITER_DEFAULT_REVIEW_INTERVAL_TURNS),
         writer_max_source_chars: String(runtime.writerMaxSourceChars || WRITER_DEFAULT_MAX_SOURCE_CHARS),
         selected_module_lore_ids: JSON.stringify(normalizeSelectedModuleLoreIds(runtime.selectedModuleLoreIds)),
+        excluded_module_lore_ids: JSON.stringify(normalizeExcludedModuleLoreIds(runtime.excludedModuleLoreIds)),
         excluded_character_lore_ids: JSON.stringify(normalizeExcludedCharacterLoreIds(runtime.excludedCharacterLoreIds)),
         excluded_hypa_record_ids: JSON.stringify(normalizeExcludedHypaRecordIds(runtime.excludedHypaRecordIds)),
         target_draft_min_chars: String(runtime.targetDraftMinChars || DEFAULT_TARGET_DRAFT_MIN_CHARS),
@@ -31793,7 +31885,9 @@ html{scroll-behavior:smooth}
 html{scroll-behavior:smooth}
 @media(max-width:900px){.sga-grid,.sga-grid.three,.sga-row3,.sga-row4,.sga-reference-grid,.sga-main-response-grid,.sga-glance-grid{grid-template-columns:1fr}.sga-stage-primary{grid-template-columns:1fr}.sga-stage-primary>.sga-check{padding-top:0}.sga-flow-overview{grid-template-columns:repeat(9,135px)}.sga-split{grid-template-columns:1fr}.sga-row2{grid-template-columns:1fr}.sga-top{align-items:flex-start;padding:18px}.sga-tabs{top:112px;padding:10px 18px}.sga-main{padding:18px 18px 72px}.sga-flow-node{min-width:135px}.sga-tabs .sga-tab{padding:8px 12px;font-size:11px}.sga-tab .sga-tab-full{display:none}.sga-tab .sga-tab-short{display:inline}.sga-phase-label .sga-phase-sub{display:none}.sga-brand h1{font-size:21px}.sga-brand p{font-size:11px}}
 @media(max-width:560px){.sga-provider-panel-head{flex-direction:column}.sga-brand h1{font-size:18px}.sga-brand p{font-size:10px}.sga-head-actions{flex-wrap:wrap}.sga-summary-pill{font-size:10px;padding:4px 7px}.sga-quicknav{overflow:auto;flex-wrap:nowrap;padding-bottom:2px}.sga-order-item{grid-template-columns:32px minmax(0,1fr)}.sga-order-actions{grid-column:1/-1;justify-content:flex-end}.sga-order-copy span{white-space:normal}.sga-stage-result-body{grid-template-columns:minmax(0,1fr)}}
-@media(max-width:720px){.sga-module-lore-grid{grid-template-columns:minmax(0,1fr);max-height:520px}.sga-module-lore-item{min-height:0;padding:14px}.sga-module-lore-head{gap:8px}.sga-module-lore-meta>span{white-space:normal}}
+.sga-module-lore-browser{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(250px,.75fr);gap:14px;margin-top:14px;min-width:0}.sga-module-browser-pane{min-width:0;border:1px solid rgba(124,156,255,.16);border-radius:16px;background:rgba(7,12,21,.72);overflow:hidden}.sga-module-browser-title{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:13px 14px;border-bottom:1px solid rgba(124,156,255,.14);background:rgba(124,156,255,.045)}.sga-module-browser-title strong{color:#eef2ff;font-size:13px}.sga-module-browser-title span{color:var(--sga-muted);font-size:10px}.sga-module-entry-toolbar{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:10px 12px;border-bottom:1px solid rgba(124,156,255,.1)}.sga-module-entry-list,.sga-module-list{display:flex;flex-direction:column;gap:7px;max-height:540px;overflow:auto;padding:10px;scrollbar-width:thin}.sga-module-entry-item,.sga-module-list-row{display:grid;grid-template-columns:22px minmax(0,1fr);gap:10px;align-items:start;padding:11px 12px;border:1px solid rgba(124,156,255,.14);border-radius:12px;background:rgba(10,17,29,.78);transition:border-color .16s ease,background .16s ease}.sga-module-entry-item:hover,.sga-module-list-row:hover{border-color:rgba(124,156,255,.38);background:rgba(20,30,52,.76)}.sga-module-entry-item.selected,.sga-module-list-row.selected{border-color:rgba(74,222,128,.42);background:rgba(22,56,43,.32)}.sga-module-list-row.focused{box-shadow:inset 0 0 0 1px rgba(124,156,255,.58)}.sga-module-entry-item.disabled{opacity:.55}.sga-module-list-copy,.sga-module-entry-copy{display:flex;flex-direction:column;gap:5px;min-width:0;cursor:pointer}.sga-module-list-head,.sga-module-entry-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.sga-module-list-head strong,.sga-module-entry-head strong{min-width:0;color:#eef2ff;font-size:12px;line-height:1.4;overflow-wrap:anywhere}.sga-module-entry-preview,.sga-module-list-description{margin:0;color:var(--sga-muted);font-size:10px;line-height:1.5;overflow-wrap:anywhere}.sga-module-entry-meta,.sga-module-list-meta{display:flex;gap:5px;flex-wrap:wrap;color:#aebbd0;font-size:9px}.sga-module-browser-empty{padding:18px;color:var(--sga-muted);font-size:11px;line-height:1.6;text-align:center}
+.sga-module-list-copy{border:0;background:transparent;padding:0;text-align:left;color:inherit;font:inherit;width:100%}
+@media(max-width:720px){.sga-module-lore-grid{grid-template-columns:minmax(0,1fr);max-height:520px}.sga-module-lore-item{min-height:0;padding:14px}.sga-module-lore-head{gap:8px}.sga-module-lore-meta>span{white-space:normal}.sga-module-lore-browser{grid-template-columns:minmax(0,1fr)}.sga-module-browser-modules{order:-1}.sga-module-entry-list,.sga-module-list{max-height:420px}}
 
 /* v0.12.4 full dashboard shell */
 #sga-rp-gui-root{padding:1px;background:transparent}
@@ -35946,46 +36040,128 @@ html,body{width:100%;height:100%;overflow:hidden}
     runtime.loreActivationMode = loreActivationMode;
     const selectedIds = normalizeSelectedModuleLoreIds(runtime.selectedModuleLoreIds);
     runtime.selectedModuleLoreIds = selectedIds;
+    const excludedIds = normalizeExcludedModuleLoreIds(runtime.excludedModuleLoreIds);
+    runtime.excludedModuleLoreIds = excludedIds;
     const selected = new Set(selectedIds);
+    const excluded = new Set(excludedIds);
     const catalog = Array.isArray(Gui.moduleCatalog) ? Gui.moduleCatalog : [];
     const activeModules = catalog.filter(item => item.active && item.loreCount > 0);
     const matchedKeys = new Set(catalog.flatMap(item => item.aliases || [item.key]).filter(Boolean));
     const unavailableSelected = selectedIds.filter(key => !matchedKeys.has(key));
-    const setSelected = (item, checked) => {
+    const moduleIsSelected = item => selected.has(item.key) || (item.aliases || []).some(alias => selected.has(alias));
+    if (!activeModules.some(item => item.key === Gui.moduleCatalogFocusedKey)) Gui.moduleCatalogFocusedKey = activeModules.find(moduleIsSelected)?.key || activeModules[0]?.key || '';
+    const focusedModule = activeModules.find(item => item.key === Gui.moduleCatalogFocusedKey) || null;
+    const setFocused = item => {
+      Gui.moduleCatalogFocusedKey = item?.key || '';
+      renderSettingsGui();
+    };
+    const setModuleSelected = (item, checked) => {
       const next = new Set(normalizeSelectedModuleLoreIds(runtime.selectedModuleLoreIds));
+      const nextExcluded = new Set(normalizeExcludedModuleLoreIds(runtime.excludedModuleLoreIds));
       const aliases = Array.from(new Set([item.key, ...(item.aliases || [])].filter(Boolean)));
       aliases.forEach(alias => next.delete(alias));
       if (checked) next.add(item.key);
+      (item.loreEntries || []).forEach(entry => nextExcluded.delete(entry.key));
       runtime.selectedModuleLoreIds = Array.from(next);
+      runtime.excludedModuleLoreIds = Array.from(nextExcluded);
+      Gui.moduleCatalogFocusedKey = item.key;
       markGuiDirty();
       renderSettingsGui();
     };
-    const rows = activeModules.map(item => {
-      const checked = selected.has(item.key) || (item.aliases || []).some(alias => selected.has(alias));
-      return guiEl('label', {
-        class: `sga-module-lore-item${checked ? ' selected' : ''}`,
-        title: item.description || item.name
+    const setEntrySelected = (entry, checked) => {
+      const next = new Set(normalizeExcludedModuleLoreIds(runtime.excludedModuleLoreIds));
+      if (checked) next.delete(entry.key);
+      else next.add(entry.key);
+      runtime.excludedModuleLoreIds = Array.from(next);
+      markGuiDirty();
+      renderSettingsGui();
+    };
+    const setAllFocusedEntries = checked => {
+      if (!focusedModule || !moduleIsSelected(focusedModule)) return;
+      const next = new Set(normalizeExcludedModuleLoreIds(runtime.excludedModuleLoreIds));
+      (focusedModule.loreEntries || []).forEach(entry => checked ? next.delete(entry.key) : next.add(entry.key));
+      runtime.excludedModuleLoreIds = Array.from(next);
+      markGuiDirty();
+      renderSettingsGui();
+    };
+    const setAllModules = checked => {
+      const activeEntryKeys = activeModules.flatMap(item => (item.loreEntries || []).map(entry => entry.key));
+      const nextExcluded = new Set(normalizeExcludedModuleLoreIds(runtime.excludedModuleLoreIds));
+      activeEntryKeys.forEach(key => nextExcluded.delete(key));
+      runtime.selectedModuleLoreIds = checked ? activeModules.map(item => item.key) : [];
+      runtime.excludedModuleLoreIds = Array.from(nextExcluded);
+      if (!Gui.moduleCatalogFocusedKey && activeModules[0]) Gui.moduleCatalogFocusedKey = activeModules[0].key;
+      markGuiDirty();
+      renderSettingsGui();
+    };
+    const moduleRows = activeModules.map(item => {
+      const checked = moduleIsSelected(item);
+      const enabledEntries = checked ? (item.loreEntries || []).filter(entry => !excluded.has(entry.key)).length : 0;
+      const focused = item.key === Gui.moduleCatalogFocusedKey;
+      return guiEl('div', {
+        class: `sga-module-list-row${checked ? ' selected' : ''}${focused ? ' focused' : ''}`,
+        title: item.description || item.name,
+        'data-module-lore-module': item.key
       }, [
         guiEl('input', {
           class: 'sga-module-lore-check',
           type: 'checkbox',
           checked,
+          'data-module-lore-module-toggle': item.key,
           'aria-label': `${item.name} 모듈 로어북 선택`,
-          onChange: event => setSelected(item, event.target.checked)
+          onChange: event => setModuleSelected(item, event.target.checked)
         }),
-        guiEl('div', { class: 'sga-module-lore-copy' }, [
-          guiEl('div', { class: 'sga-module-lore-head' }, [
+        guiEl('button', {
+          class: 'sga-module-list-copy',
+          type: 'button',
+          'data-module-lore-module-focus': item.key,
+          onClick: () => setFocused(item)
+        }, [
+          guiEl('div', { class: 'sga-module-list-head' }, [
             guiEl('strong', { text: item.name }),
-            guiEl('span', { class: 'sga-badge good', text: '활성' })
+            guiEl('span', { class: `sga-badge ${checked ? 'good' : 'off'}`, text: checked ? `${enabledEntries}/${item.loreCount}` : '미선택' })
           ]),
-          guiEl('div', { class: 'sga-module-lore-meta' }, [
+          guiEl('div', { class: 'sga-module-list-meta' }, [
             guiEl('span', { text: `로어 ${item.loreCount}개` }),
-            item.namespace ? guiEl('span', { text: `namespace · ${item.namespace}` }) : null,
+            item.namespace ? guiEl('span', { text: item.namespace }) : null,
             item.embedded ? guiEl('span', { text: '페르소나 내장' }) : null
           ]),
           item.description
-            ? guiEl('p', { class: 'sga-module-lore-description', text: item.description })
-            : guiEl('p', { class: 'sga-module-lore-description empty', text: '설명 없음' })
+            ? guiEl('p', { class: 'sga-module-list-description', text: item.description })
+            : null
+        ])
+      ]);
+    });
+    const focusedSelected = !!focusedModule && moduleIsSelected(focusedModule);
+    const focusedEntries = focusedModule?.loreEntries || [];
+    const enabledFocusedCount = focusedSelected ? focusedEntries.filter(entry => !excluded.has(entry.key)).length : 0;
+    const entryRows = focusedEntries.map(entry => {
+      const checked = focusedSelected && !excluded.has(entry.key);
+      return guiEl('label', {
+        class: `sga-module-entry-item${checked ? ' selected' : ''}${focusedSelected ? '' : ' disabled'}`,
+        title: entry.contentPreview || entry.name,
+        'data-module-lore-entry': entry.key
+      }, [
+        guiEl('input', {
+          class: 'sga-module-lore-check',
+          type: 'checkbox',
+          checked,
+          disabled: !focusedSelected,
+          'data-module-lore-entry-toggle': entry.key,
+          'aria-label': `${entry.name} 로어 선택`,
+          onChange: event => setEntrySelected(entry, event.target.checked)
+        }),
+        guiEl('div', { class: 'sga-module-entry-copy' }, [
+          guiEl('div', { class: 'sga-module-entry-head' }, [
+            guiEl('strong', { text: entry.name }),
+            entry.alwaysActive ? guiEl('span', { class: 'sga-badge good', text: '상시' }) : null
+          ]),
+          guiEl('div', { class: 'sga-module-entry-meta' }, [
+            entry.activationKey ? guiEl('span', { text: `키 · ${entry.activationKey}` }) : guiEl('span', { text: '활성화 키 없음' }),
+            Number.isFinite(Number(entry.priority)) ? guiEl('span', { text: `우선순위 ${entry.priority}` }) : null,
+            entry.position ? guiEl('span', { text: entry.position }) : null
+          ]),
+          guiEl('p', { class: 'sga-module-entry-preview', text: entry.contentPreview || '본문 미리보기 없음' })
         ])
       ]);
     });
@@ -35993,7 +36169,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       guiEl('div', { class: 'sga-agent-head' }, [
         guiEl('div', {}, [
           guiEl('h3', { text: '모듈 로어북 선택' }),
-          guiEl('div', { class: 'sga-note', text: '여기서 선택한 활성 모듈만 GRADIA의 비공개 로어 후보로 읽습니다. 선택되지 않은 모듈은 후보 수집 단계에서부터 건너뜁니다.' })
+          guiEl('div', { class: 'sga-note', text: '오른쪽에서 활성 모듈을 고르고, 왼쪽에서 그 안의 로어를 확인하거나 개별 해제합니다. 모듈을 새로 선택하면 내부 로어는 모두 선택됩니다.' })
         ]),
         guiEl('span', { class: `sga-badge ${selectedIds.length ? 'good' : 'off'}`, text: `${selectedIds.length}개 선택` })
       ]),
@@ -36015,16 +36191,37 @@ html,body{width:100%;height:100%;overflow:hidden}
           ? 'RisuAI 호환 판정은 설정된 검색 깊이의 최근 사용자·AI 메시지와 재귀 로어에서 활성화 키를 찾고, 우선순위와 토큰 예산을 적용합니다.'
           : '이번 메인 요청에 RisuAI가 실제로 넣은 로어만 내부에서 채택합니다. 인풋 관리자는 자체 설정에서 RisuAI식 또는 GRADIA식을 별도로 선택합니다.' }),
       guiEl('div', { class: 'sga-actions', style: { marginTop: '10px' } }, [
-        guiEl('button', { class: 'sga-btn', text: '활성 모듈 모두 선택', disabled: !activeModules.length, onClick: () => { runtime.selectedModuleLoreIds = activeModules.map(item => item.key); markGuiDirty(); renderSettingsGui(); } }),
-        guiEl('button', { class: 'sga-btn danger', text: '선택 전부 해제', disabled: !selectedIds.length, onClick: () => { runtime.selectedModuleLoreIds = []; markGuiDirty(); renderSettingsGui(); } }),
+        guiEl('button', { class: 'sga-btn', text: '활성 모듈 전체 선택', disabled: !activeModules.length, onClick: () => setAllModules(true) }),
+        guiEl('button', { class: 'sga-btn danger', text: '모듈 선택 전체 해제', disabled: !selectedIds.length, onClick: () => setAllModules(false) }),
         guiEl('button', { class: 'sga-btn ghost', text: Gui.moduleCatalogLoading ? '불러오는 중…' : '모듈 목록 새로고침', disabled: Gui.moduleCatalogLoading, onClick: () => { void refreshModuleLoreCatalog(true); } })
       ]),
       Gui.moduleCatalogLoading ? guiEl('div', { class: 'sga-callout', text: 'RisuAI의 모듈 목록을 불러오고 있습니다.' }) : null,
       Gui.moduleCatalogError ? guiEl('div', { class: 'sga-callout danger', text: `모듈 목록을 불러오지 못했습니다: ${Gui.moduleCatalogError}` }) : null,
       !Gui.moduleCatalogLoading && !activeModules.length ? guiEl('div', { class: 'sga-callout', text: '현재 활성 상태이며 로어북을 가진 모듈이 없습니다.' }) : null,
-      rows.length ? guiEl('div', { class: 'sga-module-lore-grid' }, rows) : null,
+      activeModules.length ? guiEl('div', { class: 'sga-module-lore-browser', 'data-module-lore-browser': '' }, [
+        guiEl('section', { class: 'sga-module-browser-pane', 'data-module-lore-entries-pane': '' }, [
+          guiEl('div', { class: 'sga-module-browser-title' }, [
+            guiEl('strong', { text: focusedModule ? focusedModule.name : '내부 로어북' }),
+            guiEl('span', { text: focusedModule ? (focusedSelected ? `${enabledFocusedCount}/${focusedEntries.length}개 선택` : '모듈 미선택') : '모듈을 선택하세요' })
+          ]),
+          guiEl('div', { class: 'sga-module-entry-toolbar' }, [
+            guiEl('button', { class: 'sga-btn', text: '로어 전체 선택', 'data-module-lore-select-all': '', disabled: !focusedSelected || !focusedEntries.length || enabledFocusedCount === focusedEntries.length, onClick: () => setAllFocusedEntries(true) }),
+            guiEl('button', { class: 'sga-btn danger', text: '로어 전체 해제', 'data-module-lore-clear-all': '', disabled: !focusedSelected || !enabledFocusedCount, onClick: () => setAllFocusedEntries(false) })
+          ]),
+          entryRows.length
+            ? guiEl('div', { class: 'sga-module-entry-list' }, entryRows)
+            : guiEl('div', { class: 'sga-module-browser-empty', text: focusedModule ? '표시할 로어가 없습니다.' : '오른쪽 목록에서 모듈을 선택하면 내부 로어가 여기에 표시됩니다.' })
+        ]),
+        guiEl('section', { class: 'sga-module-browser-pane sga-module-browser-modules', 'data-module-lore-modules-pane': '' }, [
+          guiEl('div', { class: 'sga-module-browser-title' }, [
+            guiEl('strong', { text: '활성 모듈' }),
+            guiEl('span', { text: `${activeModules.length}개` })
+          ]),
+          guiEl('div', { class: 'sga-module-list' }, moduleRows)
+        ])
+      ]) : null,
       unavailableSelected.length ? guiEl('div', { class: 'sga-note', text: `현재 찾을 수 없거나 비활성인 선택값: ${unavailableSelected.join(', ')}. 이 값들은 실행 시 읽지 않습니다.` }) : null,
-      guiEl('div', { class: 'sga-note', text: 'SHADOW ACT의 “선택한 모듈 로어북”이 켜져 있을 때 이 목록은 공통 후보 풀에 들어갑니다. 실제 전달 항목은 SHADOW ACT·인물·세계관·플롯 리랭커가 각자 관련도 순으로 최대 8개까지 고릅니다.' })
+      guiEl('div', { class: 'sga-note', text: '개별 해제한 로어는 후보 수집 단계에서 제외됩니다. 남은 항목 중 실제 전달 항목은 SHADOW ACT·인물·세계관·플롯 리랭커가 관련도 순으로 고릅니다.' })
     ]);
   };
 
@@ -36266,6 +36463,8 @@ html,body{width:100%;height:100%;overflow:hidden}
       arcAutoReplan: true,
       arcNoveltyLevel: normalizeChoice(pick('arc_novelty_level', 'arcNoveltyLevel', current.arcNoveltyLevel || 'medium'), ARC_NOVELTY_LEVELS, 'medium'),
       loreActivationMode: normalizeLoreActivationMode(pick('lore_activation_mode', 'loreActivationMode', current.loreActivationMode || DEFAULT_LORE_ACTIVATION_MODE)),
+      selectedModuleLoreIds: normalizeSelectedModuleLoreIds(pick('selected_module_lore_ids', 'selectedModuleLoreIds', current.selectedModuleLoreIds || [])),
+      excludedModuleLoreIds: normalizeExcludedModuleLoreIds(pick('excluded_module_lore_ids', 'excludedModuleLoreIds', current.excludedModuleLoreIds || [])),
       excludedCharacterLoreIds: normalizeExcludedCharacterLoreIds(pick('excluded_character_lore_ids', 'excludedCharacterLoreIds', current.excludedCharacterLoreIds || [])),
       excludedHypaRecordIds: normalizeExcludedHypaRecordIds(pick('excluded_hypa_record_ids', 'excludedHypaRecordIds', current.excludedHypaRecordIds || [])),
       builtInStylePreset: normalizeBuiltInStylePreset(pick('built_in_style_preset', 'builtInStylePreset', current.builtInStylePreset || 'unified_stylepack')),
@@ -39927,6 +40126,7 @@ const buildNarrativeArchiveViewerPage = () => {
       )));
     },
     getSelectedModuleLoreIds() { return normalizeSelectedModuleLoreIds(Runtime.settings?.selectedModuleLoreIds || Gui.state?.runtime?.selectedModuleLoreIds); },
+    getExcludedModuleLoreIds() { return normalizeExcludedModuleLoreIds(Runtime.settings?.excludedModuleLoreIds || Gui.state?.runtime?.excludedModuleLoreIds); },
     async listSelectableModuleLorebooks() { await refreshModuleLoreCatalog(true); return JSON.parse(JSON.stringify(Gui.moduleCatalog || [])); },
     getExcludedCharacterLoreIds() {
       return normalizeExcludedCharacterLoreIds(Runtime.settings?.excludedCharacterLoreIds || Gui.state?.runtime?.excludedCharacterLoreIds);
@@ -39942,12 +40142,12 @@ const buildNarrativeArchiveViewerPage = () => {
       await refreshHypaV3Catalog(true);
       return JSON.parse(JSON.stringify(Gui.hypaCatalog || []));
     },
-    debugFilterModuleLorebooks(character = {}, db = {}, chat = {}, persona = null, selectedIds = []) {
-      return collectRisuLorebookCandidates(character, db, chat, persona, { selectedModuleLoreIds: selectedIds })
+    debugFilterModuleLorebooks(character = {}, db = {}, chat = {}, persona = null, selectedIds = [], excludedModuleLoreIds = []) {
+      return collectRisuLorebookCandidates(character, db, chat, persona, { selectedModuleLoreIds: selectedIds, excludedModuleLoreIds })
         .filter(item => item.sourceType === 'module')
-        .map(item => ({ id: item.id, label: item.label, moduleKey: item.moduleKey, moduleName: item.moduleName, content: item.content }));
+        .map(item => ({ id: item.id, label: item.label, moduleKey: item.moduleKey, moduleName: item.moduleName, moduleLoreSelectionKey: item.moduleLoreSelectionKey, content: item.content }));
     },
-    debugCollectLoreCandidates(character = {}, db = {}, chat = {}, persona = null, selectedIds = [], excludedCharacterLoreIds = []) {
+    debugCollectLoreCandidates(character = {}, db = {}, chat = {}, persona = null, selectedIds = [], excludedCharacterLoreIds = [], excludedModuleLoreIds = []) {
       return JSON.parse(JSON.stringify(collectRisuLorebookCandidates(
         character,
         db,
@@ -39955,6 +40155,7 @@ const buildNarrativeArchiveViewerPage = () => {
         persona,
         {
           selectedModuleLoreIds: selectedIds,
+          excludedModuleLoreIds,
           excludedCharacterLoreIds
         }
       )));
