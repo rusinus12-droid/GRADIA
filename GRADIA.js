@@ -1,7 +1,7 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.64
+//@display-name GRADIA v0.25.65
 //@api 3.0
-//@version 0.25.64
+//@version 0.25.65
 
 /* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
 //@allowed-ipc flashback_hayaku_bridge
@@ -833,6 +833,7 @@
  * v0.25.62 replaces the module lore card grid with a two-pane browser: entry-level lore controls on the left and active modules on the right. Selecting a module enables every usable entry by default; per-entry exclusions, select-all, and clear-all are durably stored without changing legacy module selections.
  * v0.25.63 repairs condition-gated module lore delivery without assuming access to RisuAI's private global toggle store. Host-formatted request evidence recovers the exact non-empty CBS branch, independent activation drops unresolved or false empty bodies before reranking, and lore diagnostics distinguish source, rendered, and retrieved character counts.
  * v0.25.64 matches RisuAI's moduleIntergration contract by splitting comma-delimited module references before module-lore filtering, while retaining legacy array and object forms.
+ * v0.25.65 fixes reasoning-output budgeting and GLM/Z.ai thinking recovery. Reasoning-enabled stage calls reserve visible-output headroom instead of reusing the prose-only budget, explicit GLM thinking-off settings now emit `thinking.type=disabled`, and thinking-only length recovery expands the completion budget while sending a real GLM disable payload instead of omitting it.
  * v0.25.60 adds explicit Story Arc cold-start maintenance shared by the Story Arc and Narrative Archive pages. “최근 완료 5턴으로 기준 생성” analyzes the latest complete canonical five-turn window even off-boundary, while the full cold start processes only missing canonical windows in chronological order, saves every successful window immediately to Narrative Archive, keeps the newest result as the active Story Arc, resumes after failure without repeating stored windows, and confirms the estimated Arc Director/document-embedding calls before execution.
  * v0.25.51 fixes copy/manual-send clipboard delivery in iframe/WebView runtimes. The copy action now runs inside the originating button click before any modal restore/hide await can consume transient user activation; it tries synchronous selection/execCommand first, then navigator.clipboard, records the method for diagnostics, and keeps the dialog open with the generated text selected when browser policy blocks automated copying.
  *
@@ -922,7 +923,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.64';
+  const PLUGIN_VERSION = '0.25.65';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -2977,7 +2978,7 @@
     const reasoningAllowed = !explicitlyDisabled && !toggleDisabled && reasoningRequested;
     const minimumVisibleTokens = Math.min(providerMaxTokens, Math.max(128, Math.ceil(providerMaxTokens * 0.35)));
     const reasoningBudgetTokens = reasoningAllowed ? (requestedReasoningBudget === -1 ? -1 : Math.min(requestedReasoningBudget, Math.max(0, providerMaxTokens - minimumVisibleTokens))) : 0;
-    const transformActive = requestDisablesReasoning || !['auto','off','custom'].includes(configuredPreset) || reasoningAllowed;
+    const transformActive = requestDisablesReasoning || toggleDisabled || !['auto','off','custom'].includes(configuredPreset) || reasoningAllowed;
     return Object.freeze({ requestedTokens: requested, configuredCap: configured, providerMaxTokens, requestedReasoningBudget, reasoningBudgetTokens, minimumVisibleTokens, reasoningAllowed, transformActive, requestDisablesReasoning, configuredPreset, family });
   };
 
@@ -19175,9 +19176,24 @@ function mergeAgentCbsWarnings(...warningLists) {
       ? 1400 + shadowBeatCount * 140
       : 0;
     const analysisWanted = Math.max(768, Math.round(baseAnalysisWanted * analysisScale), shadowPlanningFloor);
-    const wanted = isAnalysis ? analysisWanted : Math.ceil(draftChars / 1.8) + 1536;
+    const visibleWanted = isAnalysis ? analysisWanted : Math.ceil(draftChars / 1.8) + 1536;
+    const reasoningFamily = effectiveReasoningFamilyForPreset(preset);
+    const reasoningPreview = resolveProviderOutputBudget(preset, { maxTokens: presetMax }, reasoningFamily);
+    const reasoningActive = reasoningPreview.reasoningAllowed === true;
+    // max_tokens / max_completion_tokens is a combined completion envelope on reasoning models.
+    // Keep the old visible-output target, then reserve extra room so hidden thinking cannot consume it all.
+    const reasoningHeadroom = reasoningActive
+      ? (isAnalysis
+          ? Math.max(1536, Math.ceil(visibleWanted * 0.65))
+          : Math.max(2048, Math.ceil(visibleWanted * 0.75)))
+      : 0;
+    const wanted = visibleWanted + reasoningHeadroom;
     const draftSafetyCap = Math.min(32768, Math.max(8192, Math.ceil(draftChars / 1.7) + 2048));
-    return Math.max(384, Math.min(presetMax, wanted, isAnalysis ? MAX_ANALYSIS_OUTPUT_TOKENS : draftSafetyCap));
+    const reasoningDraftCap = reasoningActive
+      ? Math.min(32768, Math.max(draftSafetyCap, Math.ceil(visibleWanted * 1.8)))
+      : draftSafetyCap;
+    const analysisCap = reasoningActive ? MAX_ANALYSIS_RETRY_OUTPUT_TOKENS : MAX_ANALYSIS_OUTPUT_TOKENS;
+    return Math.max(384, Math.min(presetMax, wanted, isAnalysis ? analysisCap : reasoningDraftCap));
   };
 
   const contextSizeErrorInfo = (error) => {
@@ -19691,6 +19707,12 @@ function mergeAgentCbsWarnings(...warningLists) {
     return ['openai', 'vertex-openai', 'copilot', 'kimi'].includes(provider)
       || ['gpt56', 'gpt', 'kimi'].includes(family);
   };
+  const requiresExplicitThinkingDisable = (preset = {}) => {
+    const provider = canonicalProvider(preset?.provider || 'custom');
+    return ['z-ai', 'z-ai-coding'].includes(provider)
+      && effectiveReasoningFamilyForPreset(preset) === 'glm';
+  };
+
   const structuredOutputPlanForPreset = (preset = {}, options = {}) => {
     if (options.jsonMode !== true || options.omitNativeJsonMode === true) return { mode: 'prompt_only', schema: null };
     const provider = canonicalProvider(preset.provider || 'custom');
@@ -19803,7 +19825,13 @@ function mergeAgentCbsWarnings(...warningLists) {
       if (openAIExplicitCache) body.prompt_cache_options = { mode: 'explicit', ttl: '30m' };
     }
     if (body.stream && ['openai', 'openrouter'].includes(provider)) body.stream_options = { include_usage: true };
-    return applyPresetExtraBody(body, preset);
+    let finalBody = applyPresetExtraBody(body, preset);
+    if (budget.requestDisablesReasoning && requiresExplicitThinkingDisable(preset)) {
+      finalBody = { ...finalBody, thinking: { type: 'disabled' } };
+      delete finalBody.reasoning_effort;
+      delete finalBody.reasoning;
+    }
+    return finalBody;
   };
 
 
@@ -21051,7 +21079,24 @@ function mergeAgentCbsWarnings(...warningLists) {
       const thinkingReason = thinkingOnlyReason(result.raw);
       if (thinkingReason && !options.noThinkingRetry) {
         const analysisCall = /private RP analysis stage|analysis phase|serial_gradation_agents_for_rp_analysis_v3/i.test(systemPrompt || '');
-        warn('thinking_only_retry', `${stageName}: provider returned ${thinkingReason}; retrying with thinking disabled`);
+        const configuredCap = clampInt(preset?.max_tokens, 64, 200000, DEFAULT_MAX_STAGE_TOKENS);
+        const thinkingFinishReason = thinkingReason.includes(':') ? thinkingReason.slice(thinkingReason.indexOf(':') + 1) : '';
+        const thinkingLengthLimit = providerLengthLimitInfo(thinkingFinishReason);
+        const retryMaxTokens = thinkingLengthLimit
+          ? Math.min(
+              configuredCap,
+              Math.max(
+                effectiveOptions.maxTokens + 1024,
+                Math.ceil(effectiveOptions.maxTokens * 1.5),
+                (analysisCall || options.jsonMode === true) ? MIN_JSON_LENGTH_RETRY_TOKENS : 8192
+              )
+            )
+          : effectiveOptions.maxTokens;
+        const explicitDisable = requiresExplicitThinkingDisable(preset);
+        warn(
+          'thinking_only_retry',
+          `${stageName}: provider returned ${thinkingReason}; retrying with thinking disabled${retryMaxTokens > effectiveOptions.maxTokens ? ` and ${retryMaxTokens} output tokens` : ''}${explicitDisable ? ' (explicit GLM thinking.type=disabled)' : ''}`
+        );
         return await callLLMWithPreset(
           settings,
           stageName,
@@ -21063,12 +21108,13 @@ function mergeAgentCbsWarnings(...warningLists) {
             : 'Return the final response draft now. Do not include planning, checklist, self-correction, or analysis.'}`,
           {
             ...options,
-             maxTokens: effectiveOptions.maxTokens,
+             maxTokens: retryMaxTokens,
              temp: Math.min(Number(options.temp ?? preset.temp ?? 0.35) || 0.35, 0.45),
              forceNoThinking: true,
-             omitThinkingField: true,
+             suppressThink: true,
+             omitThinkingField: explicitDisable ? false : true,
              noThinkingRetry: true,
-             telemetryRetryKind: 'thinking_only_recovery'
+             telemetryRetryKind: thinkingLengthLimit ? 'thinking_only_length_recovery' : 'thinking_only_recovery'
           }
         );
       }
@@ -23597,7 +23643,7 @@ function mergeAgentCbsWarnings(...warningLists) {
         temp: 0,
         forceNoThinking: true,
         suppressThink: true,
-        omitThinkingField: true
+        omitThinkingField: requiresExplicitThinkingDisable(clean) ? false : true
       }
     );
     finishCallTelemetry('connection_test');
