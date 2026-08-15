@@ -1,7 +1,7 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.66
+//@display-name GRADIA v0.25.74
 //@api 3.0
-//@version 0.25.66
+//@version 0.25.74
 
 /* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
 //@allowed-ipc flashback_hayaku_bridge
@@ -41,12 +41,12 @@
 //@arg input_assist_scope string full_pipeline|standalone
 //@arg input_assist_target_chars string 300|500|800|1000|omakase
 //@arg input_assist_confirmation_mode string direct|confirm
-//@arg input_assist_lore_activation_mode string risu_key|gradia_extended — independent Input Assist lore selector; defaults to RisuAI-style activation keys
+//@arg input_assist_lore_activation_mode string unified — legacy-compatible carrier; all previous values migrate to the single unified lore retrieval engine
 //@arg information_transfer_mode string draft_only|draft_and_analysis
 //@arg nsfw_mode string off|soft|direct|explicit — shared mature-scene guidance for SHADOW ACT and all three AIDEs
 //@arg nsfw_guidance_enabled string true|false — inject the selected NSFW guidance into stage analysis and writing prompts
-//@arg lore_activation_mode string risu_selected|risu_key|gradia_extended — default reuses lore already selected in the current RisuAI request; other modes independently reproduce activation or extend it with Jaccard
-//@arg lore_reranker_top_k int Maximum lore entries each SHADOW/AIDE stage consumes after stage-specific reranking; default 8
+//@arg lore_activation_mode string unified — single lore retrieval engine combining RisuAI host selection, activation-key evidence, BM25F/Jaccard/entity retrieval, RRF and MMR
+//@arg lore_reranker_top_k int Maximum ordinary relevance-ranked lore entries per SHADOW/AIDE stage; force/always-active lore is protected in addition; default 8
 //@arg skill_router_enabled string true|false — enable local per-stage selection of embedded AI writing skills; default true
 //@arg skill_router_top_k int Maximum full SKILL.md documents injected per stage; default 2, maximum 3
 //@arg skill_router_references string true|false — allow at most one relevant reference document under each selected skill; default true
@@ -535,8 +535,8 @@
  * and on-demand lore and Hypa catalog loading with stale-response protection.
  * v0.25.8 adds a stage-aware lore reranker after the one-time activation/candidate pass.
  * SHADOW ACT, Character AIDE, World AIDE, and Plot AIDE now score the shared lore
- * candidate pool with different domain profiles, cut weak matches, and consume at most
- * the configured Top-K lore entries per stage (default eight). No extra LLM/provider call is added.
+ * candidate pool with different domain profiles and cut weak matches. v0.25.67 refines this so
+ * the configured Top-K limits ordinary relevance-ranked lore only; force/always-active lore survives outside that slot budget. No extra LLM/provider call is added.
  * v0.25.9 embeds the supplied 35-skill context-adaptive writing pack and adds a local
  * stage Skill Router after lore reranking. Four baseline RP-quality skill descriptions stay
  * active as a compact floor; each SHADOW/AIDE stage then selects up to two full SKILL.md
@@ -835,6 +835,14 @@
  * v0.25.64 matches RisuAI's moduleIntergration contract by splitting comma-delimited module references before module-lore filtering, while retaining legacy array and object forms.
  * v0.25.65 fixes reasoning-output budgeting and GLM/Z.ai thinking recovery. Reasoning-enabled stage calls reserve visible-output headroom instead of reusing the prose-only budget, explicit GLM thinking-off settings now emit `thinking.type=disabled`, and thinking-only length recovery expands the completion budget while sending a real GLM disable payload instead of omitting it.
  * v0.25.66 adds a deterministic current-input hard-commitment guard with contradiction-only recovery, gives the final serial candidate a second guard before injection, enables Vertex/Gemini explicit CachedContent when an exact shared-prefix hash is projected to recur across lightweight stages, fixes explicit Input Writer/Continue call accounting, and links lore labels to profile Name aliases for current-cast detection.
+ * v0.25.67 hardens lore fidelity: forced/always-active lore can no longer be evicted by the stage Top-K cut, long lore is reranked through query-relevant section retrieval instead of a fixed 6.2k middle compaction, exact-name identity boosts are suppressed when local age/gender evidence conflicts with a single-character profile, and compact relationship/address canon locks are extracted from the active lore pool for SHADOW and Character AIDE.
+ * v0.25.68 upgrades GRADIA's internal lore retrieval to a field-aware BM25F layer. Section and stage-level lore ranking compute corpus IDF across separate identity/heading/synopsis/body fields with independent boosts and length normalization, then fuse BM25F with the existing fuzzy Jaccard/entity safeguards. Diagnostics expose BM25F raw and per-field contributions without changing RisuAI activation semantics or adding any LLM call.
+ * v0.25.69 adds weighted Reciprocal Rank Fusion (RRF) above BM25F/Jaccard/entity retrieval. Section selection and stage lore reranking now fuse independent rank lists instead of trusting one score scale, while the existing hybrid confidence floor, protected-lore overflow, relationship locks, and identity-conflict guard remain intact.
+ * v0.25.70 promotes GRADIA-owned lore search to the default retrieval path. A request-wide candidate pool is built once from the permitted character/module lore universe, RisuAI host selection and activation-key hits become RRF signals instead of candidate gates, each draft stage reranks the wider pool into its own Top-K, and section-internal chunk selection now uses BM25F + Jaccard + exact-term RRF rather than Jaccard alone.
+ * v0.25.71 adds Maximal Marginal Relevance (MMR) after RRF at shared-pool, stage Top-K, long-lore section, and chunk selection. MMR preserves absolute relevance gates and protected lore while penalizing near-duplicate evidence, so redundant character/profile copies cannot monopolize limited lore slots.
+ * v0.25.72 collapses the three lore activation modes into one unified retrieval engine. RisuAI host-selected lore, Risu-compatible activation keys, and GRADIA semantic retrieval are always collected as independent evidence signals, legacy mode values auto-migrate to unified, activation-key evidence becomes route-strength aware, and both the main draft pipeline and Input Assist share the same selection path.
+ * v0.25.73 simplifies reference management without changing retrieval semantics. The three separate lore-management destinations collapse into one Materials page, every visible checkbox now means ‘use this item’, module/character/Hypa summaries show allowed counts at a glance, module lore gets a local filter, and search-engine/Top-K tuning moves out of normal setup into Expert Settings.
+ * v0.25.74 keeps the existing GRADIA GUI design but improves progressive disclosure: stage cards and Input Assist hide rarely changed limits under expandable advanced sections, AI remains preset-first while generation/reasoning/Flex/request-body controls collapse behind advanced panels, output mode is editable again on the Output page, Story Arc maintenance and OOC connection/history are folded away, execution telemetry is separated from user-facing results, and Narrative Archive embedding exposes only common connection fields by default.
  * v0.25.60 adds explicit Story Arc cold-start maintenance shared by the Story Arc and Narrative Archive pages. “최근 완료 5턴으로 기준 생성” analyzes the latest complete canonical five-turn window even off-boundary, while the full cold start processes only missing canonical windows in chronological order, saves every successful window immediately to Narrative Archive, keeps the newest result as the active Story Arc, resumes after failure without repeating stored windows, and confirms the estimated Arc Director/document-embedding calls before execution.
  * v0.25.51 fixes copy/manual-send clipboard delivery in iframe/WebView runtimes. The copy action now runs inside the originating button click before any modal restore/hide await can consume transient user activation; it tries synchronous selection/execCommand first, then navigator.clipboard, records the method for diagnostics, and keeps the dialog open with the generated text selected when browser policy blocks automated copying.
  *
@@ -924,7 +932,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.66';
+  const PLUGIN_VERSION = '0.25.74';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -1028,40 +1036,122 @@
   const AUTHOR_NOTE_AUTHORITY_SCHEMA = 'gradia_author_note_authority_v1';
   const DEFAULT_SHADOW_ACTIVE_LORE_LIMIT = 16;
   const DEFAULT_LORE_CONTINUITY_TURNS = 3;
-  const LORE_ACTIVATION_MODES = Object.freeze(['risu_selected', 'risu_key', 'gradia_extended']);
-  const DEFAULT_LORE_ACTIVATION_MODE = 'risu_selected';
+  const UNIFIED_LORE_ACTIVATION_MODE = 'unified';
+  const LORE_ACTIVATION_MODES = Object.freeze([UNIFIED_LORE_ACTIVATION_MODE]);
+  const DEFAULT_LORE_ACTIVATION_MODE = UNIFIED_LORE_ACTIVATION_MODE;
+  const LORE_UNIFIED_MIGRATION_VERSION = 1;
   const LORE_ACTIVATION_MODE_DEFS = Object.freeze({
-    risu_selected: Object.freeze({
-      label: 'RisuAI가 선별한 로어 그대로',
-      description: '이번 요청에 RisuAI가 실제로 넣은 로어만 그라디아 내부 참고 자료로 채택합니다.',
-      meta: '후보 수집 1회 · 단계별 Top 8 리랭킹'
-    }),
-    risu_key: Object.freeze({
-      label: 'RisuAI 호환 · 최근 문맥 활성화 키',
-      description: 'RisuAI처럼 설정된 검색 깊이의 최근 사용자·AI 메시지와 재귀 로어에서 활성화 키를 찾습니다.',
-      meta: '그라디아가 활성화 키를 독립 판정'
-    }),
-    gradia_extended: Object.freeze({
-      label: 'GRADIA 확장 · 활성화 키 + 장면 Jaccard',
-      description: 'RisuAI 호환 키 판정에 현재 입력 의미 검색과 직전 장면의 직접 인물·장소 앵커를 추가합니다.',
-      meta: '키 + 현재 의도 + 직전 장면 확장'
+    unified: Object.freeze({
+      label: 'GRADIA 통합 로어 검색',
+      description: 'RisuAI 실제 선별, RisuAI 호환 활성화 키, BM25F·Jaccard·엔티티 검색을 동시에 증거로 수집한 뒤 RRF와 MMR로 한 번에 선별합니다.',
+      meta: 'Risu Selected + Key + BM25F/Jaccard/Entity → RRF → MMR'
     })
   });
-  const INPUT_ASSIST_LORE_ACTIVATION_MODES = Object.freeze(['risu_key', 'gradia_extended']);
-  const DEFAULT_INPUT_ASSIST_LORE_ACTIVATION_MODE = 'risu_key';
+  const INPUT_ASSIST_LORE_ACTIVATION_MODES = Object.freeze([UNIFIED_LORE_ACTIVATION_MODE]);
+  const DEFAULT_INPUT_ASSIST_LORE_ACTIVATION_MODE = UNIFIED_LORE_ACTIVATION_MODE;
   const INPUT_ASSIST_LORE_ACTIVATION_MODE_DEFS = Object.freeze({
-    risu_key: Object.freeze({
-      label: 'RisuAI식 · 활성화 키',
-      description: '현재 인풋과 직전 AI 응답의 종결부에서 RisuAI 호환 활성화 키를 찾아 로어를 선택합니다.',
-      meta: '기본 · 키·재귀·우선순위·토큰 예산'
-    }),
-    gradia_extended: Object.freeze({
-      label: 'GRADIA식 · 키 + 장면 Jaccard',
-      description: 'RisuAI식 활성화 키 결과에 현재 인풋과 직전 장면의 어휘 유사도 검색을 추가합니다.',
-      meta: '확장 · 키 판정 + 장면 관련 로어 보강'
+    unified: Object.freeze({
+      label: 'GRADIA 통합 로어 검색',
+      description: '메인 파이프라인과 동일한 통합 검색 엔진을 사용하되 현재 인풋과 직전 응답 종결부를 검색 문맥으로 사용합니다.',
+      meta: '동일 엔진 · Input Assist 문맥'
     })
   });
   const LORE_JACCARD_ENGINE_VERSION = 'gradia_lore_jaccard_v1';
+  const LORE_BM25F_ENGINE_VERSION = 'gradia_lore_bm25f_v2';
+  const LORE_HYBRID_RETRIEVAL_ENGINE_VERSION = 'gradia_lore_hybrid_bm25f_v2_rrf_v2_mmr_v1_unified_v1';
+  const LORE_RRF_ENGINE_VERSION = 'gradia_lore_rrf_v1';
+  const LORE_MMR_ENGINE_VERSION = 'gradia_lore_mmr_v1';
+  const LORE_MMR_SHARED_POOL_LAMBDA = 0.72;
+  const LORE_MMR_STAGE_LAMBDA = 0.82;
+  const LORE_MMR_SECTION_LAMBDA = 0.78;
+  const LORE_MMR_CHUNK_LAMBDA = 0.84;
+  const LORE_SHARED_CANDIDATE_POOL_VERSION = 'gradia_lore_shared_candidate_pool_v3';
+  const LORE_RRF_K = 60;
+  const LORE_BM25F_K1 = 1.35;
+  const LORE_BM25F_SCORE_SCALE = 1.55;
+  const LORE_BM25F_SECTION_FIELD_DEFS = Object.freeze({
+    heading: Object.freeze({ weight: 3.2, b: 0.18, limit: 260 }),
+    synopsis: Object.freeze({ weight: 1.7, b: 0.42, limit: 520 }),
+    body: Object.freeze({ weight: 1.0, b: 0.78, limit: 1600 })
+  });
+  const LORE_BM25F_LORE_FIELD_DEFS = Object.freeze({
+    identity: Object.freeze({ weight: 4.4, b: 0.10, limit: 320 }),
+    heading: Object.freeze({ weight: 2.8, b: 0.24, limit: 720 }),
+    body: Object.freeze({ weight: 1.0, b: 0.80, limit: 2400 })
+  });
+  const LORE_BM25F_CHUNK_FIELD_DEFS = Object.freeze({
+    heading: Object.freeze({ weight: 2.2, b: 0.16, limit: 240 }),
+    body: Object.freeze({ weight: 1.0, b: 0.76, limit: 900 })
+  });
+  const DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K = 24;
+  const SHARED_LORE_CANDIDATE_POOL_ABSOLUTE_FLOOR = 0.025;
+  const SHARED_LORE_CANDIDATE_POOL_RELATIVE_FLOOR = 0.12;
+  const loreRrfFuse = (entries = [], rankers = [], options = {}) => {
+    const source = Array.isArray(entries) ? entries : [];
+    const k = Math.max(1, Number(options.k || LORE_RRF_K));
+    const keyOf = typeof options.keyOf === 'function'
+      ? options.keyOf
+      : ((entry, index) => text(entry?.id || entry?.key || index));
+    const ranksBySource = {};
+    const contributionsBySource = {};
+    let activeWeight = 0;
+    for (const ranker of Array.isArray(rankers) ? rankers : []) {
+      const name = text(ranker?.name || '').trim();
+      const weight = Math.max(0, Number(ranker?.weight || 0));
+      const getter = typeof ranker?.score === 'function' ? ranker.score : (() => 0);
+      const minScore = Number.isFinite(Number(ranker?.minScore)) ? Number(ranker.minScore) : 0;
+      if (!name || !(weight > 0)) continue;
+      const ranked = source.map((entry, order) => ({
+        key: keyOf(entry, order),
+        order,
+        value: Number(getter(entry, order) || 0)
+      })).filter(item => Number.isFinite(item.value) && item.value > minScore)
+        .sort((left, right) => right.value - left.value || left.order - right.order);
+      if (!ranked.length) continue;
+      activeWeight += weight;
+      const ranks = {};
+      const contributions = {};
+      let rank = 0;
+      let previousValue = null;
+      ranked.forEach((item, index) => {
+        if (previousValue == null || Math.abs(item.value - previousValue) > 1e-12) rank = index + 1;
+        previousValue = item.value;
+        ranks[item.key] = rank;
+        contributions[item.key] = weight / (k + rank);
+      });
+      ranksBySource[name] = ranks;
+      contributionsBySource[name] = contributions;
+    }
+    const maximum = activeWeight > 0 ? activeWeight / (k + 1) : 0;
+    const scores = source.map((entry, order) => {
+      const key = keyOf(entry, order);
+      let rawScore = 0;
+      const ranks = {};
+      const contributions = {};
+      for (const [name, sourceRanks] of Object.entries(ranksBySource)) {
+        const rank = Number(sourceRanks[key] || 0);
+        if (!rank) continue;
+        const contribution = Number(contributionsBySource[name]?.[key] || 0);
+        ranks[name] = rank;
+        contributions[name] = contribution;
+        rawScore += contribution;
+      }
+      return {
+        key,
+        score: maximum > 0 ? clampNumber(rawScore / maximum, 0, 1, 0) : 0,
+        rawScore,
+        ranks,
+        contributions
+      };
+    });
+    return {
+      engine: LORE_RRF_ENGINE_VERSION,
+      k,
+      activeRankers: Object.keys(ranksBySource),
+      activeWeight,
+      scores
+    };
+  };
   const LORE_JACCARD_TUNING = Object.freeze({
     fuzzyMatchThreshold: 0.56,
     stemMatchSimilarity: 0.82,
@@ -1074,8 +1164,11 @@
     currentInputWeight: 1,
     continuityWeight: 0.24
   });
-  const STAGE_LORE_RERANKER_VERSION = 'gradia_stage_lore_reranker_v1';
+  const STAGE_LORE_RERANKER_VERSION = 'gradia_stage_lore_reranker_v7';
   const DEFAULT_STAGE_LORE_RERANK_TOP_K = 8;
+  const RELATIONSHIP_CANON_LOCK_VERSION = 'gradia_relationship_canon_lock_v1';
+  const RELATIONSHIP_CANON_LOCK_MAX_ITEMS = 12;
+  const RELATIONSHIP_CANON_LOCK_MAX_CHARS = 3200;
   const LORE_RERANK_TOP_K_REPAIR_VERSION = 1;
   const STAGE_LORE_RERANKER_CACHE_MAX = 768;
   const StageLoreRerankerFeatureCache = new Map();
@@ -1403,7 +1496,7 @@
   const DEFAULT_TARGET_DRAFT_MIN_CHARS = 3000;
   const DEFAULT_TARGET_DRAFT_MAX_CHARS = 5000;
   const RAG_ROUTE_VERSION = 2;
-  const LORE_ACTIVATION_POLICY_VERSION = 6;
+  const LORE_ACTIVATION_POLICY_VERSION = 8;
   const STAGE_DEFAULTS_MIGRATION_VERSION = 3;
   const EASY_LENGTH_MIGRATION_VERSION = 1;
   const AGENT_CBS_MAX_PASSES = 32;
@@ -1908,28 +2001,14 @@
   };
 
   const normalizeLoreActivationMode = value => {
-    const raw = String(value || '').trim().toLowerCase();
-    const aliases = {
-      strict: 'risu_key',
-      risu: 'risu_key',
-      risuai: 'risu_key',
-      risu_key_only: 'risu_key',
-      selected: 'risu_selected',
-      risu_selected_lore: 'risu_selected',
-      host_selected: 'risu_selected',
-      extended: 'gradia_extended',
-      gradia: 'gradia_extended',
-      jaccard: 'gradia_extended'
-    };
-    return normalizeChoice(aliases[raw] || raw, LORE_ACTIVATION_MODES, DEFAULT_LORE_ACTIVATION_MODE);
+    // v0.25.72: risu_selected / risu_key / gradia_extended are migration aliases only.
+    // Runtime retrieval always uses the single unified evidence-fusion path.
+    void value;
+    return UNIFIED_LORE_ACTIVATION_MODE;
   };
   const normalizeInputAssistLoreActivationMode = value => {
-    const normalized = normalizeLoreActivationMode(value);
-    return normalizeChoice(
-      normalized === 'gradia_extended' ? 'gradia_extended' : 'risu_key',
-      INPUT_ASSIST_LORE_ACTIVATION_MODES,
-      DEFAULT_INPUT_ASSIST_LORE_ACTIVATION_MODE
-    );
+    void value;
+    return UNIFIED_LORE_ACTIVATION_MODE;
   };
   const INPUT_ASSIST_MODE_DEFS = Object.freeze({
     off: Object.freeze({ label: '사용 안 함', description: '원래 입력을 그대로 초안 작성 단계로 전달합니다.' }),
@@ -8988,9 +9067,8 @@ ${JSON.stringify(previousArc.destination)}` : '',
       writingMode === 'rp' ? 'direct' : inputAssistConfirmationModeRaw
     ), INPUT_ASSIST_CONFIRMATION_MODES, 'direct');
     const inputAssistConfirmationMode = writingMode === 'rp' ? (rpInputAssistMode === 'off' ? 'direct' : 'confirm') : inputAssistConfirmationModeRaw;
-    const inputAssistLoreActivationMode = normalizeInputAssistLoreActivationMode(
-      await runtimeCfg('input_assist_lore_activation_mode', DEFAULT_INPUT_ASSIST_LORE_ACTIVATION_MODE)
-    );
+    const rawInputAssistLoreActivationMode = await runtimeCfg('input_assist_lore_activation_mode', DEFAULT_INPUT_ASSIST_LORE_ACTIVATION_MODE);
+    const inputAssistLoreActivationMode = normalizeInputAssistLoreActivationMode(rawInputAssistLoreActivationMode);
     const informationTransferMode = normalizeChoice(await runtimeCfg('information_transfer_mode', 'draft_only'), INFORMATION_TRANSFER_MODES, 'draft_only');
     const nsfwMode = normalizeNsfwMode(await runtimeCfg('nsfw_mode', DEFAULT_NSFW_MODE));
     const nsfwGuidanceEnabled = asBool(await runtimeCfg('nsfw_guidance_enabled', 'true'), true);
@@ -8998,7 +9076,19 @@ ${JSON.stringify(previousArc.destination)}` : '',
     const arcHorizonTurns = ARC_DIRECTOR_UPDATE_INTERVAL;
     const arcAutoReplan = true;
     const arcNoveltyLevel = normalizeChoice(await runtimeCfg('arc_novelty_level', 'medium'), ARC_NOVELTY_LEVELS, 'medium');
-    const loreActivationMode = normalizeLoreActivationMode(await runtimeCfg('lore_activation_mode', DEFAULT_LORE_ACTIVATION_MODE));
+    const rawLoreActivationMode = await runtimeCfg('lore_activation_mode', DEFAULT_LORE_ACTIVATION_MODE);
+    const loreActivationMode = normalizeLoreActivationMode(rawLoreActivationMode);
+    const loreUnifiedMigrationVersion = Math.max(0, Number(runtimeStored.lore_unified_retrieval_migration_v1 || 0) || 0);
+    if (
+      loreUnifiedMigrationVersion < LORE_UNIFIED_MIGRATION_VERSION
+      || String(runtimeStored.lore_activation_mode || rawLoreActivationMode || '').trim().toLowerCase() !== UNIFIED_LORE_ACTIVATION_MODE
+      || String(runtimeStored.input_assist_lore_activation_mode || rawInputAssistLoreActivationMode || '').trim().toLowerCase() !== UNIFIED_LORE_ACTIVATION_MODE
+    ) {
+      runtimeStored.lore_activation_mode = UNIFIED_LORE_ACTIVATION_MODE;
+      runtimeStored.input_assist_lore_activation_mode = UNIFIED_LORE_ACTIVATION_MODE;
+      runtimeStored.lore_unified_retrieval_migration_v1 = LORE_UNIFIED_MIGRATION_VERSION;
+      try { await writeRuntimeSettings(runtimeStored); } catch (_) {}
+    }
     const rawLoreRerankerTopK = clampInt(await runtimeCfg('lore_reranker_top_k', DEFAULT_STAGE_LORE_RERANK_TOP_K), 1, 32, DEFAULT_STAGE_LORE_RERANK_TOP_K);
     const loreTopKRepairVersion = Math.max(0, Number(runtimeStored.lore_reranker_top_k_repair_v1 || 0) || 0);
     let loreRerankerTopK = rawLoreRerankerTopK;
@@ -12974,30 +13064,25 @@ function mergeAgentCbsWarnings(...warningLists) {
     const loreActivationMode = inputAssistTerminalPath
       ? inputAssistLoreActivationMode
       : mainLoreActivationMode;
-    const independentlyActivatedRaw = loreActivationMode !== 'risu_selected'
-      ? activeRisuLorebooks(ragRecent, candidates, {
-          ...settings,
-          loreBookDepth: clampInt(loreSettings.scanDepth ?? loreSettings.scan_depth ?? settings.turnWindow, 1, 128, settings.turnWindow || DEFAULT_RECENT_TURNS),
-          loreBookToken: clampInt(loreSettings.tokenBudget ?? loreSettings.token_budget ?? Math.ceil((settings.shadowRisuContextMaxChars || DEFAULT_SHADOW_RISU_CONTEXT_CHARS) / 3.4), 64, 80000, Math.ceil(DEFAULT_SHADOW_RISU_CONTEXT_CHARS / 3.4)),
-          loreFullWordMatching: loreSettings.fullWordMatching === true || loreSettings.full_word_matching === true,
-          loreRecursiveScanning: loreSettings.recursiveScanning !== false && loreSettings.recursive_scanning !== false,
-          loreContinuityTurns: inputAssistTerminalPath ? 0 : DEFAULT_LORE_CONTINUITY_TURNS,
-          loreContinuityActiveIds
-        })
-      : [];
-    const independentRendering = loreActivationMode !== 'risu_selected'
-      ? renderIndependentActiveLorebooks(independentlyActivatedRaw, requestMessages, cbsContext)
-      : {
-          activeLore: [],
-          dropped: [],
-          hostRecovery: { activeLore: [], requestMessageCount: 0, matchedCandidateCount: 0, selectedCount: 0 }
-        };
-    const hostLoreSelection = loreActivationMode === 'risu_selected'
-      ? reuseRisuSelectedLorebooks(requestMessages, candidates, cbsContext)
-      : independentRendering.hostRecovery;
-    const activeLore = loreActivationMode === 'risu_selected'
-      ? hostLoreSelection.activeLore
-      : independentRendering.activeLore;
+    const independentlyActivatedRaw = activeRisuLorebooks(ragRecent, candidates, {
+      ...settings,
+      loreBookDepth: clampInt(loreSettings.scanDepth ?? loreSettings.scan_depth ?? settings.turnWindow, 1, 128, settings.turnWindow || DEFAULT_RECENT_TURNS),
+      loreBookToken: clampInt(loreSettings.tokenBudget ?? loreSettings.token_budget ?? Math.ceil((settings.shadowRisuContextMaxChars || DEFAULT_SHADOW_RISU_CONTEXT_CHARS) / 3.4), 64, 80000, Math.ceil(DEFAULT_SHADOW_RISU_CONTEXT_CHARS / 3.4)),
+      loreFullWordMatching: loreSettings.fullWordMatching === true || loreSettings.full_word_matching === true,
+      loreRecursiveScanning: loreSettings.recursiveScanning !== false && loreSettings.recursive_scanning !== false,
+      loreContinuityTurns: inputAssistTerminalPath ? 0 : DEFAULT_LORE_CONTINUITY_TURNS,
+      loreContinuityActiveIds
+    });
+    const independentRendering = renderIndependentActiveLorebooks(independentlyActivatedRaw, requestMessages, cbsContext);
+    const rawHostLoreSelection = reuseRisuSelectedLorebooks(requestMessages, candidates, cbsContext);
+    const hostLoreSelection = {
+      ...rawHostLoreSelection,
+      activeLore: (rawHostLoreSelection.activeLore || []).filter(lore => lore.forceState !== 'deactivate'),
+      selectedCount: (rawHostLoreSelection.activeLore || []).filter(lore => lore.forceState !== 'deactivate').length
+    };
+    // activeLore remains the key-activation signal for legacy consumers. The unified selector
+    // receives keyActiveLore + hostSelectedLore separately and performs the actual selection once.
+    const activeLore = independentRendering.activeLore;
     if (!inputAssistTerminalPath) {
       writeLoreContinuityIds(loreContinuityScope, activeLore, ragRecent.latestUser);
     }
@@ -13019,6 +13104,9 @@ function mergeAgentCbsWarnings(...warningLists) {
       excludedHypaRecordIds: normalizeExcludedHypaRecordIds(settings.excludedHypaRecordIds),
       candidates,
       activeLore,
+      keyActiveLore: independentRendering.activeLore,
+      hostSelectedLore: hostLoreSelection.activeLore,
+      hostLoreSelection,
       actualChatContext,
       cbsContext,
       authorNote,
@@ -13029,12 +13117,8 @@ function mergeAgentCbsWarnings(...warningLists) {
           ? INPUT_ASSIST_LORE_ACTIVATION_MODE_DEFS[loreActivationMode]?.label || DEFAULT_INPUT_ASSIST_LORE_ACTIVATION_MODE
           : LORE_ACTIVATION_MODE_DEFS[loreActivationMode]?.label || DEFAULT_LORE_ACTIVATION_MODE,
         activationPolicy: inputAssistTerminalPath
-          ? loreActivationMode === 'gradia_extended'
-            ? 'input_assist_risu_keys_then_scene_jaccard'
-            : 'input_assist_risu_activation_keys'
-          : loreActivationMode === 'risu_selected'
-            ? 'reuse_lore_present_in_risu_request'
-            : 'risu_recent_user_and_assistant_context',
+          ? 'input_assist_unified_host_key_semantic_bm25f_rrf_mmr'
+          : 'unified_host_key_semantic_bm25f_rrf_mmr',
         mainActivationMode: mainLoreActivationMode,
         inputAssistActivationMode: inputAssistLoreActivationMode,
         inputAssistSeparatePipeline: inputAssistTerminalPath,
@@ -13464,44 +13548,316 @@ function mergeAgentCbsWarnings(...warningLists) {
       }
       if (tokens.length >= limit) break;
     }
-    return tokens.map(loreJaccardNormalizeKey).filter(Boolean);
+    return tokens.slice(0, Math.max(1, limit)).map(loreJaccardNormalizeKey).filter(Boolean);
   };
 
-  const loreBm25fSectionScores = (query, sections = []) => {
-    const queryTokens = loreJaccardUnique(loreBm25Tokens(query, 180), 120);
-    const documents = sections.map((section) => {
-      const headingTokens = loreBm25Tokens(section.path?.join(' ') || section.heading || '', 180);
-      const bodyTokens = loreBm25Tokens(section.body || '', 900);
-      return { headingTokens, bodyTokens, length: Math.max(1, bodyTokens.length + headingTokens.length * 2) };
+  const loreBm25fCountTokens = (tokens = []) => {
+    const counts = new Map();
+    for (const token of tokens) counts.set(token, (counts.get(token) || 0) + 1);
+    return counts;
+  };
+
+  const loreBm25fFieldLength = (value = '') => (
+    loreJaccardCleanText(value).split(/\s+/).filter(word => word.length >= 2).length
+  );
+
+  const loreBm25fScoreDocuments = (query = '', documents = [], fieldDefs = LORE_BM25F_LORE_FIELD_DEFS, options = {}) => {
+    const queryTokens = loreJaccardUnique(
+      loreBm25Tokens(query, clampInt(options.queryLimit, 40, 360, 220)),
+      clampInt(options.uniqueQueryLimit, 24, 240, 140)
+    );
+    const fieldNames = Object.keys(fieldDefs || {});
+    const source = Array.isArray(documents) ? documents : [];
+    if (!queryTokens.length || !source.length || !fieldNames.length) {
+      return {
+        engine: LORE_BM25F_ENGINE_VERSION,
+        k1: LORE_BM25F_K1,
+        queryTokenCount: queryTokens.length,
+        queryTokens,
+        documentCount: source.length,
+        averageFieldLengths: Object.fromEntries(fieldNames.map(fieldName => [fieldName, 0])),
+        scores: source.map((document, documentIndex) => ({
+          id: document?.id || `document-${documentIndex + 1}`,
+          score: 0,
+          rawScore: 0,
+          matchedTerms: [],
+          fieldRaw: Object.fromEntries(fieldNames.map(fieldName => [fieldName, 0]))
+        }))
+      };
+    }
+    const prepared = source.map((document, documentIndex) => {
+      const fieldTokens = {};
+      const fieldCounts = {};
+      const fieldLengths = {};
+      for (const fieldName of fieldNames) {
+        const def = fieldDefs[fieldName] || {};
+        const fieldValue = document?.fields?.[fieldName] || '';
+        const tokens = loreBm25Tokens(
+          fieldValue,
+          clampInt(def.limit, 40, 5000, 900)
+        );
+        fieldTokens[fieldName] = tokens;
+        fieldCounts[fieldName] = loreBm25fCountTokens(tokens);
+        // Length normalization uses source lexical length rather than expanded
+        // romanization aliases, avoiding an artificial penalty for Hangul fields.
+        fieldLengths[fieldName] = Math.max(0, loreBm25fFieldLength(fieldValue));
+      }
+      return {
+        id: document?.id || `document-${documentIndex + 1}`,
+        fieldTokens,
+        fieldCounts,
+        fieldLengths
+      };
     });
-    if (!queryTokens.length || !documents.length) return documents.map(() => 0);
-    const averageLength = documents.reduce((sum, item) => sum + item.length, 0) / documents.length;
-    const df = new Map();
-    queryTokens.forEach((token) => {
+
+    const averageFieldLengths = {};
+    for (const fieldName of fieldNames) {
+      averageFieldLengths[fieldName] = Math.max(
+        1,
+        prepared.reduce((sum, document) => sum + Number(document.fieldLengths[fieldName] || 0), 0) / prepared.length
+      );
+    }
+
+    const documentFrequency = new Map();
+    for (const token of queryTokens) {
       let count = 0;
-      documents.forEach((document) => {
-        if (document.headingTokens.includes(token) || document.bodyTokens.includes(token)) count += 1;
-      });
-      df.set(token, count);
+      for (const document of prepared) {
+        if (fieldNames.some(fieldName => document.fieldCounts[fieldName]?.has(token))) count += 1;
+      }
+      documentFrequency.set(token, count);
+    }
+
+    const scoreScale = Math.max(0.25, Number(options.scoreScale || LORE_BM25F_SCORE_SCALE));
+    const scores = prepared.map((document) => {
+      let rawScore = 0;
+      const matchedTerms = [];
+      const fieldRaw = Object.fromEntries(fieldNames.map(fieldName => [fieldName, 0]));
+      for (const token of queryTokens) {
+        const perFieldTf = {};
+        let combinedTf = 0;
+        for (const fieldName of fieldNames) {
+          const def = fieldDefs[fieldName] || {};
+          const tf = Number(document.fieldCounts[fieldName]?.get(token) || 0);
+          if (!tf) {
+            perFieldTf[fieldName] = 0;
+            continue;
+          }
+          const fieldLength = Math.max(0, Number(document.fieldLengths[fieldName] || 0));
+          const averageLength = Math.max(1, Number(averageFieldLengths[fieldName] || 1));
+          const b = clampNumber(Number(def.b ?? 0.75), 0, 1, 0.75);
+          const weight = Math.max(0, Number(def.weight ?? 1));
+          const lengthNorm = Math.max(0.12, (1 - b) + b * (fieldLength / averageLength));
+          const normalizedTf = weight * tf / lengthNorm;
+          perFieldTf[fieldName] = normalizedTf;
+          combinedTf += normalizedTf;
+        }
+        if (!(combinedTf > 0)) continue;
+        const df = Number(documentFrequency.get(token) || 0);
+        const idf = Math.log(1 + (prepared.length - df + 0.5) / (df + 0.5));
+        const termScore = idf * (((LORE_BM25F_K1 + 1) * combinedTf) / (LORE_BM25F_K1 + combinedTf));
+        rawScore += termScore;
+        matchedTerms.push({ token, idf, termScore });
+        for (const fieldName of fieldNames) {
+          const share = combinedTf > 0 ? Number(perFieldTf[fieldName] || 0) / combinedTf : 0;
+          if (share > 0) fieldRaw[fieldName] += termScore * share;
+        }
+      }
+      const score = rawScore > 0 ? rawScore / (rawScore + scoreScale) : 0;
+      return {
+        id: document.id,
+        score: clampNumber(score, 0, 1, 0),
+        rawScore,
+        matchedTerms: matchedTerms
+          .sort((left, right) => right.termScore - left.termScore)
+          .slice(0, 16)
+          .map(item => ({
+            token: item.token,
+            idf: Number(item.idf.toFixed(4)),
+            score: Number(item.termScore.toFixed(4))
+          })),
+        fieldRaw: Object.fromEntries(
+          Object.entries(fieldRaw).map(([fieldName, value]) => [fieldName, Number(Number(value || 0).toFixed(4))])
+        )
+      };
     });
-    const rawScores = documents.map((document) => {
-      const headingCounts = new Map();
-      const bodyCounts = new Map();
-      document.headingTokens.forEach((token) => headingCounts.set(token, (headingCounts.get(token) || 0) + 1));
-      document.bodyTokens.forEach((token) => bodyCounts.set(token, (bodyCounts.get(token) || 0) + 1));
-      let score = 0;
-      queryTokens.forEach((token) => {
-        const frequency = (bodyCounts.get(token) || 0) + (headingCounts.get(token) || 0) * 2.4;
-        if (!frequency) return;
-        const documentFrequency = df.get(token) || 0;
-        const idf = Math.log(1 + (documents.length - documentFrequency + 0.5) / (documentFrequency + 0.5));
-        const denominator = frequency + 1.25 * (1 - 0.72 + 0.72 * document.length / Math.max(1, averageLength));
-        score += idf * ((frequency * 2.25) / denominator);
-      });
-      return score;
-    });
-    const maximum = Math.max(0, ...rawScores);
-    return rawScores.map((score) => maximum > 0 ? score / maximum : 0);
+
+    return {
+      engine: LORE_BM25F_ENGINE_VERSION,
+      k1: LORE_BM25F_K1,
+      queryTokenCount: queryTokens.length,
+      queryTokens,
+      documentCount: prepared.length,
+      averageFieldLengths: Object.fromEntries(
+        Object.entries(averageFieldLengths).map(([fieldName, value]) => [fieldName, Number(Number(value || 0).toFixed(2))])
+      ),
+      scores
+    };
+  };
+
+  const loreBm25fSectionScoreDetails = (query, sections = []) => {
+    const documents = (sections || []).map((section, index) => ({
+      id: `section-${index + 1}`,
+      fields: {
+        heading: section.path?.join(' > ') || section.heading || '',
+        synopsis: loreJaccardStructuralSynopsis(section),
+        body: section.body || ''
+      }
+    }));
+    return loreBm25fScoreDocuments(
+      query,
+      documents,
+      LORE_BM25F_SECTION_FIELD_DEFS,
+      { queryLimit: 200, uniqueQueryLimit: 140, scoreScale: 1.35 }
+    );
+  };
+
+  const loreBm25fSectionScores = (query, sections = []) => (
+    loreBm25fSectionScoreDetails(query, sections).scores.map(item => Number(item.score || 0))
+  );
+
+  const loreMmrSetStats = (leftSet, rightSet) => {
+    const left = leftSet instanceof Set ? leftSet : new Set(leftSet || []);
+    const right = rightSet instanceof Set ? rightSet : new Set(rightSet || []);
+    if (!left.size || !right.size) return { jaccard: 0, containment: 0, intersection: 0 };
+    let intersection = 0;
+    const smaller = left.size <= right.size ? left : right;
+    const larger = smaller === left ? right : left;
+    for (const token of smaller) if (larger.has(token)) intersection += 1;
+    const union = left.size + right.size - intersection;
+    return {
+      jaccard: union > 0 ? intersection / union : 0,
+      containment: intersection / Math.max(1, Math.min(left.size, right.size)),
+      intersection
+    };
+  };
+
+  const loreMmrPrepareFeature = (feature = {}) => {
+    const identity = text(typeof feature === 'string' ? '' : feature?.identity || '').trim();
+    const body = text(typeof feature === 'string' ? feature : feature?.body || '').trim();
+    const identityTokens = new Set(loreBm25Tokens(identity, 180));
+    const bodyTokens = new Set(loreBm25Tokens(body, 560));
+    return {
+      identity,
+      body,
+      identityTokens,
+      bodyTokens,
+      identityHash: identity ? referenceContentHash(normalizeForLoreMatch(identity)) : '',
+      bodyHash: body ? referenceContentHash(normalizeForLoreMatch(body)) : ''
+    };
+  };
+
+  const loreMmrFeatureSimilarity = (leftFeature, rightFeature) => {
+    const left = leftFeature || loreMmrPrepareFeature({});
+    const right = rightFeature || loreMmrPrepareFeature({});
+    if (left.bodyHash && right.bodyHash && left.bodyHash === right.bodyHash) return 1;
+    const body = loreMmrSetStats(left.bodyTokens, right.bodyTokens);
+    const identity = loreMmrSetStats(left.identityTokens, right.identityTokens);
+    const bodySimilarity = clampNumber(body.jaccard * 0.68 + body.containment * 0.32, 0, 1, 0);
+    const identitySimilarity = clampNumber(identity.jaccard * 0.62 + identity.containment * 0.38, 0, 1, 0);
+    return clampNumber(bodySimilarity * 0.90 + identitySimilarity * 0.10, 0, 1, 0);
+  };
+
+  const loreMmrSelect = (entries = [], options = {}) => {
+    const source = Array.isArray(entries) ? entries : [];
+    const limit = clampInt(options.limit, 0, 64, source.length);
+    const lambda = clampNumber(Number(options.lambda ?? LORE_MMR_STAGE_LAMBDA), 0.5, 1, LORE_MMR_STAGE_LAMBDA);
+    const relevanceOf = typeof options.relevanceOf === 'function'
+      ? options.relevanceOf
+      : entry => Number(entry?.score || entry?.rrfScore || entry?.confidenceScore || 0);
+    const featureOf = typeof options.featureOf === 'function'
+      ? options.featureOf
+      : entry => ({ identity: entry?.label || '', body: entry?.content || entry?.text || '' });
+    const keyOf = typeof options.keyOf === 'function'
+      ? options.keyOf
+      : ((entry, order) => text(entry?.id || entry?.key || order));
+    const seedEntries = Array.isArray(options.seedEntries) ? options.seedEntries : [];
+    // If every candidate fits, MMR cannot change membership. Skip expensive pairwise
+    // similarity work and preserve the upstream RRF order while still exposing diagnostics.
+    if (source.length <= limit) {
+      return {
+        engine: LORE_MMR_ENGINE_VERSION,
+        lambda,
+        requested: limit,
+        seedCount: seedEntries.length,
+        bypassed: true,
+        selected: source.map((entry, order) => {
+          const relevance = clampNumber(Number(relevanceOf(entry, order) || 0), 0, 1.5, 0);
+          return {
+            ...entry,
+            mmr: {
+              engine: LORE_MMR_ENGINE_VERSION,
+              lambda: Number(lambda.toFixed(4)),
+              rank: order + 1,
+              score: Number((lambda * relevance).toFixed(6)),
+              relevance: Number(relevance.toFixed(6)),
+              maxSimilarity: 0,
+              similarTo: '',
+              bypassed: true
+            }
+          };
+        })
+      };
+    }
+    const preparedSeeds = seedEntries.map((entry, order) => ({
+      key: keyOf(entry, -(order + 1)),
+      feature: loreMmrPrepareFeature(featureOf(entry, order))
+    }));
+    const remaining = source.map((entry, order) => ({
+      entry,
+      order,
+      key: keyOf(entry, order),
+      relevance: clampNumber(Number(relevanceOf(entry, order) || 0), 0, 1.5, 0),
+      feature: loreMmrPrepareFeature(featureOf(entry, order))
+    }));
+    const selected = [];
+    const selectedFeatures = preparedSeeds.slice();
+    while (remaining.length && selected.length < limit) {
+      let bestIndex = -1;
+      let best = null;
+      for (let index = 0; index < remaining.length; index += 1) {
+        const candidate = remaining[index];
+        let maxSimilarity = 0;
+        let similarTo = '';
+        for (const prior of selectedFeatures) {
+          const similarity = loreMmrFeatureSimilarity(candidate.feature, prior.feature);
+          if (similarity > maxSimilarity) {
+            maxSimilarity = similarity;
+            similarTo = prior.key;
+          }
+        }
+        const mmrScore = lambda * candidate.relevance - (1 - lambda) * maxSimilarity;
+        const evaluated = { ...candidate, mmrScore, maxSimilarity, similarTo };
+        if (
+          !best
+          || evaluated.mmrScore > best.mmrScore + 1e-12
+          || (Math.abs(evaluated.mmrScore - best.mmrScore) <= 1e-12 && evaluated.relevance > best.relevance + 1e-12)
+          || (Math.abs(evaluated.mmrScore - best.mmrScore) <= 1e-12 && Math.abs(evaluated.relevance - best.relevance) <= 1e-12 && evaluated.order < best.order)
+        ) {
+          best = evaluated;
+          bestIndex = index;
+        }
+      }
+      if (bestIndex < 0 || !best) break;
+      remaining.splice(bestIndex, 1);
+      const mmr = {
+        engine: LORE_MMR_ENGINE_VERSION,
+        lambda: Number(lambda.toFixed(4)),
+        rank: selected.length + 1,
+        score: Number(best.mmrScore.toFixed(6)),
+        relevance: Number(best.relevance.toFixed(6)),
+        maxSimilarity: Number(best.maxSimilarity.toFixed(6)),
+        similarTo: best.similarTo || ''
+      };
+      selected.push({ ...best.entry, mmr });
+      selectedFeatures.push({ key: best.key, feature: best.feature });
+    }
+    return {
+      engine: LORE_MMR_ENGINE_VERSION,
+      lambda,
+      requested: limit,
+      seedCount: preparedSeeds.length,
+      selected
+    };
   };
 
   const loreDistinctiveAnchorTokens = value => loreJaccardUnique(
@@ -13524,6 +13880,66 @@ function mergeAgentCbsWarnings(...warningLists) {
       });
     });
     return best;
+  };
+
+  const loreExactChunkCoverageScore = (query = '', chunkText = '') => {
+    const queryTokens = loreDistinctiveAnchorTokens(query)
+      .map(loreJaccardNormalizeKey)
+      .filter(Boolean)
+      .slice(0, 48);
+    if (!queryTokens.length) return 0;
+    const haystack = loreJaccardNormalizeKey(chunkText);
+    if (!haystack) return 0;
+    let hit = 0;
+    for (const token of queryTokens) if (haystack.includes(token)) hit += 1;
+    return clampNumber(hit / queryTokens.length, 0, 1, 0);
+  };
+
+  const rankLoreChunksHybrid = (chunks = [], query = '') => {
+    const source = Array.isArray(chunks) ? chunks : [];
+    if (!source.length) return [];
+    const bm25f = loreBm25fScoreDocuments(
+      query,
+      source.map((chunk, index) => ({
+        id: `chunk-${index + 1}`,
+        fields: { heading: chunk.heading || '', body: chunk.text || '' }
+      })),
+      LORE_BM25F_CHUNK_FIELD_DEFS,
+      { queryLimit: 180, uniqueQueryLimit: 120, scoreScale: 1.25 }
+    );
+    const provisional = source.map((chunk, index) => {
+      const jaccard = loreJaccardScoreText(query, chunk.text, chunk.heading);
+      const bm25 = Number(bm25f.scores[index]?.score || 0);
+      const exact = loreExactChunkCoverageScore(query, chunk.text);
+      return {
+        ...chunk,
+        bm25f: bm25,
+        bm25fRaw: Number(bm25f.scores[index]?.rawScore || 0),
+        jaccard: Number(jaccard.score || 0),
+        exact,
+        confidenceScore: clampNumber(bm25 * 0.55 + Number(jaccard.score || 0) * 0.35 + exact * 0.10, 0, 1.2, 0)
+      };
+    });
+    const rrf = loreRrfFuse(provisional, [
+      { name: 'bm25f', weight: 1.00, minScore: 0, score: item => item.bm25f },
+      { name: 'jaccard', weight: 0.75, minScore: 0, score: item => item.jaccard },
+      { name: 'exact', weight: 0.55, minScore: 0.01, score: item => item.exact }
+    ], { keyOf: item => `chunk:${item.order}` });
+    return provisional.map((item, index) => {
+      const fusion = rrf.scores[index] || { score: 0, rawScore: 0, ranks: {}, contributions: {} };
+      return {
+        ...item,
+        rrfScore: Number(fusion.score || 0),
+        rrfRaw: Number(fusion.rawScore || 0),
+        rrfRanks: fusion.ranks || {},
+        rrfContributions: fusion.contributions || {}
+      };
+    }).sort((left, right) => (
+      right.rrfScore - left.rrfScore
+      || right.confidenceScore - left.confidenceScore
+      || right.bm25f - left.bm25f
+      || left.order - right.order
+    ));
   };
 
   const loreJaccardScoreText = (query, body, heading = '') => {
@@ -13556,52 +13972,127 @@ function mergeAgentCbsWarnings(...warningLists) {
     const source = text(content || '').trim();
     const budget = clampInt(maxChars, 600, 6000, 1800);
     const sections = loreJaccardSplitSections(source);
-    const bm25Scores = loreBm25fSectionScores(query, sections);
-    const ranked = sections.map((section, sectionIndex) => {
+    const bm25f = loreBm25fSectionScoreDetails(query, sections);
+    const provisional = sections.map((section, sectionIndex) => {
       const synopsis = loreJaccardStructuralSynopsis(section);
       const lexicalScore = loreJaccardScoreText(query, `${synopsis}\n${compactMiddle(section.body, 2600)}`, section.path.join(' > ') || section.heading);
-      const bm25 = Number(bm25Scores[sectionIndex] || 0);
+      const bm25Detail = bm25f.scores[sectionIndex] || { score: 0, rawScore: 0, fieldRaw: {}, matchedTerms: [] };
+      const bm25 = Number(bm25Detail.score || 0);
       const entityAnchor = loreExactEntityAnchorScore(query, section.path.join(' > ') || section.heading);
-      const score = clampNumber(
-        Number(lexicalScore.score || 0) * 0.72 + bm25 * 0.20 + entityAnchor * 0.08,
+      const confidenceScore = clampNumber(
+        bm25 * 0.52 + Number(lexicalScore.score || 0) * 0.40 + entityAnchor * 0.08,
         0,
         1.2,
         0
       );
-      return { section, synopsis, ...lexicalScore, lexicalScore: lexicalScore.score, bm25, entityAnchor, score };
-    }).sort((left, right) => right.score - left.score || right.heading - left.heading || left.section.order - right.section.order);
-    const bestScore = Number(ranked[0]?.score || 0);
+      return {
+        section,
+        synopsis,
+        ...lexicalScore,
+        lexicalScore: lexicalScore.score,
+        bm25,
+        bm25Raw: Number(bm25Detail.rawScore || 0),
+        bm25Fields: bm25Detail.fieldRaw || {},
+        bm25Terms: bm25Detail.matchedTerms || [],
+        entityAnchor,
+        confidenceScore
+      };
+    });
+    const rrf = loreRrfFuse(provisional, [
+      { name: 'bm25f', weight: 1.00, minScore: 0, score: item => item.bm25 },
+      { name: 'jaccard', weight: 0.82, minScore: 0, score: item => item.lexicalScore },
+      { name: 'entity', weight: 0.45, minScore: 0.02, score: item => item.entityAnchor }
+    ], {
+      keyOf: item => `section:${item.section?.order ?? 0}`
+    });
+    const ranked = provisional.map((item, index) => {
+      const fusion = rrf.scores[index] || { score: 0, rawScore: 0, ranks: {}, contributions: {} };
+      return {
+        ...item,
+        score: item.confidenceScore,
+        rrfScore: Number(fusion.score || 0),
+        rrfRaw: Number(fusion.rawScore || 0),
+        rrfRanks: fusion.ranks || {},
+        rrfContributions: fusion.contributions || {}
+      };
+    }).sort((left, right) => (
+      right.rrfScore - left.rrfScore
+      || right.confidenceScore - left.confidenceScore
+      || right.bm25 - left.bm25
+      || right.heading - left.heading
+      || left.section.order - right.section.order
+    ));
+    const bestScore = Number(ranked[0]?.confidenceScore || 0);
     if (!source || !query.trim() || bestScore < LORE_JACCARD_TUNING.sectionScoreFloor) {
       return {
         text: compact(source, budget),
         score: bestScore,
+        confidenceScore: bestScore,
+        engine: LORE_HYBRID_RETRIEVAL_ENGINE_VERSION,
+        bm25Engine: LORE_BM25F_ENGINE_VERSION,
+        rrfEngine: LORE_RRF_ENGINE_VERSION,
+        rrfK: LORE_RRF_K,
+        rrfScore: Number(ranked[0]?.rrfScore || 0),
+        rrfRanks: ranked[0]?.rrfRanks || {},
         bm25: Number(ranked[0]?.bm25 || 0),
+        bm25Raw: Number(ranked[0]?.bm25Raw || 0),
+        bm25Fields: ranked[0]?.bm25Fields || {},
         entityAnchor: Number(ranked[0]?.entityAnchor || 0),
         matchedSections: ranked.slice(0, 1).map(item => item.section.path.join(' > ') || item.section.heading).filter(Boolean),
         fallback: true
       };
     }
-    const selected = ranked
-      .filter((item, index) => index === 0 || (index < 3 && item.score >= Math.max(LORE_JACCARD_TUNING.sectionScoreFloor, bestScore * 0.58)))
-      .slice(0, 3);
+    const sectionCandidates = ranked
+      .filter((item, index) => index === 0 || (index < 8 && item.confidenceScore >= Math.max(LORE_JACCARD_TUNING.sectionScoreFloor, bestScore * 0.58)));
+    const sectionMmr = loreMmrSelect(sectionCandidates, {
+      limit: 3,
+      lambda: LORE_MMR_SECTION_LAMBDA,
+      relevanceOf: item => clampNumber(Number(item.rrfScore || 0) * 0.72 + Number(item.confidenceScore || 0) * 0.28, 0, 1.2, 0),
+      featureOf: item => ({
+        identity: item.section?.path?.join(' > ') || item.section?.heading || '',
+        body: `${text(item.synopsis || '')}\n${text(item.section?.body || '')}`
+      }),
+      keyOf: item => `section:${item.section?.order ?? 0}`
+    });
+    const selected = sectionMmr.selected;
     const pieces = [];
+    const selectedChunks = [];
     let remaining = budget;
     for (const item of selected) {
       if (remaining < 220) break;
       const sectionLabel = item.section.path.join(' > ') || item.section.heading || '관련 구간';
-      const chunks = loreJaccardChunkSection(item.section)
-        .map(chunk => ({ ...chunk, ...loreJaccardScoreText(query, chunk.text, chunk.heading) }))
-        .sort((left, right) => right.score - left.score || left.order - right.order);
+      const rankedChunks = rankLoreChunksHybrid(loreJaccardChunkSection(item.section), query);
+      const chunkMmr = loreMmrSelect(rankedChunks, {
+        limit: 3,
+        lambda: LORE_MMR_CHUNK_LAMBDA,
+        relevanceOf: chunk => clampNumber(Number(chunk.rrfScore || 0) * 0.74 + Number(chunk.confidenceScore || 0) * 0.26, 0, 1.2, 0),
+        featureOf: chunk => ({ identity: chunk.heading || '', body: chunk.text || '' }),
+        keyOf: chunk => `chunk:${item.section?.order ?? 0}:${chunk.order ?? 0}`
+      });
+      const chunks = chunkMmr.selected;
       const synopsis = item.synopsis ? `[구조 요약]\n${item.synopsis}` : '';
       const detailBudget = Math.max(300, Math.min(remaining, selected.length === 1 ? remaining : Math.floor(budget * 0.62)));
       const detailPieces = [];
       let detailChars = 0;
-      for (const chunk of chunks.slice(0, 3)) {
+      for (const chunk of chunks) {
         const available = detailBudget - detailChars;
         if (available < 180) break;
         const chunkText = compact(chunk.text, available);
         if (!chunkText) continue;
         detailPieces.push(chunkText);
+        selectedChunks.push({
+          section: sectionLabel,
+          order: Number(chunk.order || 0),
+          chars: chunkText.length,
+          bm25f: Number(Number(chunk.bm25f || 0).toFixed(4)),
+          jaccard: Number(Number(chunk.jaccard || 0).toFixed(4)),
+          exact: Number(Number(chunk.exact || 0).toFixed(4)),
+          rrfScore: Number(Number(chunk.rrfScore || 0).toFixed(4)),
+          rrfRanks: chunk.rrfRanks || {},
+          mmrScore: Number(Number(chunk.mmr?.score || 0).toFixed(4)),
+          mmrMaxSimilarity: Number(Number(chunk.mmr?.maxSimilarity || 0).toFixed(4)),
+          mmrSimilarTo: chunk.mmr?.similarTo || ''
+        });
         detailChars += chunkText.length + 2;
       }
       const block = [
@@ -13618,9 +14109,28 @@ function mergeAgentCbsWarnings(...warningLists) {
     return {
       text: compact(pieces.join('\n\n'), budget),
       score: bestScore,
+      confidenceScore: bestScore,
+      engine: LORE_HYBRID_RETRIEVAL_ENGINE_VERSION,
+      bm25Engine: LORE_BM25F_ENGINE_VERSION,
+      rrfEngine: LORE_RRF_ENGINE_VERSION,
+      rrfK: LORE_RRF_K,
+      mmrEngine: LORE_MMR_ENGINE_VERSION,
+      mmr: { lambda: LORE_MMR_SECTION_LAMBDA, selectedCount: selected.length },
+      rrfScore: Number(selected[0]?.rrfScore || 0),
+      rrfRanks: selected[0]?.rrfRanks || {},
       bm25: Number(selected[0]?.bm25 || 0),
+      bm25Raw: Number(selected[0]?.bm25Raw || 0),
+      bm25Fields: selected[0]?.bm25Fields || {},
       entityAnchor: Number(selected[0]?.entityAnchor || 0),
       matchedSections: selected.map(item => item.section.path.join(' > ') || item.section.heading).filter(Boolean),
+      chunkRetrieval: {
+        engine: LORE_HYBRID_RETRIEVAL_ENGINE_VERSION,
+        bm25fEngine: LORE_BM25F_ENGINE_VERSION,
+        rrfEngine: LORE_RRF_ENGINE_VERSION,
+        mmrEngine: LORE_MMR_ENGINE_VERSION,
+        mmrLambda: LORE_MMR_CHUNK_LAMBDA,
+        selected: selectedChunks.slice(0, 9)
+      },
       fallback: false
     };
   };
@@ -13645,6 +14155,90 @@ function mergeAgentCbsWarnings(...warningLists) {
       directAlias,
       sectionAnchorScore: Number(sectionAnchorScore.toFixed(4))
     };
+  };
+
+  const loreSemanticSearchSupportMessages = (currentQuery = '', terminalQuery = '', recentMessages = [], scanDepth = DEFAULT_RECENT_TURNS) => {
+    const current = text(currentQuery).trim();
+    const terminal = text(terminalQuery).trim();
+    const recent = (Array.isArray(recentMessages) ? recentMessages : [])
+      .map(message => loreSearchableMessage(message))
+      .filter(message => message.data || message.prompt)
+      .filter(message => !(current && message.role === 'user' && sameRagChatContent(message.data, current)))
+      .slice(-clampInt(scanDepth, 1, 128, DEFAULT_RECENT_TURNS));
+    const messages = [];
+    if (current) messages.push(loreSearchableMessage({ source: 'current user input', role: 'user', prompt: `{{user}}:${current}`, data: current }));
+    if (terminal) messages.push(loreSearchableMessage({ source: 'terminal assistant scene', role: 'assistant', prompt: `{{char}}:${terminal}`, data: terminal }));
+    for (const message of recent) {
+      if (terminal && message.role === 'assistant' && sameRagChatContent(message.data, terminal)) continue;
+      messages.push(message);
+    }
+    return messages;
+  };
+
+  const loreSemanticCandidateEligible = (candidate = {}, currentQuery = '', terminalQuery = '', chatLength = 1, options = {}) => {
+    if (!candidate || candidate.mode === 'folder' || candidate.forceState === 'deactivate' || candidate.inject?.lore) return false;
+    if (candidate.activationMin && chatLength < candidate.activationMin) return false;
+    if (candidate.activationEvery && chatLength % candidate.activationEvery !== 0) return false;
+    const scanDepth = clampInt(candidate.scanDepth || options.defaultScanDepth || DEFAULT_RECENT_TURNS, 1, 128, DEFAULT_RECENT_TURNS);
+    const supportMessages = loreSemanticSearchSupportMessages(currentQuery, terminalQuery, options.recentMessages || [], scanDepth);
+    const matchesKeys = (keys, all = false) => loreKeyMatchesSearchMessages(keys, supportMessages, {
+      useRegex: candidate.useRegex,
+      fullWordMatching: candidate.fullWordMatching === true,
+      all
+    });
+    if (candidate.excludeKeys?.length && matchesKeys(candidate.excludeKeys)) return false;
+    if (candidate.excludeKeysAll?.length && matchesKeys(candidate.excludeKeysAll, true)) return false;
+    if (candidate.selective && candidate.secondaryKeys?.length && !matchesKeys(candidate.secondaryKeys)) return false;
+    if (candidate.additionalKeys?.length && !matchesKeys(candidate.additionalKeys)) return false;
+    return true;
+  };
+
+  const loreActivationKeyStrength = lore => {
+    const route = text(lore?.keyActivationRoute || lore?.activationRoute || '').trim();
+    const strengths = {
+      forced: 1.00,
+      chat_local_always: 1.00,
+      always: 1.00,
+      current_input: 1.00,
+      terminal_scene: 0.92,
+      recent_context: 0.78,
+      recursive: 0.62,
+      continuity: 0.38
+    };
+    if (Object.prototype.hasOwnProperty.call(strengths, route)) return strengths[route];
+    return lore?.keyActivated === true ? 0.55 : 0;
+  };
+
+  const mergeLoreCandidateSignals = (semanticLore = [], keyActiveLore = [], hostSelectedLore = []) => {
+    const merged = new Map();
+    const put = (lore, signal = '') => {
+      if (!lore) return;
+      const id = loreContinuityIdentity(lore);
+      if (!id) return;
+      const previous = merged.get(id) || null;
+      const next = previous ? { ...previous, ...lore } : { ...lore };
+      if (signal === 'semantic') {
+        next.semanticCandidate = true;
+        if (!next.activationRoute) next.activationRoute = 'semantic_candidate';
+      }
+      if (signal === 'key') {
+        next.keyActivated = true;
+        next.keyActivationRoute = lore.activationRoute || next.keyActivationRoute || '';
+        next.keyStrength = Math.max(Number(next.keyStrength || 0), loreActivationKeyStrength(lore));
+        next.keyActivationEvidence = lore.activationEvidence || next.keyActivationEvidence || null;
+        if (!previous || previous.activationRoute === 'semantic_candidate') next.activationRoute = lore.activationRoute || next.activationRoute;
+      }
+      if (signal === 'host') {
+        next.hostSelected = true;
+        next.hostSelectionEvidence = lore.activationEvidence || next.hostSelectionEvidence || null;
+        if (!previous || previous.activationRoute === 'semantic_candidate') next.activationRoute = lore.activationRoute || next.activationRoute;
+      }
+      merged.set(id, next);
+    };
+    semanticLore.forEach(lore => put(lore, 'semantic'));
+    keyActiveLore.forEach(lore => put(lore, 'key'));
+    hostSelectedLore.forEach(lore => put(lore, 'host'));
+    return Array.from(merged.values());
   };
 
   const promoteLoreCandidatesWithJaccard = (candidates = [], activeLore = [], query = '', options = {}) => {
@@ -13751,13 +14345,16 @@ function mergeAgentCbsWarnings(...warningLists) {
       activationRoute: entry.activationRoute,
       continuityEligible: false,
       jaccardPromotion: {
-        engine: LORE_JACCARD_ENGINE_VERSION,
+        engine: LORE_HYBRID_RETRIEVAL_ENGINE_VERSION,
         route: entry.activationRoute,
         score: Number(entry.score.toFixed(4)),
         identityScore: Number(entry.identityScore.toFixed(4)),
         evidence: entry.evidence,
         matchedSections: entry.excerpt.matchedSections,
         excerptScore: Number(entry.excerpt.score.toFixed(4)),
+        bm25f: Number(Number(entry.excerpt.bm25 || 0).toFixed(4)),
+        bm25fRaw: Number(Number(entry.excerpt.bm25Raw || 0).toFixed(4)),
+        bm25fEngine: entry.excerpt.bm25Engine || LORE_BM25F_ENGINE_VERSION,
         rank: rank + 1
       }
     }));
@@ -13770,20 +14367,12 @@ function mergeAgentCbsWarnings(...warningLists) {
     };
   };
 
-  const applyLoreActivationMode = (mode, candidates = [], activeLore = [], query = '', options = {}) => {
-    const normalizedMode = normalizeLoreActivationMode(mode);
-    if (normalizedMode !== 'gradia_extended') {
-      return {
-        mode: normalizedMode,
-        activeLore: [...(activeLore || [])],
-        promotions: []
-      };
-    }
-    return {
-      mode: normalizedMode,
-      ...promoteLoreCandidatesWithJaccard(candidates, activeLore, query, options)
-    };
-  };
+  const applyLoreActivationMode = (mode, candidates = [], activeLore = [], query = '', options = {}) => ({
+    // Legacy/debug compatibility helper. Production retrieval always goes through
+    // buildGradiaSharedLoreCandidatePool(), which fuses host + key + semantic evidence.
+    mode: normalizeLoreActivationMode(mode),
+    ...promoteLoreCandidatesWithJaccard(candidates, activeLore, query, options)
+  });
 
   const retrieveActiveLoreWithJaccard = (activeLore = [], primaryQuery = '', continuityQuery = '', maxContextChars = DEFAULT_SHADOW_RISU_CONTEXT_CHARS) => {
     const currentQuery = compact(primaryQuery, 2400);
@@ -13834,10 +14423,13 @@ function mergeAgentCbsWarnings(...warningLists) {
         ...entry.lore,
         retrievedContent: excerpt.text,
         retrieval: {
-          engine: LORE_JACCARD_ENGINE_VERSION,
+          engine: LORE_HYBRID_RETRIEVAL_ENGINE_VERSION,
           score: Number(entry.score.toFixed(4)),
           excerptScore: Number(excerpt.score.toFixed(4)),
           bm25: Number(Number(excerpt.bm25 || 0).toFixed(4)),
+          bm25f: Number(Number(excerpt.bm25 || 0).toFixed(4)),
+          bm25fRaw: Number(Number(excerpt.bm25Raw || 0).toFixed(4)),
+          bm25fEngine: excerpt.bm25Engine || LORE_BM25F_ENGINE_VERSION,
           entityAnchor: Number(Number(excerpt.entityAnchor || 0).toFixed(4)),
           matchedSections: excerpt.matchedSections,
           fallback: excerpt.fallback,
@@ -13850,22 +14442,6 @@ function mergeAgentCbsWarnings(...warningLists) {
     return retrieved;
   };
 
-  const retrieveActiveLoreRisuStyle = (activeLore = [], engine = 'risu_key_full_text_v1') => (activeLore || []).map((lore, rank) => ({
-    ...lore,
-    retrievedContent: text(lore.content || ''),
-    retrieval: {
-      engine,
-      score: 0,
-      excerptScore: 0,
-      bm25: 0,
-      entityAnchor: 0,
-      matchedSections: [],
-      fallback: false,
-      rawChars: text(lore.content).length,
-      excerptChars: text(lore.content).length,
-      rank: rank + 1
-    }
-  }));
 
   const loreStageRouteWeight = (stageName, route) => {
     const common = {
@@ -13934,7 +14510,190 @@ function mergeAgentCbsWarnings(...warningLists) {
     return 0.55;
   };
 
-  const scoreLoreForStageReranker = (lore = {}, stageName = 'shadow_act', primaryQuery = '', terminalQuery = '') => {
+  const loreRerankerIdentityAliases = lore => uniqueContinuityStrings([
+    lore?.label,
+    lore?.name,
+    lore?.key,
+    ...(Array.isArray(lore?.keys) ? lore.keys : []),
+    ...(Array.isArray(lore?.secondaryKeys) ? lore.secondaryKeys : [])
+  ].filter(continuityEntityUsable));
+
+  const loreRerankerLiteralAliasHit = (queryValue, lore) => {
+    const query = text(queryValue || '').normalize('NFKC').toLocaleLowerCase();
+    const normalizedQuery = normalizeContinuityAlias(query);
+    if (!query) return false;
+    return loreRerankerIdentityAliases(lore).some(aliasValue => {
+      const alias = cleanContinuityEntity(aliasValue).normalize('NFKC').toLocaleLowerCase();
+      if (!alias || alias.length < 2) return false;
+      if (query.includes(alias)) return true;
+      const normalizedAlias = normalizeContinuityAlias(alias);
+      return normalizedAlias.length >= 3 && normalizedQuery.includes(normalizedAlias);
+    });
+  };
+
+  const loreRerankerMentionWindow = (queryValue, lore, radius = 130) => {
+    const query = text(queryValue || '').normalize('NFKC');
+    if (!query) return '';
+    const lower = query.toLocaleLowerCase();
+    for (const aliasValue of loreRerankerIdentityAliases(lore)) {
+      const alias = cleanContinuityEntity(aliasValue).normalize('NFKC');
+      if (!alias) continue;
+      const index = lower.indexOf(alias.toLocaleLowerCase());
+      if (index >= 0) return query.slice(Math.max(0, index - radius), Math.min(query.length, index + alias.length + radius));
+    }
+    return '';
+  };
+
+  const loreRerankerProfileTraits = lore => {
+    const content = text(lore?.content || lore?.retrievedContent || '').slice(0, 3200);
+    const opening = content.slice(0, 1200);
+    const explicitProfile = /(?:^|\n)\s*(?:Name|이름|Age|나이|Gender|성별)\s*[:：]/im.test(content)
+      || /(?:character\s*profile|인물\s*프로필)/i.test(content.slice(0, 900));
+    const openingIdentity = loreRerankerIdentityAliases(lore).some(alias => {
+      const normalizedAlias = normalizeContinuityAlias(alias);
+      return normalizedAlias.length >= 2 && normalizeContinuityAlias(opening).includes(normalizedAlias);
+    });
+    const demographicOpening = /(?:\b(?:male|female|man|woman|boy|girl|elderly|teen)\b|남성|여성|남자|여자|소년|소녀|노인|노년|고령|\d{1,3}\s*(?:세|살))/i.test(opening);
+    const profileLike = explicitProfile || (openingIdentity && demographicOpening);
+    if (!profileLike) return { profileLike: false, gender: '', ageBand: '' };
+    const genderField = content.match(/(?:^|\n)\s*(?:Gender|성별)\s*[:：]\s*([^\n,;|]{1,50})/im)?.[1] || '';
+    let gender = '';
+    if (/(?:female|woman|girl|여성|여자|소녀)/i.test(genderField)) gender = 'female';
+    else if (/(?:male|man|boy|남성|남자|소년)/i.test(genderField)) gender = 'male';
+    if (!gender) {
+      const openingFemale = /(?:\bfemale\b|\bwoman\b|\bgirl\b|여성|여자|소녀)/i.test(opening);
+      const openingMale = /(?:\bmale\b|\bman\b|\bboy\b|남성|남자|소년)/i.test(opening);
+      if (openingFemale && !openingMale) gender = 'female';
+      else if (openingMale && !openingFemale) gender = 'male';
+    }
+    const ageField = content.match(/(?:^|\n)\s*(?:Age|나이)\s*[:：]\s*(\d{1,3})/im)?.[1]
+      || opening.match(/(?:^|[^\d])(\d{1,3})\s*(?:세|살)(?:[^\d]|$)/)?.[1];
+    const age = ageField ? Number(ageField) : NaN;
+    let ageBand = '';
+    if (Number.isFinite(age)) {
+      if (age >= 55) ageBand = 'elder';
+      else if (age <= 24) ageBand = 'young';
+    } else if (/(?:노인|노년|고령|elderly|old\s+(?:man|woman)|senior\s+citizen)/i.test(opening)) ageBand = 'elder';
+    return { profileLike: true, gender, ageBand };
+  };
+
+  const loreRerankerQueryTraits = (queryValue, lore) => {
+    const window = loreRerankerMentionWindow(queryValue, lore);
+    if (!window) return { gender: '', ageBand: '', window: '' };
+    const female = /(?:소녀|여성|여자|여인|여학생|그녀|girl|woman|female)/i.test(window);
+    const male = /(?:소년|남성|남자|남학생|boy|man|male)/i.test(window);
+    const elder = /(?:노인|노년|고령|할아버지|할머니|elderly|old\s+(?:man|woman)|senior\s+citizen)/i.test(window);
+    const young = /(?:소녀|소년|어린|젊은|10대|십대|학생|girl|boy|teen|young)/i.test(window);
+    return {
+      gender: female && !male ? 'female' : male && !female ? 'male' : '',
+      ageBand: elder && !young ? 'elder' : young && !elder ? 'young' : '',
+      window
+    };
+  };
+
+  const loreRerankerIdentityConflict = (lore, primaryQuery = '', terminalQuery = '') => {
+    const exactIdentity = loreRerankerLiteralAliasHit(primaryQuery, lore) || loreRerankerLiteralAliasHit(terminalQuery, lore);
+    if (!exactIdentity) return { exactIdentity: false, conflict: false, penalty: 0, reasons: [] };
+    const profile = loreRerankerProfileTraits(lore);
+    if (!profile.profileLike) return { exactIdentity: true, conflict: false, penalty: 0, reasons: [] };
+    const current = loreRerankerQueryTraits(primaryQuery, lore);
+    const terminal = current.window ? { gender: '', ageBand: '' } : loreRerankerQueryTraits(terminalQuery, lore);
+    const query = current.window ? current : terminal;
+    const reasons = [];
+    let penalty = 0;
+    if (query.gender && profile.gender && query.gender !== profile.gender) {
+      reasons.push(`gender:${query.gender}->${profile.gender}`);
+      penalty += 0.34;
+    }
+    if (query.ageBand && profile.ageBand && query.ageBand !== profile.ageBand) {
+      reasons.push(`age:${query.ageBand}->${profile.ageBand}`);
+      penalty += 0.24;
+    }
+    penalty = Math.min(0.46, penalty);
+    return { exactIdentity: true, conflict: reasons.length > 0, penalty, reasons };
+  };
+
+  const loreRerankerRelevantBody = (rawContent = '', query = '', maxChars = 6200) => {
+    const source = text(rawContent || '').trim();
+    const budget = clampInt(maxChars, 1200, 8000, 6200);
+    if (!source || source.length <= budget) return source;
+    const queryText = text(query || '').trim();
+    if (!queryText) return compactMiddle(source, budget);
+    const cacheKey = `stage-lore-relevant-body-v3:${referenceContentHash(source)}:${referenceContentHash(queryText)}:${budget}`;
+    const cached = StageLoreRerankerFeatureCache.get(cacheKey);
+    if (typeof cached === 'string') return cached;
+    const excerptBudget = Math.max(900, Math.min(5600, budget - 700));
+    const excerpt = retrieveLoreExcerptWithJaccard(source, queryText, excerptBudget);
+    const tailGuard = compactMiddle(source, Math.min(1200, Math.max(600, budget - text(excerpt?.text || '').length - 40)));
+    const combined = [text(excerpt?.text || '').trim(), tailGuard].filter(Boolean).join('\n\n');
+    const result = compact(combined || compactMiddle(source, budget), budget);
+    setStageLoreRerankerCache(cacheKey, result);
+    return result;
+  };
+
+  const loreBm25fLoreCorpusScores = (lores = [], query = '', maxBodyChars = 6200) => {
+    const source = Array.isArray(lores) ? lores : [];
+    const queryText = text(query || '').trim();
+    if (!queryText || !source.length) {
+      return {
+        engine: LORE_BM25F_ENGINE_VERSION,
+        k1: LORE_BM25F_K1,
+        queryTokenCount: 0,
+        queryTokens: [],
+        documentCount: source.length,
+        averageFieldLengths: {},
+        scores: source.map((lore, index) => ({
+          id: loreContinuityIdentity(lore) || `lore-${index + 1}`,
+          score: 0,
+          rawScore: 0,
+          matchedTerms: [],
+          fieldRaw: {}
+        }))
+      };
+    }
+    const corpusHasher = createTextHasher();
+    source.forEach((lore) => {
+      corpusHasher.update(loreContinuityIdentity(lore));
+      corpusHasher.update(referenceContentHash(text(lore?.content || lore?.retrievedContent || '')));
+    });
+    const cacheKey = `stage-lore-bm25f-corpus-v2:${corpusHasher.digest()}:${referenceContentHash(queryText)}:${maxBodyChars}`;
+    const cached = StageLoreRerankerFeatureCache.get(cacheKey);
+    if (cached?.engine === LORE_BM25F_ENGINE_VERSION && Array.isArray(cached?.scores)) return cached;
+    const documents = source.map((lore, index) => {
+      const rawContent = text(lore?.content || lore?.retrievedContent || '').trim();
+      const identity = [
+        lore?.label,
+        lore?.key,
+        ...(Array.isArray(lore?.keys) ? lore.keys : []),
+        ...(Array.isArray(lore?.secondaryKeys) ? lore.secondaryKeys : []),
+        lore?.source,
+        lore?.moduleName,
+        lore?.moduleNamespace
+      ].filter(Boolean).join(' ');
+      const headings = loreJaccardSplitSections(rawContent)
+        .map(section => section.path?.join(' > ') || section.heading || '')
+        .filter(Boolean)
+        .slice(0, 96)
+        .join('\n');
+      const body = queryText
+        ? loreRerankerRelevantBody(rawContent, queryText, maxBodyChars)
+        : compactMiddle(rawContent, Math.min(maxBodyChars, 6200));
+      return {
+        id: loreContinuityIdentity(lore) || `lore-${index + 1}`,
+        fields: { identity, heading: headings, body }
+      };
+    });
+    const result = loreBm25fScoreDocuments(
+      queryText,
+      documents,
+      LORE_BM25F_LORE_FIELD_DEFS,
+      { queryLimit: 240, uniqueQueryLimit: 160, scoreScale: 1.65 }
+    );
+    setStageLoreRerankerCache(cacheKey, result);
+    return result;
+  };
+
+  const scoreLoreForStageReranker = (lore = {}, stageName = 'shadow_act', primaryQuery = '', terminalQuery = '', bm25fScores = {}) => {
     const rerankerStage = loreRerankerStageName(stageName) || 'shadow_act';
     const def = STAGE_LORE_RERANKER_DEFS[rerankerStage] || STAGE_LORE_RERANKER_DEFS.shadow_act;
     const identity = [
@@ -13944,16 +14703,23 @@ function mergeAgentCbsWarnings(...warningLists) {
     const rawContent = lore.content || lore.retrievedContent || '';
     const staticHash = createTextHasher().update(identity).update(rawContent).digest();
     const queryHash = createTextHasher().update(primaryQuery).update(terminalQuery).digest();
-    const baseCacheKey = `stage-lore-base:${staticHash}:${queryHash}`;
+    const baseCacheKey = `stage-lore-base-v2:${staticHash}:${queryHash}`;
     let base = StageLoreRerankerFeatureCache.get(baseCacheKey);
     if (!base) {
-      const body = `${identity}\n${compactMiddle(rawContent, 6200)}`;
+      const currentBody = loreRerankerRelevantBody(rawContent, primaryQuery || terminalQuery, 6200);
+      const terminalBody = loreRerankerRelevantBody(rawContent, terminalQuery || primaryQuery, 4200);
+      const disambiguation = loreRerankerIdentityConflict(lore, primaryQuery, terminalQuery);
       base = {
-        current: primaryQuery ? loreJaccardScoreText(primaryQuery, body, identity).score : 0,
-        terminal: terminalQuery ? loreJaccardScoreText(terminalQuery, body, identity).score : 0,
+        current: primaryQuery ? loreJaccardScoreText(primaryQuery, `${identity}\n${currentBody}`, identity).score : 0,
+        terminal: terminalQuery ? loreJaccardScoreText(terminalQuery, `${identity}\n${terminalBody}`, identity).score : 0,
         identity: (primaryQuery || terminalQuery)
           ? loreExactEntityAnchorScore(`${primaryQuery}\n${terminalQuery}`, identity)
           : 0,
+        exactIdentity: disambiguation.exactIdentity === true,
+        identityConflict: disambiguation.conflict === true,
+        identityPenalty: Number(disambiguation.penalty || 0),
+        identityConflictReasons: disambiguation.reasons || [],
+        sectioned: text(rawContent || '').length > 6200,
         existing: clampNumber(
           Math.max(Number(lore.retrieval?.score || 0), Number(lore.jaccardPromotion?.score || 0)),
           0, 1.2, 0
@@ -13961,38 +14727,94 @@ function mergeAgentCbsWarnings(...warningLists) {
       };
       setStageLoreRerankerCache(baseCacheKey, base);
     }
-    const domainCacheKey = `stage-lore-domain:${rerankerStage}:${staticHash}`;
+    const domainCacheKey = `stage-lore-domain-v2:${rerankerStage}:${staticHash}`;
     let domain = StageLoreRerankerFeatureCache.get(domainCacheKey);
     if (domain == null) {
-      const domainBody = `${identity}\n${compactMiddle(rawContent, 6200)}`;
-      domain = def.domainQuery ? loreJaccardScoreText(def.domainQuery, domainBody, identity).score : 0;
+      const domainBody = loreRerankerRelevantBody(rawContent, def.domainQuery || primaryQuery || terminalQuery, 6200);
+      domain = def.domainQuery ? loreJaccardScoreText(def.domainQuery, `${identity}\n${domainBody}`, identity).score : 0;
       setStageLoreRerankerCache(domainCacheKey, domain);
     }
-    const current = Number(base.current || 0);
-    const terminal = Number(base.terminal || 0);
+    const currentJaccard = Number(base.current || 0);
+    const terminalJaccard = Number(base.terminal || 0);
+    const domainJaccard = Number(domain || 0);
+    const currentBm25f = Number(bm25fScores?.current?.score || 0);
+    const terminalBm25f = Number(bm25fScores?.terminal?.score || 0);
+    const domainBm25f = 0;
+    const current = primaryQuery
+      ? clampNumber(currentBm25f * 0.60 + currentJaccard * 0.40, 0, 1.2, 0)
+      : 0;
+    const terminal = terminalQuery
+      ? clampNumber(terminalBm25f * 0.56 + terminalJaccard * 0.44, 0, 1.2, 0)
+      : 0;
+    // Domain routing is a static classifier rather than a retrieval query.
+    // Keep the cheaper cached Jaccard domain signal here; BM25F is reserved for
+    // the live current/terminal evidence where corpus IDF has real retrieval value.
+    const domainCombined = def.domainQuery ? domainJaccard : 0;
     const identityScore = Number(base.identity || 0);
     const existing = Number(base.existing || 0);
     const route = clampNumber(loreStageRouteWeight(rerankerStage, lore.activationRoute) / 130, 0, 1, 0);
     const source = loreRerankerSourceAffinity(rerankerStage, lore);
     const priority = clampNumber(Math.max(0, Number(lore.priority || 0)) / 1000, 0, 1, 0);
+    const hostSelected = lore.hostSelected === true || /^risu_request_selected/.test(text(lore.activationRoute || ''));
+    const keyStrength = Math.max(Number(lore.keyStrength || 0), loreActivationKeyStrength(lore));
+    const keyActivated = keyStrength > 0;
     const protectedActivation = loreRerankerProtectedActivation(lore);
+    const identityPenalty = Number(base.identityPenalty || 0);
+    const currentApplied = base.identityConflict === true ? current * 0.55 : current;
+    const terminalApplied = base.identityConflict === true ? terminal * 0.55 : terminal;
+    const identityApplied = base.identityConflict === true ? 0 : identityScore;
     const w = def.weights;
-    const score = clampNumber(
-      current * w.current
-      + terminal * w.terminal
-      + identityScore * w.identity
-      + domain * w.domain
+    const confidenceScore = clampNumber(
+      currentApplied * w.current
+      + terminalApplied * w.terminal
+      + identityApplied * w.identity
+      + domainCombined * w.domain
       + existing * w.existing
       + route * w.route
       + source * w.source
       + priority * w.priority
-      + (protectedActivation ? 0.07 : 0),
+      + (protectedActivation ? 0.07 : 0)
+      - identityPenalty,
       0, 1.5, 0
     );
     return {
-      score,
+      score: confidenceScore,
+      confidenceScore,
       protectedActivation,
-      components: { current, terminal, identity: identityScore, domain, existing, route, source, priority }
+      exactIdentity: base.exactIdentity === true,
+      identityConflict: base.identityConflict === true,
+      identityConflictReasons: Array.isArray(base.identityConflictReasons) ? base.identityConflictReasons : [],
+      components: {
+        current,
+        currentJaccard,
+        currentBm25f,
+        currentBm25fRaw: Number(bm25fScores?.current?.rawScore || 0),
+        currentApplied,
+        terminal,
+        terminalJaccard,
+        terminalBm25f,
+        terminalBm25fRaw: Number(bm25fScores?.terminal?.rawScore || 0),
+        terminalApplied,
+        identity: identityScore,
+        identityApplied,
+        exactIdentity: base.exactIdentity === true ? 1 : 0,
+        identityConflict: base.identityConflict === true ? 1 : 0,
+        identityPenalty,
+        sectioned: base.sectioned === true ? 1 : 0,
+        domain: domainCombined,
+        domainJaccard,
+        domainBm25f,
+        domainBm25fRaw: Number(bm25fScores?.domain?.rawScore || 0),
+        existing,
+        route,
+        source,
+        priority,
+        hostSelected: hostSelected ? 1 : 0,
+        keyActivated: keyActivated ? 1 : 0,
+        keyStrength,
+        sharedPoolScore: Number(lore.sharedPoolRerank?.score || 0),
+        sharedPoolConfidence: Number(lore.sharedPoolRerank?.confidenceScore || 0)
+      }
     };
   };
 
@@ -14021,79 +14843,246 @@ function mergeAgentCbsWarnings(...warningLists) {
         enabled: false, engine: STAGE_LORE_RERANKER_VERSION, stage: text(stageName || ''), profileStage: '',
         topK: source.length, absoluteFloor: 0, relativeFloor: 0, effectiveFloor: 0,
         inputCount: rawSource.length, candidateCount: source.length, selectedCount: source.length, droppedCount: emptyDropped.length,
+        protectedSelectedCount: 0, protectedOverflowCount: 0,
         selected: source.slice(), dropped: emptyDropped
       };
     }
     const def = STAGE_LORE_RERANKER_DEFS[rerankerStage] || STAGE_LORE_RERANKER_DEFS.shadow_act;
-    const topK = clampInt(options.topK ?? def.topK, 1, 32, DEFAULT_STAGE_LORE_RERANK_TOP_K);
+    const candidatePoolMode = options.candidatePoolMode === true;
+    const topK = clampInt(options.topK ?? (candidatePoolMode ? DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K : def.topK), 1, 64, candidatePoolMode ? DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K : DEFAULT_STAGE_LORE_RERANK_TOP_K);
     const primaryQuery = compact(options.primaryQuery || '', 3000);
     const terminalQuery = compact(options.terminalQuery || '', INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS);
-    const ranked = source.map((lore, order) => {
-      const scored = scoreLoreForStageReranker(lore, rerankerStage, primaryQuery, terminalQuery);
+    const bm25fCurrentCorpus = loreBm25fLoreCorpusScores(source, primaryQuery, 6200);
+    const bm25fTerminalCorpus = loreBm25fLoreCorpusScores(source, terminalQuery, 4200);
+    const scoredEntries = source.map((lore, order) => {
+      const scored = scoreLoreForStageReranker(
+        lore,
+        rerankerStage,
+        primaryQuery,
+        terminalQuery,
+        {
+          current: bm25fCurrentCorpus.scores[order] || null,
+          terminal: bm25fTerminalCorpus.scores[order] || null,
+          domain: null
+        }
+      );
       return { lore, order, ...scored };
+    });
+    const rrf = loreRrfFuse(scoredEntries, [
+      {
+        name: 'current_bm25f', weight: 1.00, minScore: 0,
+        score: entry => Number(entry.components?.currentBm25f || 0) * (entry.identityConflict ? 0.55 : 1)
+      },
+      {
+        name: 'current_jaccard', weight: 0.84, minScore: 0,
+        score: entry => Number(entry.components?.currentJaccard || 0) * (entry.identityConflict ? 0.55 : 1)
+      },
+      {
+        name: 'terminal_bm25f', weight: 0.52, minScore: 0,
+        score: entry => Number(entry.components?.terminalBm25f || 0) * (entry.identityConflict ? 0.55 : 1)
+      },
+      {
+        name: 'terminal_jaccard', weight: 0.42, minScore: 0,
+        score: entry => Number(entry.components?.terminalJaccard || 0) * (entry.identityConflict ? 0.55 : 1)
+      },
+      {
+        name: 'identity', weight: 0.72, minScore: 0.35,
+        score: entry => entry.identityConflict
+          ? 0
+          : entry.exactIdentity
+            ? Math.max(1, Number(entry.components?.identityApplied || 0))
+            : Number(entry.components?.identityApplied || 0)
+      },
+      {
+        name: 'risu_host_selected', weight: 0.65, minScore: 0.5,
+        score: entry => Number(entry.components?.hostSelected || 0)
+      },
+      {
+        name: 'activation_key', weight: 0.60, minScore: 0.15,
+        score: entry => Number(entry.components?.keyStrength || 0)
+      },
+      {
+        name: 'domain', weight: 0.24, minScore: 0.01,
+        score: entry => Number(entry.components?.domain || 0)
+      }
+    ], { keyOf: entry => `lore:${entry.order}` });
+    const ranked = scoredEntries.map((entry, index) => {
+      const fusion = rrf.scores[index] || { score: 0, rawScore: 0, ranks: {}, contributions: {} };
+      const fusionScore = Number(fusion.score || 0);
+      return {
+        ...entry,
+        confidenceScore: Number(entry.confidenceScore ?? entry.score ?? 0),
+        score: fusionScore > 0 ? fusionScore : clampNumber(Number(entry.confidenceScore ?? entry.score ?? 0), 0, 1, 0),
+        rrfScore: fusionScore,
+        rrfRaw: Number(fusion.rawScore || 0),
+        rrfRanks: fusion.ranks || {},
+        rrfContributions: fusion.contributions || {}
+      };
     }).sort((left, right) => (
       right.score - left.score
-      || Number(right.components.identity || 0) - Number(left.components.identity || 0)
+      || right.confidenceScore - left.confidenceScore
+      || Number(right.exactIdentity && !right.identityConflict) - Number(left.exactIdentity && !left.identityConflict)
       || Number(right.protectedActivation) - Number(left.protectedActivation)
+      || Number(right.components.identity || 0) - Number(left.components.identity || 0)
       || Number(right.lore.priority || 0) - Number(left.lore.priority || 0)
       || left.order - right.order
     ));
     const bestScore = Number(ranked[0]?.score || 0);
-    const effectiveFloor = Math.max(Number(def.absoluteFloor || 0), bestScore * Number(def.relativeFloor || 0));
+    const bestConfidenceScore = Math.max(0, ...ranked.map(entry => Number(entry.confidenceScore || 0)));
+    const effectiveAbsoluteFloor = candidatePoolMode
+      ? Math.min(Number(def.absoluteFloor || 0), SHARED_LORE_CANDIDATE_POOL_ABSOLUTE_FLOOR)
+      : Number(def.absoluteFloor || 0);
+    const effectiveRelativeFloor = candidatePoolMode
+      ? Math.min(Number(def.relativeFloor || 0), SHARED_LORE_CANDIDATE_POOL_RELATIVE_FLOOR)
+      : Number(def.relativeFloor || 0);
+    const effectiveFloor = Math.max(effectiveAbsoluteFloor, bestConfidenceScore * effectiveRelativeFloor);
     const eligible = ranked.filter(entry => (
       entry.protectedActivation
-      || entry.score >= effectiveFloor
-      || Number(entry.components.identity || 0) >= Number(def.identityBypass || 1)
+      || entry.confidenceScore >= effectiveFloor
+      || (candidatePoolMode && (Number(entry.components?.hostSelected || 0) > 0 || Number(entry.components?.keyStrength || 0) > 0) && entry.rrfScore > 0)
+      || (
+        entry.exactIdentity
+        && !entry.identityConflict
+        && Number(entry.components.identity || 0) >= Number(def.identityBypass || 1)
+      )
     ));
-    const selectedEntries = eligible.slice(0, topK);
+
+    // Top-K is a relevance slot budget, not permission to evict force/always-active lore.
+    // Protected entries survive unconditionally. Ordinary slots are diversified with MMR
+    // after RRF, so near-duplicate lore cannot monopolize a limited stage view.
+    const protectedEntries = eligible.filter(entry => entry.protectedActivation);
+    const ordinaryEligible = eligible.filter(entry => !entry.protectedActivation);
+    const mmrLambda = candidatePoolMode ? LORE_MMR_SHARED_POOL_LAMBDA : LORE_MMR_STAGE_LAMBDA;
+    const protectedSeeds = protectedEntries.filter(entry => (
+      Number(entry.confidenceScore || 0) >= effectiveFloor
+      || (entry.exactIdentity && !entry.identityConflict)
+    ));
+    const mmrSelection = loreMmrSelect(ordinaryEligible, {
+      limit: topK,
+      lambda: mmrLambda,
+      seedEntries: protectedSeeds,
+      relevanceOf: entry => clampNumber(Number(entry.score || 0) * 0.72 + Number(entry.confidenceScore || 0) * 0.28, 0, 1.2, 0),
+      featureOf: entry => {
+        const lore = entry.lore || {};
+        const identity = [lore.label, lore.key, ...(Array.isArray(lore.keys) ? lore.keys : []), lore.moduleName, lore.source].filter(Boolean).join(' ');
+        const rawContent = lore.retrievedContent || lore.content || '';
+        // MMR only needs a stable redundancy fingerprint; do not rerun the expensive
+        // section retriever here because BM25F/RRF already established relevance.
+        return {
+          identity,
+          body: compactMiddle(rawContent, candidatePoolMode ? 3000 : 2400)
+        };
+      },
+      keyOf: entry => loreContinuityIdentity(entry.lore) || `lore:${entry.order}`
+    });
+    const normalEntries = mmrSelection.selected;
+    const mmrByOrder = new Map(normalEntries.map(entry => [entry.order, entry.mmr || null]));
+    const selectedOrderSet = new Set([...protectedEntries, ...normalEntries].map(entry => entry.order));
+    const selectedEntries = ranked.filter(entry => selectedOrderSet.has(entry.order));
     const selectedOrders = new Set(selectedEntries.map(entry => entry.order));
-    const selected = selectedEntries.map((entry, index) => ({
+    const eligibleOrders = new Set(eligible.map(entry => entry.order));
+    const selected = selectedEntries.map((entry, index) => {
+      const mmrMeta = mmrByOrder.get(entry.order) || null;
+      return ({
       ...entry.lore,
       stageReranker: {
         engine: STAGE_LORE_RERANKER_VERSION,
+        bm25fEngine: LORE_BM25F_ENGINE_VERSION,
+        rrfEngine: LORE_RRF_ENGINE_VERSION,
+        rrfK: LORE_RRF_K,
         stage: rerankerStage,
         rank: index + 1,
         score: Number(entry.score.toFixed(4)),
+        confidenceScore: Number(entry.confidenceScore.toFixed(4)),
+        rrfScore: Number(entry.rrfScore.toFixed(4)),
+        rrfRanks: entry.rrfRanks || {},
         effectiveFloor: Number(effectiveFloor.toFixed(4)),
         protectedActivation: entry.protectedActivation === true,
+        exactIdentity: entry.exactIdentity === true,
+        identityConflict: entry.identityConflict === true,
+        identityConflictReasons: entry.identityConflictReasons || [],
+        mmrEngine: LORE_MMR_ENGINE_VERSION,
+        mmrSelected: mmrMeta != null,
+        mmrRank: Number(mmrMeta?.rank || 0),
+        mmrScore: Number(mmrMeta?.score || 0),
+        mmrRelevance: Number(mmrMeta?.relevance || 0),
+        mmrMaxSimilarity: Number(mmrMeta?.maxSimilarity || 0),
+        mmrSimilarTo: mmrMeta?.similarTo || '',
         components: Object.fromEntries(Object.entries(entry.components).map(([key, value]) => [key, Number(Number(value || 0).toFixed(4))]))
       }
-    }));
-    const rankedDropped = ranked.filter(entry => !selectedOrders.has(entry.order)).map((entry, index) => {
-      const passedFloor = entry.protectedActivation
-        || entry.score >= effectiveFloor
-        || Number(entry.components.identity || 0) >= Number(def.identityBypass || 1);
+    });
+    });
+    const rankedDropped = ranked.filter(entry => !selectedOrders.has(entry.order)).map(entry => {
+      const identityBypass = entry.exactIdentity
+        && !entry.identityConflict
+        && Number(entry.components.identity || 0) >= Number(def.identityBypass || 1);
+      const passedFloor = entry.protectedActivation || entry.confidenceScore >= effectiveFloor || identityBypass;
       return {
         id: loreContinuityIdentity(entry.lore),
         label: entry.lore.label,
         source: entry.lore.source,
         sourceType: entry.lore.sourceType || 'unknown',
         score: Number(entry.score.toFixed(4)),
+        confidenceScore: Number(entry.confidenceScore.toFixed(4)),
+        rrfScore: Number(entry.rrfScore.toFixed(4)),
+        rrfRanks: entry.rrfRanks || {},
         rank: ranked.indexOf(entry) + 1,
-        reason: passedFloor ? 'top_k' : 'low_relevance',
-        protectedActivation: entry.protectedActivation === true
+        reason: entry.identityConflict && !passedFloor
+          ? 'identity_conflict_low_relevance'
+          : eligibleOrders.has(entry.order) && !selectedOrders.has(entry.order)
+            ? 'mmr_diversity'
+            : passedFloor ? 'top_k' : 'low_relevance',
+        protectedActivation: entry.protectedActivation === true,
+        exactIdentity: entry.exactIdentity === true,
+        identityConflict: entry.identityConflict === true,
+        identityConflictReasons: entry.identityConflictReasons || []
       };
     });
     const dropped = [...emptyDropped, ...rankedDropped];
     return {
       enabled: true,
       engine: STAGE_LORE_RERANKER_VERSION,
+      bm25fEngine: LORE_BM25F_ENGINE_VERSION,
+      rrfEngine: LORE_RRF_ENGINE_VERSION,
+      rrf: {
+        k: LORE_RRF_K,
+        activeRankers: rrf.activeRankers || [],
+        activeWeight: Number(Number(rrf.activeWeight || 0).toFixed(4))
+      },
+      mmrEngine: LORE_MMR_ENGINE_VERSION,
+      mmr: {
+        lambda: Number(mmrLambda.toFixed(4)),
+        ordinaryEligibleCount: ordinaryEligible.length,
+        protectedSeedCount: protectedSeeds.length,
+        selectedOrdinaryCount: normalEntries.length,
+        diversifiedDropCount: Math.max(0, ordinaryEligible.length - normalEntries.length)
+      },
+      bm25fCorpus: {
+        currentQueryTokens: Number(bm25fCurrentCorpus.queryTokenCount || 0),
+        terminalQueryTokens: Number(bm25fTerminalCorpus.queryTokenCount || 0),
+        domainQueryTokens: 0,
+        domainMode: 'jaccard_only',
+        documents: source.length
+      },
       stage: rerankerStage,
       profileStage: rerankerStage,
+      candidatePoolMode,
       topK,
-      absoluteFloor: Number(def.absoluteFloor || 0),
-      relativeFloor: Number(def.relativeFloor || 0),
+      absoluteFloor: effectiveAbsoluteFloor,
+      relativeFloor: effectiveRelativeFloor,
       effectiveFloor: Number(effectiveFloor.toFixed(4)),
       bestScore: Number(bestScore.toFixed(4)),
+      bestConfidenceScore: Number(bestConfidenceScore.toFixed(4)),
       inputCount: rawSource.length,
       candidateCount: source.length,
       selectedCount: selected.length,
+      protectedSelectedCount: protectedEntries.length,
+      protectedOverflowCount: Math.max(0, selected.length - topK),
       droppedCount: dropped.length,
       selected,
       dropped
     };
   };
-
 
   const skillRouterStageName = stageName => {
     const normalized = text(stageName || '').trim();
@@ -14292,19 +15281,31 @@ function mergeAgentCbsWarnings(...warningLists) {
 
   const stageLoreRerankerMeta = result => result ? {
     engine: result.engine || STAGE_LORE_RERANKER_VERSION,
+    bm25fEngine: result.bm25fEngine || LORE_BM25F_ENGINE_VERSION,
+    rrfEngine: result.rrfEngine || LORE_RRF_ENGINE_VERSION,
+    rrf: result.rrf || null,
+    mmrEngine: result.mmrEngine || LORE_MMR_ENGINE_VERSION,
+    mmr: result.mmr || null,
+    bm25fCorpus: result.bm25fCorpus || null,
     enabled: result.enabled === true,
     stage: result.stage || '',
     profileStage: result.profileStage || '',
+    candidatePoolMode: result.candidatePoolMode === true,
     topK: Number(result.topK || 0),
     inputCount: Number(result.inputCount ?? result.candidateCount ?? 0),
     candidateCount: Number(result.candidateCount || 0),
     selectedCount: Number(result.selectedCount || 0),
+    protectedSelectedCount: Number(result.protectedSelectedCount || 0),
+    protectedOverflowCount: Number(result.protectedOverflowCount || 0),
     droppedCount: Number(result.droppedCount || 0),
     emptyDroppedCount: (result.dropped || []).filter(item => item.reason === 'empty_content').length,
+    identityConflictDroppedCount: (result.dropped || []).filter(item => item.reason === 'identity_conflict_low_relevance').length,
+    mmrDiversityDroppedCount: (result.dropped || []).filter(item => item.reason === 'mmr_diversity').length,
     absoluteFloor: Number(result.absoluteFloor || 0),
     relativeFloor: Number(result.relativeFloor || 0),
     effectiveFloor: Number(result.effectiveFloor || 0),
     bestScore: Number(result.bestScore || 0),
+    bestConfidenceScore: Number(result.bestConfidenceScore || 0),
     selected: (result.selected || []).map(lore => ({
       id: loreContinuityIdentity(lore),
       label: lore.label,
@@ -14312,11 +15313,76 @@ function mergeAgentCbsWarnings(...warningLists) {
       sourceType: lore.sourceType || 'unknown',
       rank: Number(lore.stageReranker?.rank || 0),
       score: Number(lore.stageReranker?.score || 0),
+      confidenceScore: Number(lore.stageReranker?.confidenceScore || 0),
+      rrfScore: Number(lore.stageReranker?.rrfScore || 0),
+      rrfRanks: lore.stageReranker?.rrfRanks || {},
+      mmrSelected: lore.stageReranker?.mmrSelected === true,
+      mmrRank: Number(lore.stageReranker?.mmrRank || 0),
+      mmrScore: Number(lore.stageReranker?.mmrScore || 0),
+      mmrMaxSimilarity: Number(lore.stageReranker?.mmrMaxSimilarity || 0),
+      mmrSimilarTo: lore.stageReranker?.mmrSimilarTo || '',
       protectedActivation: lore.stageReranker?.protectedActivation === true,
+      exactIdentity: lore.stageReranker?.exactIdentity === true,
+      identityConflict: lore.stageReranker?.identityConflict === true,
+      identityConflictReasons: lore.stageReranker?.identityConflictReasons || [],
       components: lore.stageReranker?.components || {}
     })),
     dropped: (result.dropped || []).slice(0, 32)
   } : null;
+
+  const GRADIA_RELATIONSHIP_CANON_RE = /(?:소꿉친구|죽마고우|절친|친구|동갑|동년배|연인|애인|부부|배우자|남편|아내|약혼|자매|형제|남매|오빠|언니|누나|형|동생|부모|아버지|어머니|아빠|엄마|딸|아들|사촌|상사|부하|동료|선배|후배|호칭|부르(?:는|며|고|지)|칭하|childhood\s+friend|best\s+friend|friend|same[-\s]?age|lover|partner|spouse|husband|wife|fianc|sister|brother|sibling|mother|father|daughter|son|cousin|colleague|senior|junior|address(?:es|ed|ing)?|calls?\s+.+\bas\b)/i;
+
+  const relationshipCanonSegments = value => text(value || '')
+    .replace(/([.!?。！？])\s+/g, '$1\n')
+    .split(/\n+/g)
+    .map(segment => segment.trim())
+    .filter(segment => segment.length >= 4 && segment.length <= 700 && GRADIA_RELATIONSHIP_CANON_RE.test(segment));
+
+  const buildRelationshipCanonLock = (lorePool = [], currentInput = '', terminalScene = '', snapshot = null) => {
+    const catalog = buildContinuityEntityCatalog(snapshot || {});
+    if (!catalog.length) return { version: RELATIONSHIP_CANON_LOCK_VERSION, facts: [], block: '' };
+    const liveText = `${text(currentInput || '')}\n${text(terminalScene || '')}`.trim();
+    const liveEntities = new Set(continuityEntitiesInText(liveText, catalog));
+    if (!liveEntities.size) return { version: RELATIONSHIP_CANON_LOCK_VERSION, facts: [], block: '' };
+    const facts = [];
+    const seen = new Set();
+    for (const lore of Array.isArray(lorePool) ? lorePool : []) {
+      const content = text(lore?.retrievedContent || lore?.content || '').trim();
+      if (!content) continue;
+      const ownerEntities = continuityEntitiesInText([
+        lore?.label,
+        lore?.name,
+        lore?.key,
+        ...(Array.isArray(lore?.keys) ? lore.keys : [])
+      ].filter(Boolean).join(' '), catalog);
+      for (const segment of relationshipCanonSegments(content)) {
+        const segmentEntities = continuityEntitiesInText(segment, catalog);
+        const entities = uniqueContinuityStrings([...ownerEntities, ...segmentEntities]).slice(0, 6);
+        if (entities.length < 2 || !entities.some(entity => liveEntities.has(entity))) continue;
+        const normalized = normalizeForLoreMatch(segment);
+        if (!normalized || seen.has(normalized)) continue;
+        seen.add(normalized);
+        facts.push({
+          source: lore?.label || lore?.source || 'lore',
+          entities,
+          text: compact(segment, 560)
+        });
+        if (facts.length >= RELATIONSHIP_CANON_LOCK_MAX_ITEMS) break;
+      }
+      if (facts.length >= RELATIONSHIP_CANON_LOCK_MAX_ITEMS) break;
+    }
+    if (!facts.length) return { version: RELATIONSHIP_CANON_LOCK_VERSION, facts: [], block: '' };
+    const body = facts.map(fact => `- [${fact.source}] ${fact.text}`).join('\n');
+    const block = compact([
+      '[RELATIONSHIP / ADDRESS CANON LOCK — ACTIVE LORE EVIDENCE]',
+      'These are exact relationship/address facts recovered from currently active lore. Treat them as read-only canon constraints, not optional flavor.',
+      'Do not weaken a stated relationship (for example childhood friend -> generic acquaintance), invent seniority between same-age peers, or substitute a familial/honorific address that contradicts the supplied fact.',
+      'If two supplied lock lines genuinely conflict, do not silently blend them. Current input/newer exact canon wins when explicit; otherwise preserve the uncertainty and avoid inventing a resolution.',
+      'A shared name alone never proves identity. If a current entity description conflicts with a lore profile’s explicit age/gender/role, keep them separate unless an explicit identity/alias link proves they are the same entity.',
+      body
+    ].join('\n'), RELATIONSHIP_CANON_LOCK_MAX_CHARS);
+    return { version: RELATIONSHIP_CANON_LOCK_VERSION, facts, block };
+  };
 
   const prioritizeLoreForStage = (activeLore = [], stageName = 'shadow_act') => (activeLore || [])
     .map((lore, order) => {
@@ -14407,6 +15473,49 @@ function mergeAgentCbsWarnings(...warningLists) {
     return compact(sections.filter(item => item !== null && item !== undefined).join('\n'), contextBudget);
   };
 
+  const buildGradiaSharedLoreCandidatePool = (selectedCandidates = [], baseActiveLore = [], hostSelectedLore = [], messages = [], cbsContext = null, currentQuery = '', terminalQuery = '', chatLength = 1, options = {}) => {
+    const semanticCandidates = (selectedCandidates || [])
+      .filter(candidate => loreSemanticCandidateEligible(candidate, currentQuery, terminalQuery, chatLength, {
+        recentMessages: options.recentMessages || [],
+        defaultScanDepth: options.defaultScanDepth || DEFAULT_RECENT_TURNS
+      }))
+      .map(candidate => ({ ...candidate, activationRoute: 'semantic_candidate', semanticCandidate: true }));
+    const renderedUniverse = renderIndependentActiveLorebooks(semanticCandidates, messages, cbsContext);
+    const mergedUniverse = mergeLoreCandidateSignals(
+      renderedUniverse.activeLore,
+      baseActiveLore,
+      hostSelectedLore
+    );
+    const sharedRerank = rerankLoreForStage(mergedUniverse, 'shadow_act', {
+      primaryQuery: currentQuery,
+      terminalQuery,
+      topK: DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K,
+      candidatePoolMode: true
+    });
+    const selected = (sharedRerank.selected || []).map(lore => ({
+      ...lore,
+      sharedPoolRerank: {
+        engine: sharedRerank.engine || STAGE_LORE_RERANKER_VERSION,
+        rank: Number(lore.stageReranker?.rank || 0),
+        score: Number(lore.stageReranker?.score || 0),
+        confidenceScore: Number(lore.stageReranker?.confidenceScore || 0),
+        rrfScore: Number(lore.stageReranker?.rrfScore || 0),
+        rrfRanks: lore.stageReranker?.rrfRanks || {},
+        mmrScore: Number(lore.stageReranker?.mmrScore || 0),
+        mmrMaxSimilarity: Number(lore.stageReranker?.mmrMaxSimilarity || 0),
+        mmrSimilarTo: lore.stageReranker?.mmrSimilarTo || ''
+      }
+    }));
+    return {
+      engine: LORE_SHARED_CANDIDATE_POOL_VERSION,
+      selected,
+      rerank: sharedRerank,
+      universeCount: mergedUniverse.length,
+      semanticCandidateCount: renderedUniverse.activeLore.length,
+      droppedByCbs: renderedUniverse.dropped || []
+    };
+  };
+
   const buildShadowRisuContext = async (messages, recent, settings, snapshot = null, references = null) => {
     const refs = normalizeRisuReferences(references || settings?.activeStageOptions?.risuRefs, settings?.enableShadowRisuContext !== false ? defaultRisuReferencesForStage(settings?.activeStageName || 'shadow_act') : { authorNote: false, persona: false, characterDescription: false, characterLorebook: false, moduleLorebook: false });
     const referenceEnabled = !!(refs.authorNote || refs.persona || refs.characterDescription || refs.characterLorebook || refs.moduleLorebook);
@@ -14492,25 +15601,50 @@ function mergeAgentCbsWarnings(...warningLists) {
     recent.continuityLedgerBlock = inputAssistTerminalPath ? '' : formatRequestContinuityLedger(continuityLedger);
     const selectedCandidates = (candidates || []).filter(candidate => candidate.sourceType === 'module' ? refs.moduleLorebook : (candidate.sourceType === 'character' || candidate.sourceType === 'chat') ? refs.characterLorebook : false);
     const selectedIds = new Set(selectedCandidates.map(loreContinuityIdentity));
-    const baseActiveLore = (source.activeLore || []).filter(lore => selectedIds.has(loreContinuityIdentity(lore)));
+    const baseActiveLore = (source.keyActiveLore || source.activeLore || []).filter(lore => selectedIds.has(loreContinuityIdentity(lore)));
     const lorePrimaryQuery = compact(authoritativeCurrentInput || recent?.latestUser || '', 2400);
     const loreTerminalQuery = compact(recent?.terminalVisibleScene || '', INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS);
-    const promoted = applyLoreActivationMode(
-      loreActivationMode,
+    const chatLength = recent?.visibleMessageCount || source.actualChatContext?.messageCount || 1;
+    const snapshotHostSelected = Array.isArray(source.hostSelectedLore)
+      ? source.hostSelectedLore.filter(lore => selectedIds.has(loreContinuityIdentity(lore)))
+      : null;
+    const rawHostSelectionForSearch = snapshotHostSelected
+      ? (source.hostLoreSelection || {
+          activeLore: snapshotHostSelected,
+          requestMessageCount: Array.isArray(messages) ? messages.length : 0,
+          matchedCandidateCount: snapshotHostSelected.length,
+          selectedCount: snapshotHostSelected.length
+        })
+      : reuseRisuSelectedLorebooks(messages, selectedCandidates, source.cbsContext);
+    const hostSelectionForSearch = {
+      ...rawHostSelectionForSearch,
+      activeLore: (rawHostSelectionForSearch.activeLore || []).filter(lore => lore.forceState !== 'deactivate' && selectedIds.has(loreContinuityIdentity(lore))),
+      selectedCount: (rawHostSelectionForSearch.activeLore || []).filter(lore => lore.forceState !== 'deactivate' && selectedIds.has(loreContinuityIdentity(lore))).length
+    };
+    const sharedCandidatePool = buildGradiaSharedLoreCandidatePool(
       selectedCandidates,
       baseActiveLore,
+      hostSelectionForSearch.activeLore || [],
+      messages,
+      source.cbsContext,
       lorePrimaryQuery,
+      loreTerminalQuery,
+      chatLength,
       {
-        maxPromotions: 6,
-        terminalQuery: loreTerminalQuery,
-        chatLength: recent?.visibleMessageCount || source.actualChatContext?.messageCount || 1
+        recentMessages: recent?.loreSearchMessages || [],
+        defaultScanDepth: source?.loreSettings?.scanDepth ?? source?.loreSettings?.scan_depth ?? settings?.turnWindow ?? DEFAULT_RECENT_TURNS
       }
     );
-    const promotedRendering = renderIndependentActiveLorebooks(promoted.activeLore, messages, source.cbsContext);
-    const activeLore = promotedRendering.activeLore;
+    const activeLore = sharedCandidatePool.selected;
+    const promoted = {
+      mode: loreActivationMode,
+      activeLore,
+      promotions: activeLore.filter(lore => lore.semanticCandidate && !lore.keyActivated && !lore.hostSelected)
+    };
+    const promotedRendering = { activeLore, dropped: sharedCandidatePool.droppedByCbs || [] };
     const loreRenderDrops = [
       ...(Array.isArray(source.loreSettings?.cbsRenderDrops) ? source.loreSettings.cbsRenderDrops : []),
-      ...(promotedRendering.dropped || [])
+      ...(promotedRendering?.dropped || [])
     ];
     if (!inputAssistTerminalPath && source.loreSettings?.continuityScope) {
       writeLoreContinuityIds(source.loreSettings.continuityScope, activeLore, recent?.latestUser || '');
@@ -14592,17 +15726,9 @@ function mergeAgentCbsWarnings(...warningLists) {
       mainActivationMode: normalizeLoreActivationMode(settings?.loreActivationMode),
       inputAssistActivationMode: normalizeInputAssistLoreActivationMode(settings?.inputAssistLoreActivationMode),
       inputAssistSeparatePipeline: inputAssistTerminalPath,
-      activationPolicy: source.loreSettings?.activationPolicy || (
-        inputAssistTerminalPath
-          ? loreActivationMode === 'gradia_extended'
-            ? 'input_assist_risu_keys_then_scene_jaccard'
-            : 'input_assist_risu_activation_keys'
-          : loreActivationMode === 'gradia_extended'
-            ? 'risu_recent_context_keys_then_current_and_terminal_jaccard'
-            : loreActivationMode === 'risu_selected'
-              ? 'reuse_lore_present_in_risu_request'
-              : 'risu_recent_context_activation_keys'
-      ),
+      activationPolicy: inputAssistTerminalPath
+        ? 'input_assist_unified_host_key_semantic_bm25f_rrf_mmr'
+        : 'unified_host_key_semantic_bm25f_rrf_mmr',
       activationPolicyVersion: LORE_ACTIVATION_POLICY_VERSION,
       cbsRenderDrops: loreRenderDrops.slice(0, 64),
       cbsRenderDropCount: loreRenderDrops.length,
@@ -14614,7 +15740,32 @@ function mergeAgentCbsWarnings(...warningLists) {
     };
     meta.loreCandidates = selectedCandidates.length;
     meta.activeLore = activeLore.length;
-    meta.jaccardPromotions = promoted.promotions.map(lore => ({
+    meta.sharedCandidatePool = sharedCandidatePool ? {
+      engine: sharedCandidatePool.engine || LORE_SHARED_CANDIDATE_POOL_VERSION,
+      universeCount: sharedCandidatePool.universeCount,
+      semanticCandidateCount: sharedCandidatePool.semanticCandidateCount,
+      selectedCount: activeLore.length,
+      topK: DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K,
+      hostSelectedCount: Number(hostSelectionForSearch.selectedCount || 0),
+      rrfActiveRankers: sharedCandidatePool.rerank?.rrf?.activeRankers || []
+    } : null;
+    meta.semanticSearchSelections = sharedCandidatePool
+      ? activeLore.map(lore => ({
+          label: lore.label,
+          source: lore.source,
+          route: lore.activationRoute || 'semantic_candidate',
+          sharedRank: Number(lore.sharedPoolRerank?.rank || 0),
+          score: Number(lore.sharedPoolRerank?.score || 0),
+          confidenceScore: Number(lore.sharedPoolRerank?.confidenceScore || 0),
+          rrfScore: Number(lore.sharedPoolRerank?.rrfScore || 0),
+          rrfRanks: lore.sharedPoolRerank?.rrfRanks || {},
+          hostSelected: lore.hostSelected === true,
+          keyActivated: lore.keyActivated === true,
+          keyStrength: Number(lore.keyStrength || loreActivationKeyStrength(lore) || 0)
+        }))
+      : [];
+    meta.jaccardPromotions = [];
+    meta.legacySemanticPromotions = promoted.promotions.map(lore => ({
       label: lore.label,
       source: lore.source,
       route: lore.activationRoute || lore.jaccardPromotion?.route || 'unknown',
@@ -14625,34 +15776,50 @@ function mergeAgentCbsWarnings(...warningLists) {
     meta.loreSources = activeLore.reduce((acc, lore) => { acc[lore.sourceType || 'unknown'] = (acc[lore.sourceType || 'unknown'] || 0) + 1; return acc; }, {});
     const loreContinuityQuery = loreTerminalQuery;
     const retrievalContextChars = Math.min(Number(settings.shadowRisuContextMaxChars || DEFAULT_SHADOW_RISU_CONTEXT_CHARS), 7000);
-    const fullTextRetrievalEngine = loreActivationMode === 'risu_selected'
-      ? 'risu_request_selected_full_text_v1'
-      : 'risu_key_full_text_v1';
-    const retrievedLorePool = loreActivationMode === 'gradia_extended'
-      ? activeLore.map((lore, rank) => {
-          const promotedByJaccard = lore.activationRoute === 'jaccard_current_input' || lore.activationRoute === 'terminal_entity';
-          const retrievedContent = promotedByJaccard
-            ? text(lore.retrievedContent || lore.content || '')
-            : text(lore.content || '');
-          return {
-            ...lore,
-            retrievedContent,
-            retrieval: {
-              engine: LORE_JACCARD_ENGINE_VERSION,
-              score: Number(lore.jaccardPromotion?.score || 0),
-              excerptScore: Number(lore.jaccardPromotion?.excerptScore || 0),
-              bm25: 0,
-              entityAnchor: promotedByJaccard ? 1 : 0,
-              matchedSections: lore.jaccardPromotion?.matchedSections || [],
-              fallback: false,
-              rawChars: text(lore.content || '').length,
-              excerptChars: retrievedContent.length,
-              rank: rank + 1,
-              wholeExcerpt: promotedByJaccard
-            }
-          };
-        })
-      : retrieveActiveLoreRisuStyle(activeLore, fullTextRetrievalEngine);
+    const fullTextRetrievalEngine = LORE_HYBRID_RETRIEVAL_ENGINE_VERSION;
+    const retrievedLorePool = activeLore.map((lore, rank) => {
+      const retrievedContent = text(lore.retrievedContent || lore.content || '');
+      const sharedMeta = lore.sharedPoolRerank || {};
+      return {
+        ...lore,
+        retrievedContent,
+        retrieval: {
+          ...(lore.retrieval || {}),
+          engine: LORE_HYBRID_RETRIEVAL_ENGINE_VERSION,
+          score: Number(sharedMeta.score || lore.retrieval?.score || lore.jaccardPromotion?.score || 0),
+          excerptScore: Number(lore.retrieval?.excerptScore || lore.jaccardPromotion?.excerptScore || 0),
+          bm25: Number(lore.retrieval?.bm25f ?? lore.retrieval?.bm25 ?? lore.jaccardPromotion?.bm25f ?? 0),
+          bm25f: Number(lore.retrieval?.bm25f ?? lore.retrieval?.bm25 ?? lore.jaccardPromotion?.bm25f ?? 0),
+          bm25fRaw: Number(lore.retrieval?.bm25fRaw || lore.jaccardPromotion?.bm25fRaw || 0),
+          bm25fEngine: LORE_BM25F_ENGINE_VERSION,
+          rrfScore: Number(sharedMeta.rrfScore || 0),
+          rrfRanks: sharedMeta.rrfRanks || {},
+          hostSelected: lore.hostSelected === true,
+          keyActivated: lore.keyActivated === true,
+          keyStrength: Number(lore.keyStrength || loreActivationKeyStrength(lore) || 0),
+          entityAnchor: Number(lore.retrieval?.entityAnchor || 0),
+          matchedSections: lore.retrieval?.matchedSections || lore.jaccardPromotion?.matchedSections || [],
+          fallback: false,
+          rawChars: text(lore.content || '').length,
+          excerptChars: retrievedContent.length,
+          rank: rank + 1,
+          wholeExcerpt: false
+        }
+      };
+    });
+    const relationshipCanonLock = buildRelationshipCanonLock(
+      retrievedLorePool,
+      lorePrimaryQuery,
+      loreTerminalQuery,
+      source
+    );
+    recent.relationshipCanonLock = relationshipCanonLock;
+    recent.relationshipCanonLockBlock = relationshipCanonLock.block || '';
+    meta.relationshipCanonLock = {
+      version: relationshipCanonLock.version,
+      factCount: relationshipCanonLock.facts.length,
+      chars: relationshipCanonLock.block.length
+    };
     const stageLoreRerank = isDraftPipelineStage(settings?.activeStageName)
       ? rerankLoreForStage(retrievedLorePool, settings.activeStageName, {
           primaryQuery: lorePrimaryQuery,
@@ -14672,7 +15839,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       return acc;
     }, {});
     meta.loreRetrieval = {
-      engine: loreActivationMode === 'gradia_extended' ? LORE_JACCARD_ENGINE_VERSION : fullTextRetrievalEngine,
+      engine: loreActivationMode === UNIFIED_LORE_ACTIVATION_MODE ? LORE_HYBRID_RETRIEVAL_ENGINE_VERSION : fullTextRetrievalEngine,
       queryChars: lorePrimaryQuery.length,
       continuityQueryChars: loreContinuityQuery.length,
       terminalQueryChars: loreTerminalQuery.length,
@@ -14688,6 +15855,9 @@ function mergeAgentCbsWarnings(...warningLists) {
         score: lore.retrieval?.score || 0,
         excerptScore: lore.retrieval?.excerptScore || 0,
         bm25: lore.retrieval?.bm25 || 0,
+        bm25f: lore.retrieval?.bm25f ?? lore.retrieval?.bm25 ?? 0,
+        bm25fRaw: lore.retrieval?.bm25fRaw || 0,
+        bm25fEngine: lore.retrieval?.bm25fEngine || '',
         entityAnchor: lore.retrieval?.entityAnchor || 0,
         matchedSections: lore.retrieval?.matchedSections || [],
         fallback: lore.retrieval?.fallback === true,
@@ -14944,6 +16114,8 @@ function mergeAgentCbsWarnings(...warningLists) {
       selectedCandidates,
       continuityLedger,
       continuityLedgerBlock: recent.continuityLedgerBlock || '',
+      relationshipCanonLock,
+      relationshipCanonLockBlock: recent.relationshipCanonLockBlock || '',
       hypaContinuity,
       hypaContinuityBlock,
       authoritativeCurrentInput,
@@ -15038,6 +16210,14 @@ function mergeAgentCbsWarnings(...warningLists) {
         : [];
     const primaryQuery = compact(shared.authoritativeCurrentInput || recent?.latestUser || '', 3000);
     const terminalQuery = compact(recent?.terminalVisibleScene || '', INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS);
+    const relationshipCanonLock = shared.relationshipCanonLock || buildRelationshipCanonLock(
+      lorePool,
+      primaryQuery,
+      terminalQuery,
+      source
+    );
+    recent.relationshipCanonLock = relationshipCanonLock;
+    recent.relationshipCanonLockBlock = relationshipCanonLock?.block || shared.relationshipCanonLockBlock || '';
     const stageLoreRerank = rerankerStage
       ? (stageName === 'shadow_act' && shared.loreRerank?.enabled
           ? shared.loreRerank
@@ -15161,6 +16341,11 @@ function mergeAgentCbsWarnings(...warningLists) {
         }))
       },
       loreReranker: stageLoreRerankerMeta(stageLoreRerank),
+      relationshipCanonLock: {
+        version: relationshipCanonLock?.version || RELATIONSHIP_CANON_LOCK_VERSION,
+        factCount: Array.isArray(relationshipCanonLock?.facts) ? relationshipCanonLock.facts.length : 0,
+        chars: text(recent.relationshipCanonLockBlock || '').length
+      },
       stageLoreSelection: {
         stage: stageName,
         selectedBy: stageLoreRerank?.enabled ? STAGE_LORE_RERANKER_VERSION : (shared.meta?.stageLoreSelection?.selectedBy || 'shared'),
@@ -15231,6 +16416,8 @@ function mergeAgentCbsWarnings(...warningLists) {
       selectedCandidates,
       continuityLedger: shared.continuityLedger || null,
       continuityLedgerBlock: shared.continuityLedgerBlock || '',
+      relationshipCanonLock,
+      relationshipCanonLockBlock: recent.relationshipCanonLockBlock || '',
       hypaContinuity: shared.hypaContinuity || null,
       hypaContinuityBlock: shared.hypaContinuityBlock || '',
       authoritativeCurrentInput: shared.authoritativeCurrentInput || '',
@@ -17622,9 +18809,8 @@ function mergeAgentCbsWarnings(...warningLists) {
   };
 
   const canonicalLoreReferenceItems = (activeLore = [], loreMode = DEFAULT_LORE_ACTIVATION_MODE) => (activeLore || []).map((lore, sourceOrder) => {
-    const jaccardExcerpt = loreMode === 'gradia_extended'
-      && ['jaccard_current_input', 'terminal_entity'].includes(lore.activationRoute);
-    const content = text(jaccardExcerpt ? (lore.retrievedContent || lore.content) : lore.content).trim();
+    const unifiedMode = normalizeLoreActivationMode(loreMode) === UNIFIED_LORE_ACTIVATION_MODE;
+    const content = text(unifiedMode ? (lore.retrievedContent || lore.content) : lore.content).trim();
     const authorityClass = loreAuthorityClass(lore);
     const protectedLore = authorityClass === 'lore_host_selected'
       || authorityClass === 'lore_direct';
@@ -17641,7 +18827,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       authorityClass,
       selectionReason: lore.stageReranker?.engine === STAGE_LORE_RERANKER_VERSION
         ? `stage_rerank_${lore.stageReranker.stage}_rank_${lore.stageReranker.rank}`
-        : loreMode === 'risu_selected' ? 'host_selected' : `activation_${lore.activationRoute || 'unknown'}`,
+        : lore.hostSelected === true ? 'host_selected_signal' : `activation_${lore.activationRoute || 'unknown'}`,
       activationRoute: lore.activationRoute || 'unknown',
       relevanceScore: Number(lore.stageReranker?.score || lore.retrieval?.score || lore.jaccardPromotion?.score || 0),
       protected: protectedLore,
@@ -17650,7 +18836,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       depth: lore.depth || 0,
       role: lore.role || 'system',
       moduleId: lore.moduleId || lore.moduleKey || '',
-      hostSelected: loreMode === 'risu_selected',
+      hostSelected: lore.hostSelected === true,
       recursiveDepth: lore.activationRoute === 'recursive' ? 1 : 0,
       activationEvidence: lore.activationEvidence || lore.jaccardPromotion?.evidence || null
     };
@@ -25128,6 +26314,8 @@ Begin directly with the in-world response and finish the complete same-turn draf
       ? `terminal_scene_hash: ${stableDraftHash(recent.terminalVisibleScene)}`
       : '',
     recent?.continuityLedgerBlock || '',
+    recent?.relationshipCanonLockBlock || '',
+    '- SAME-NAME IDENTITY RULE: a matching name alone is not an identity proof. If the current entity description conflicts with a lore profile’s explicit age, gender, role, or established relationship, keep them separate unless an explicit alias/identity link proves equivalence.',
     recent?.continuityLedger?.boundary?.active
       ? '- A scene boundary is explicit. The previous turn is a completed historical predecessor, not the current physical tableau. Carry forward only confirmed consequences and participants that the current input actually bridges.'
       : '',
@@ -26994,6 +28182,8 @@ Begin directly with the in-world response and finish the complete same-turn draf
         ? 'Inspect the latest draft for only character identity, portrayal, dialogue voice, relationship pressure, knowledge paths, secrets, and user-agency problems.'
         : 'Inspect the latest draft for character identity, portrayal, dialogue voice, relationship pressure, knowledge paths, secrets, and violations of explicit author-fixed/reserved decisions. The user persona is an authorable story character in Novel mode.',
       'For boundary-risk facts, verify the observer’s surface/detail/concealed/interior layer, open sight/hearing/smell/touch/communication channel, and KNOWN/inferred/unavailable grade. Downgrade to a cue or suspicion, require depicted disclosure, or remove the claim when the path is absent.',
+      'When RELATIONSHIP / ADDRESS CANON LOCK is present, treat its relationship, same-age/seniority, kinship, childhood-history, and address facts as hard canon. Patch any conflicting honorific, family-role, intimacy level, or relationship downgrade instead of smoothing it over.',
+      'Never merge two entities merely because they share a name. A conflicting explicit age, gender, role, or relationship profile is disambiguating evidence that they are different entities unless an explicit alias/identity link says otherwise.',
       isPlayerControlledDraftMode(settings)
         ? 'Never infer biological, reproductive, or medical state from identity, appearance, mood, or behavior, and never decide the user character’s interior body state.'
         : 'Never infer biological, reproductive, or medical state from identity, appearance, mood, or behavior as pre-existing canon. Novel-mode fiction may author ordinary interior states, but unsupported medical/reproductive facts remain evidence-bound.',
@@ -27232,6 +28422,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       '',
       olderFacts.text ? `[OLDER COMPLETED TURNS — FILTERED DURABLE FACTS ONLY]\n${olderFacts.text}\n` : '',
       referencePacketBlockForPrompt(recent) ? `[CURRENT-INPUT RELEVANT CANON FOR THIS STAGE]\n${referencePacketBlockForPrompt(recent)}\n` : '',
+      stageName === 'aide_character' && recent.relationshipCanonLockBlock ? `${recent.relationshipCanonLockBlock}\n` : '',
       recent.systemContext ? `[SYSTEM AND SETTING CONSTRAINTS]\n${compact(recent.systemContext, 2400)}\n` : '',
       inherited ? `[COMPLETED PRIOR-STAGE GUARDS — PRESERVATION ONLY]\n${inherited}\n` : '',
       dedicatedAnalysis ? `[DEDICATED DOMAIN ANALYSIS — APPLY THROUGH PATCHES]\n${dedicatedAnalysis}\n` : '',
@@ -31042,7 +32233,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
     Object.freeze({ id: 'pipeline', group: 'production', label: '초안 파이프라인', icon: '◆', description: 'SHADOW ACT와 세 AIDE' }),
     Object.freeze({ id: 'ooc', group: 'production', label: '창작 지침 OOC', icon: '✦', description: '단계별 창작 지침 작성' }),
     Object.freeze({ id: 'improve', group: 'production', label: '응답 옵션', icon: '✧', description: 'NSFW와 Assistant Prefill' }),
-    Object.freeze({ id: 'references', group: 'references', label: '로어와 장기 기록', icon: '▦', description: '선택 방식과 영구 제외 목록' }),
+    Object.freeze({ id: 'references', group: 'references', label: '자료', icon: '▦', description: 'GRADIA가 읽을 자료를 한곳에서 관리' }),
     Object.freeze({ id: 'narrative_archive', group: 'references', label: '내러티브 아카이브', icon: '◫', description: '휴면 서사 장기 기록과 회상 상태 열람' }),
     Object.freeze({ id: 'skills', group: 'references', label: 'Skill', icon: '✺', description: '스킬 적용·뷰어·우선도·사용자 스킬' }),
     Object.freeze({ id: 'output', group: 'output', label: '정보 전달과 메인 응답', icon: '⇢', description: '최종 초안의 전달과 마무리' }),
@@ -31522,7 +32713,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       return Gui.moduleCatalog;
     } finally {
       Gui.moduleCatalogLoading = false;
-      if (Gui.visible && Gui.pageId === 'references' && Gui.pageSubview === 'modules') queueGuiRender(0);
+      if (Gui.visible && Gui.pageId === 'references' && ['modules', 'selection'].includes(Gui.pageSubview)) queueGuiRender(0);
     }
   };
 
@@ -31555,7 +32746,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       return Gui.characterLoreCatalog;
     } finally {
       Gui.characterLoreCatalogLoading = false;
-      if (Gui.visible && Gui.pageId === 'references' && Gui.pageSubview === 'character_lore_exclusions') queueGuiRender(0);
+      if (Gui.visible && Gui.pageId === 'references' && ['character_lore_exclusions', 'selection'].includes(Gui.pageSubview)) queueGuiRender(0);
     }
   };
 
@@ -31592,7 +32783,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       return Gui.hypaCatalog;
     } finally {
       Gui.hypaCatalogLoading = false;
-      if (Gui.visible && Gui.pageId === 'references' && Gui.pageSubview === 'hypa_v3') queueGuiRender(0);
+      if (Gui.visible && Gui.pageId === 'references' && ['hypa_v3', 'selection'].includes(Gui.pageSubview)) queueGuiRender(0);
     }
   };
 
@@ -33920,6 +35111,33 @@ html,body{width:100%;height:100%;overflow:hidden}
     ...children
   ]);
 
+  const providerAdvancedPanel = (title, note, children, className = '') => guiEl('details', { class: `sga-advanced sga-provider-panel ${className}`.trim(), style: { marginTop: '0', padding: '0' } }, [
+    guiEl('summary', {}, [
+      guiEl('span', { text: title }),
+      guiEl('span', { class: 'sga-advanced-hint', text: note || '고급 설정' })
+    ]),
+    guiEl('div', { class: 'sga-advanced-body' }, children)
+  ]);
+
+  const providerPresetUsageLabels = presetName => {
+    const name = text(presetName || '').trim();
+    if (!name) return [];
+    const labels = [];
+    if (text(Gui.state?.runtime?.defaultPresetName || '').trim() === name) labels.push('기본');
+    for (const def of CONFIGURABLE_STAGE_DEFS) {
+      if (text(Gui.state?.agents?.[def.id]?.presetName || '').trim() !== name) continue;
+      labels.push(def.id === 'shadow_act' ? 'SHADOW'
+        : def.id === 'aide_character' ? '인물'
+          : def.id === 'aide_world' ? '세계'
+            : def.id === 'aide_plot' ? '플롯'
+              : def.id === INPUT_ASSIST_STAGE_ID ? 'Input'
+                : def.id === ARC_DIRECTOR_STAGE_ID ? 'Arc'
+                  : def.id === USER_INTENT_OOC_STAGE_ID ? 'OOC'
+                    : def.label);
+    }
+    return Array.from(new Set(labels));
+  };
+
   const buildReasoningPanel = (preset) => {
     const effective = inferReasoningFamily(preset);
     const kimiK3 = effective === 'kimi' && isKimiK3Model(preset.model);
@@ -33970,7 +35188,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       quickActions.push(quickButton(label, { reasoning_effort: effort, thinking_type: 'enabled', glm_thinking_type: 'enabled' }));
     }
     fields.push(guiEl('div', { class: 'sga-actions' }, quickActions));
-    return providerPanel('프로바이더별 추론 프리셋', '프로바이더별 추론 Body와 출력 토큰 상한을 자동 구성합니다.', fields, 'reasoning');
+    return providerAdvancedPanel('추론 설정', 'Reasoning / Thinking을 세부 조정합니다.', fields, 'reasoning');
   };
 
   const buildProvidersTab = () => {
@@ -33995,9 +35213,11 @@ html,body{width:100%;height:100%;overflow:hidden}
       guiEl('input', { class: 'sga-list-search', type: 'search', placeholder: '프리셋 이름 · 모델 · 프로바이더 검색', value: Gui.providerFilter || '', onInput: event => { Gui.providerFilter = event.target.value; queueGuiRender(140); } }),
       guiEl('div', { class: 'sga-list-items' }, (visibleNames.length ? visibleNames : names).map(name => {
         const item = Gui.state.providers[name];
+        const usage = providerPresetUsageLabels(name);
         return guiEl('button', { class: 'sga-list-item', dataset: { selected: String(name === Gui.selectedPreset) }, onClick: () => { Gui.selectedPreset = name; renderSettingsGui(); } }, [
           guiEl('strong', { text: name }),
-          guiEl('span', { text: `${providerDisplayLabel(item.provider)} · ${item.model || '(모델 미설정)'}` })
+          guiEl('span', { text: `${providerDisplayLabel(item.provider)} · ${item.model || '(모델 미설정)'}` }),
+          usage.length ? guiEl('span', { class: 'sga-actions', style: { marginTop: '5px', gap: '4px' } }, usage.slice(0, 5).map(label => guiEl('em', { class: 'sga-badge', text: label }))) : null
         ]);
       }))
     ]);
@@ -34118,7 +35338,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       ], 'vertex') );
     }
 
-    panels.push(providerPanel('생성 설정', '일반 생성 파라미터와 스트리밍을 설정합니다.', [
+    panels.push(providerAdvancedPanel('생성 설정', 'Temperature·출력 토큰·문맥·타임아웃·요청 형식', [
       guiEl('div', { class: 'sga-row3' }, [
         providerEditorField('Temperature', 'temp', { number: true }),
         providerEditorField('최대 출력 토큰', 'max_tokens', { number: true }),
@@ -34144,9 +35364,9 @@ html,body{width:100%;height:100%;overflow:hidden}
       ])
     ];
     if (provider === 'custom') flexChildren.push(checkboxNode(!!preset.custom_service_tier_passthrough, 'Custom provider 요청 Body에 service_tier 전달', next => { preset.custom_service_tier_passthrough = next; }));
-    panels.push(providerPanel('Flex 서비스', '일반 추론 옵션과 분리된 서비스 등급·Vertex Flex 전용 설정입니다.', flexChildren, 'flex'));
+    panels.push(providerAdvancedPanel('서비스 / Flex', 'Service tier와 Vertex Flex를 조정합니다.', flexChildren, 'flex'));
 
-    panels.push(providerPanel('추가 요청 데이터', '필요한 경우에만 헤더와 Body JSON을 추가합니다.', [
+    panels.push(providerAdvancedPanel('추가 요청 데이터', '필요한 경우에만 Header / Body JSON을 추가합니다.', [
       guiEl('div', { class: 'sga-row2' }, [
         providerEditorField('추가 HTTP 헤더 JSON', 'extra_headers_json', { textarea: true, placeholder: '{"HTTP-Referer":"..."}' }),
         providerEditorField('추가 요청 Body JSON', 'extra_body_json', { textarea: true, placeholder: '{"top_p":0.9}', note: 'messages·contents·system 등 핵심 필드는 덮어쓰지 않는 것을 권장합니다.' })
@@ -34155,11 +35375,22 @@ html,body{width:100%;height:100%;overflow:hidden}
 
     const editor = guiEl('div', { class: 'sga-card sga-provider-editor' }, [
       guiEl('div', { class: 'sga-agent-head' }, [
-        guiEl('div', {}, [guiEl('h2', { text: Gui.selectedPreset }), guiEl('div', { class: 'sga-note', text: '연결·추론·Flex 설정을 용도별로 나눠 표시합니다.' })]),
+        guiEl('div', {}, [guiEl('h2', { text: Gui.selectedPreset }), guiEl('div', { class: 'sga-note', text: '이 AI 프리셋의 기본 연결을 먼저 설정하고, 필요한 경우에만 아래 고급 항목을 펼칩니다.' })]),
         guiEl('span', { class: `sga-badge ${providerConfigured(preset) ? 'good' : 'warn'}`, title: providerConfigurationIssues(preset).join(', '), text: providerConfigured(preset) ? '사용 가능' : `설정 필요: ${providerConfigurationIssues(preset).join(', ')}` })
       ]),
       guiEl('div', { class: 'sga-provider-panels' }, panels),
       guiEl('div', { class: 'sga-actions sga-provider-actions' }, [
+        guiEl('button', {
+          class: 'sga-btn',
+          text: text(Gui.state?.runtime?.defaultPresetName || '').trim() === Gui.selectedPreset ? '기본 프리셋' : '기본으로 지정',
+          disabled: text(Gui.state?.runtime?.defaultPresetName || '').trim() === Gui.selectedPreset,
+          onClick: () => {
+            Gui.state.runtime.defaultPresetName = Gui.selectedPreset;
+            markGuiDirty();
+            renderSettingsGui();
+            guiSetStatus(`${Gui.selectedPreset} 프리셋을 기본 AI 연결로 지정했습니다.`);
+          }
+        }),
         guiEl('button', { class: 'sga-btn good', text: '연결 테스트', onClick: async () => {
           try {
             guiSetStatus('연결을 테스트하고 있습니다…', false, true);
@@ -34173,7 +35404,7 @@ html,body{width:100%;height:100%;overflow:hidden}
     ]);
 
     return guiEl('div', { id: 'sga-provider-page' }, [
-      guiEl('div', { class: 'sga-section-title' }, [guiEl('h2', { text: 'AI 연결' }), guiEl('p', { text: '사용할 AI 서비스, 모델, API 키를 연결합니다. 처음에는 기본 연결 하나만 준비하면 됩니다.' })]),
+      guiEl('div', { class: 'sga-section-title' }, [guiEl('h2', { text: 'AI 연결' }), guiEl('p', { text: '여러 AI 설정을 프리셋으로 만들어 두고 각 파이프라인 단계에서 필요한 프리셋을 선택합니다.' })]),
       guiEl('div', { class: 'sga-split' }, [list, editor])
     ]);
   };
@@ -34551,22 +35782,30 @@ html,body{width:100%;height:100%;overflow:hidden}
           }, optionNodes(BEFORE_STAGE_DEFS.map(def => [def.id, def.label]), targetStage)),
           `선택한 ${targetDef.label} OOC가 “${targetGuide.keyQuestion}”를 기준으로 요청을 변환합니다. 다른 단계로 지침을 분배하거나 다른 단계의 저장 내용을 변경하지 않습니다.`
         ),
-        fieldNode(
-          'OOC 대화 AI 연결',
-          guiEl('select', {
-            class: 'sga-select',
-            value: Gui.state.agents?.[USER_INTENT_OOC_STAGE_ID]?.presetName || '',
-            disabled: ooc.busy,
-            onChange: event => {
-              Gui.state.agents[USER_INTENT_OOC_STAGE_ID].presetName = event.target.value;
-              markGuiDirty();
-            }
-          }, optionNodes(
-            [['', '기본 AI 연결 사용'], ...presetNamesFromState().map(name => [name, name])],
-            Gui.state.agents?.[USER_INTENT_OOC_STAGE_ID]?.presetName || ''
-          )),
-          '이 화면에서 대화하고 선택한 단계의 창작 지침을 정리할 때만 사용하는 연결입니다.'
-        ),
+        guiEl('details', { class: 'sga-advanced', style: { marginTop: '10px' } }, [
+          guiEl('summary', {}, [
+            guiEl('span', { text: 'OOC 대화 AI 프리셋' }),
+            guiEl('span', { class: 'sga-advanced-hint', text: resolvedPresetNameForStage(USER_INTENT_OOC_STAGE_ID) })
+          ]),
+          guiEl('div', { class: 'sga-advanced-body' }, [
+            fieldNode(
+              'OOC 대화 AI 프리셋',
+              guiEl('select', {
+                class: 'sga-select',
+                value: Gui.state.agents?.[USER_INTENT_OOC_STAGE_ID]?.presetName || '',
+                disabled: ooc.busy,
+                onChange: event => {
+                  Gui.state.agents[USER_INTENT_OOC_STAGE_ID].presetName = event.target.value;
+                  markGuiDirty();
+                }
+              }, optionNodes(
+                [['', '기본 AI 연결 사용'], ...presetNamesFromState().map(name => [name, name])],
+                Gui.state.agents?.[USER_INTENT_OOC_STAGE_ID]?.presetName || ''
+              )),
+              '이 화면에서 대화하고 선택한 단계의 창작 지침을 정리할 때만 사용하는 연결입니다.'
+            )
+          ])
+        ]),
         ...(started ? [
           conversationBox,
           (oocInput = guiEl('textarea', {
@@ -34673,8 +35912,13 @@ html,body{width:100%;height:100%;overflow:hidden}
           text: ooc.statusText
         }) : null
       ]),
-      guiEl('div', { class: 'sga-card wide' }, [
-        guiEl('div', { class: 'sga-agent-head' }, [
+      guiEl('details', { class: 'sga-advanced', style: { marginTop: '0' } }, [
+        guiEl('summary', {}, [
+          guiEl('span', { text: '저장된 창작 지침 보기' }),
+          guiEl('span', { class: 'sga-advanced-hint', text: `${savedDirectionCount}/4 저장됨` })
+        ]),
+        guiEl('div', { class: 'sga-advanced-body' }, [
+          guiEl('div', { class: 'sga-agent-head' }, [
           guiEl('div', {}, [
             guiEl('h3', { text: '단계별로 저장된 창작 지침' }),
             guiEl('div', {
@@ -34732,7 +35976,8 @@ html,body{width:100%;height:100%;overflow:hidden}
               })
             ])
           ])
-        ))
+        )),
+        ])
       ])
     ]);
   };
@@ -34752,11 +35997,12 @@ html,body{width:100%;height:100%;overflow:hidden}
     const statusInfo = traceStateInfo(trace, { enabled: slot.enabled !== false, isLiteSkip });
     const selectedSkillRoute = trace?.skillRouter || Runtime.skillRoutes?.[selectedDef.id] || null;
     const blocks = [];
+    let technicalCallInfo = null;
 
     if (trace && parsed && selectedDef.id === INPUT_ASSIST_STAGE_ID) {
       blocks.push(resultContentBlock('원래 입력', parsed.originalInput || Runtime.lastInputAssist?.original || '(기록 없음)', { wide: true, copy: true }));
       blocks.push(resultContentBlock('재구성된 입력', parsed.rewrittenInput || Runtime.lastInputAssist?.rewritten || '(기록 없음)', { wide: true, copy: true }));
-      blocks.push(resultContentBlock('호출 정보', {
+      technicalCallInfo = {
         status: statusInfo.label,
         reason: trace.reason || parsed.reason || '',
         requested_mode: parsed.requestedMode || Runtime.lastInputAssist?.requestedMode || '',
@@ -34784,7 +36030,7 @@ html,body{width:100%;height:100%;overflow:hidden}
         preset: trace.presetName || '',
         model: trace.model || '',
         elapsed: trace.elapsedMs ? formatElapsedBrief(trace.elapsedMs) : ''
-      }, { copy: true }));
+      };
     } else if (trace && parsed) {
       const parts = executionResultAnalysisParts(parsed);
       const analysisSummary = parts.analysis?.summary || parsed.summary || '';
@@ -34867,7 +36113,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       ));
       if (Array.isArray(changes) && changes.length) blocks.push(resultContentBlock('수정한 내용', changes, { copy: true }));
       if (Array.isArray(notes) && notes.length) blocks.push(resultContentBlock('작성 노트', notes, { copy: true }));
-      blocks.push(resultContentBlock('호출 정보', callInfo, { copy: true }));
+      technicalCallInfo = callInfo;
     }
 
     const stageButtons = orderedDefs.map(def => {
@@ -34972,8 +36218,11 @@ html,body{width:100%;height:100%;overflow:hidden}
           ? guiEl('div', { class: 'sga-live-result-grid' }, blocks)
           : guiEl('div', { class: 'sga-result-empty prominent', text: noResultReason }),
         trace ? guiEl('details', { class: 'sga-result-raw-details' }, [
-          guiEl('summary', { text: '원문 응답과 프롬프트 보기' }),
-          guiEl('div', { class: 'sga-live-result-grid' }, rawTraceBlocks)
+          guiEl('summary', { text: '기술 정보 · 호출 계측과 원문 프롬프트' }),
+          guiEl('div', { class: 'sga-live-result-grid' }, [
+            technicalCallInfo ? resultContentBlock('호출 정보', technicalCallInfo, { copy: true }) : null,
+            ...rawTraceBlocks
+          ].filter(Boolean))
         ]) : null,
         guiEl('div', { class: 'sga-final-draft-result' }, [
           guiEl('div', { class: 'sga-live-result-card-head' }, [
@@ -35085,7 +36334,7 @@ html,body{width:100%;height:100%;overflow:hidden}
     const risuReferenceBlock = isBefore && def.id === 'shadow_act' ? guiEl('div', { class: 'sga-reference-box' }, [
       guiEl('div', { class: 'sga-reference-head' }, [
         guiEl('strong', { text: '참고할 RisuAI 정보' }),
-        guiEl('span', { text: '공통 후보 수집 + 단계별 로어 Top 8' })
+        guiEl('span', { text: '공통 후보 수집 + 일반 로어 Top 8' })
       ]),
       guiEl('div', { class: 'sga-provider-note-box', style: { marginBottom: '10px' } }, [
         checkboxNode(slot.risuRefs.authorNote, '작가의 노트', next => { slotValue.risuRefs.authorNote = next; }),
@@ -35097,13 +36346,13 @@ html,body{width:100%;height:100%;overflow:hidden}
         checkboxNode(slot.risuRefs.characterLorebook, '캐릭터 로어북', next => { slotValue.risuRefs.characterLorebook = next; }),
         checkboxNode(slot.risuRefs.moduleLorebook, '선택한 모듈 로어북', next => { slotValue.risuRefs.moduleLorebook = next; })
       ]),
-      guiEl('div', { class: 'sga-note', text: 'SHADOW ACT가 참고할 자료 종류와 로어 후보 풀을 한 번 확정합니다. 페르소나·캐릭터 설명·HypaV3는 공통으로 재사용하고, 로어만 SHADOW ACT·인물·세계관·플롯 단계가 각자 관련도를 다시 계산해 설정한 최대 개수까지만 선택합니다. 기본값은 8개입니다.' })
+      guiEl('div', { class: 'sga-note', text: 'SHADOW ACT가 참고할 자료 종류와 로어 후보 풀을 한 번 확정합니다. 페르소나·캐릭터 설명·HypaV3는 공통으로 재사용하고, 로어만 각 단계가 관련도를 다시 계산합니다. 일반 로어는 설정한 슬롯 수까지 선택하며 강제/항상 활성 로어와 현재 관계·호칭 잠금은 별도로 보존합니다. 기본 일반 슬롯은 8개입니다.' })
     ]) : isBefore ? guiEl('div', { class: 'sga-reference-box' }, [
       guiEl('div', { class: 'sga-reference-head' }, [
         guiEl('strong', { text: '공통 후보 · 단계별 리랭킹' }),
-        guiEl('span', { text: '추가 검색 없음 · 담당 영역별 Top 8' })
+        guiEl('span', { text: '추가 검색 없음 · 일반 로어 Top 8' })
       ]),
-      guiEl('div', { class: 'sga-note', text: '이 AIDE는 SHADOW ACT가 만든 공통 자료 후보를 다시 읽어오지 않습니다. 대신 이미 수집된 로어 후보만 자신의 담당 영역 기준으로 로컬 리랭킹하여 관련도가 높은 최대 8개를 사용합니다. 페르소나·캐릭터 설명·HypaV3는 공통 정본을 유지합니다.' })
+      guiEl('div', { class: 'sga-note', text: '이 AIDE는 SHADOW ACT가 만든 공통 자료 후보를 다시 읽어오지 않습니다. 대신 이미 수집된 로어 후보를 자신의 담당 영역 기준으로 로컬 리랭킹합니다. 일반 로어는 기본 8개 슬롯을 쓰고 강제/항상 활성 로어는 별도로 보호합니다. 인물 AIDE는 활성 로어에서 추출한 관계·호칭 정본 잠금도 함께 확인합니다.' })
     ]) : null;
 
     const promptBody = guiEl('div', { class: 'sga-prompt-builtin' }, [
@@ -35134,6 +36383,35 @@ html,body{width:100%;height:100%;overflow:hidden}
       ])
     ]);
 
+    const advancedStageSettings = guiEl('details', { class: 'sga-advanced sga-stage-advanced', style: { marginTop: '10px' } }, [
+      guiEl('summary', {}, [
+        guiEl('span', { text: '세부 설정' }),
+        guiEl('span', { class: 'sga-advanced-hint', text: `최근 ${slot.turnWindow}턴 · 최대 대기 ${Math.round(slot.timeoutMs / 1000)}초` })
+      ]),
+      guiEl('div', { class: 'sga-advanced-body' }, [
+        guiEl('div', { class: isBefore ? 'sga-row4' : 'sga-row3' }, detailFields),
+        risuReferenceBlock
+      ])
+    ]);
+
+    const stageResultShortcut = guiEl('aside', { class: 'sga-stage-result sga-stage-result-shortcut' }, [
+      guiEl('div', { class: 'sga-stage-result-head' }, [
+        guiEl('span', { class: 'sga-stage-result-title', text: '최근 실행' }),
+        traceBadgeNode(statusInfo)
+      ]),
+      guiEl('div', { class: 'sga-stage-result-body' }, [
+        guiEl('div', { class: 'sga-note', text: trace
+          ? `${statusInfo.label}${statusInfo.elapsed ? ` · ${statusInfo.elapsed}` : ''} · 상세 분석과 초안은 실행 결과에서 확인합니다.`
+          : (statusInfo.className === 'run' ? '현재 실행 중입니다.' : '아직 실행 기록이 없습니다.') }),
+        guiEl('button', {
+          class: 'sga-btn ghost',
+          type: 'button',
+          text: '실행 결과 보기',
+          onClick: () => { Gui.selectedResultStage = def.id; void navigateGui('flow', '', 'results'); }
+        })
+      ])
+    ]);
+
     return guiEl('div', { id: `sga-stage-${def.id}`, class: `sga-card sga-agent sga-agent-expanded${isLiteSkip || (!slot.enabled && def.id !== 'shadow_act') ? ' dim' : ''}` }, [
       guiEl('div', { class: 'sga-agent-head' }, [
         guiEl('div', { class: 'sga-agent-title' }, [guiEl('span', { class: 'sga-agent-index', text: String(index + 1) }), guiEl('div', {}, [guiEl('h3', { text: def.label }), guiEl('div', { class: 'sga-agent-desc compact', text: def.description })])]),
@@ -35148,21 +36426,17 @@ html,body{width:100%;height:100%;overflow:hidden}
           guiEl('div', { class: 'sga-stage-primary' }, [
             checkboxNode(slot.enabled, '이 단계 사용', next => { slotValue.enabled = next; renderSettingsGui(); }),
             fieldNode(
-              '사용할 AI 연결',
+              '사용할 AI 프리셋',
               selectNode(slot.presetName || '', presetChoicesFromState(true), next => { slotValue.presetName = next; renderSettingsGui(); }),
               `실제 사용: ${resolvedPresetNameForStage(def.id)} · 자동 동작 보정: ${resolvedModelBehaviorForStageInGui(def.id).label}`
             ),
             promptStatusField
           ]),
           promptBody,
-          guiEl('div', { class: 'sga-stage-detail' }, [
-            guiEl('div', { class: 'sga-stage-detail-head' }, [guiEl('strong', { text: '전문가 설정' }), guiEl('span', { text: `최근 ${slot.turnWindow}턴 · 최대 대기 ${Math.round(slot.timeoutMs / 1000)}초 · ${def.id === 'shadow_act' ? (isHeavyPipeline ? '분석 후 첫 초안' : '통합 첫 초안') : (isHeavyPipeline ? '분석 후 부분 수정' : '통합 부분 수정')}` })]),
-            guiEl('div', { class: isBefore ? 'sga-row4' : 'sga-row3' }, detailFields),
-            risuReferenceBlock
-          ]),
+          advancedStageSettings,
           isBefore && def.id === 'shadow_act' ? guiEl('div', { class: 'sga-note', text: 'SHADOW ACT가 꺼지면 응답 전 파이프라인 전체가 실행되지 않습니다.' }) : null
         ]),
-        buildStageResultPanel(def, trace, traceOptions)
+        stageResultShortcut
       ])
     ]);
   };
@@ -35323,7 +36597,7 @@ html,body{width:100%;height:100%;overflow:hidden}
 
   const applyInputAssistLoreActivationModeToGui = mode => {
     const runtime = Gui.state.runtime || (Gui.state.runtime = {});
-    runtime.inputAssistLoreActivationMode = normalizeInputAssistLoreActivationMode(mode);
+    runtime.inputAssistLoreActivationMode = UNIFIED_LORE_ACTIVATION_MODE;
     markGuiDirty();
     queueGuiRender(0);
   };
@@ -35337,7 +36611,7 @@ html,body{width:100%;height:100%;overflow:hidden}
 
   const applyLoreActivationModeToGui = mode => {
     const runtime = Gui.state.runtime || (Gui.state.runtime = {});
-    runtime.loreActivationMode = normalizeLoreActivationMode(mode);
+    runtime.loreActivationMode = UNIFIED_LORE_ACTIVATION_MODE;
     markGuiDirty();
     renderSettingsGui();
   };
@@ -35603,7 +36877,7 @@ html,body{width:100%;height:100%;overflow:hidden}
     const inputScopeLabel = inputAssistScope === 'standalone' ? '단독 사용' : '전체 파이프라인';
     const transferLabel = informationTransferMode === 'draft_and_analysis' ? '초안+분석 전달' : '초안+기본 지시(분석 제외)';
     const multiPipelineLabel = MULTI_PIPELINE_MODE_DEFS[multiPipelineMode]?.label || '경량 멀티 파이프라인';
-    const loreActivationLabel = LORE_ACTIVATION_MODE_DEFS[normalizeLoreActivationMode(runtime.loreActivationMode)]?.label || 'RisuAI가 선별한 로어 그대로';
+    const loreActivationLabel = LORE_ACTIVATION_MODE_DEFS[normalizeLoreActivationMode(runtime.loreActivationMode)]?.label || 'GRADIA 통합 로어 검색';
     const inputAssistLoreActivationLabel = INPUT_ASSIST_LORE_ACTIVATION_MODE_DEFS[inputAssistLoreActivationMode]?.label || 'RisuAI식 · 활성화 키';
 
     return guiEl('section', { class: 'sga-card wide sga-simple-settings', id: 'sga-simple-settings' }, [
@@ -35687,15 +36961,15 @@ html,body{width:100%;height:100%;overflow:hidden}
           })
         ]) : null,
         inputAssistMode !== 'off' ? guiEl('div', { class: 'sga-stage-detail-head', style: { marginTop: '14px', marginBottom: '9px' } }, [
-          guiEl('strong', { text: '인풋 도우미 로어 선택' }),
-          guiEl('span', { text: '메인 초안 파이프라인과 독립적으로 적용됩니다.' })
+          guiEl('strong', { text: '인풋 도우미 로어 검색' }),
+          guiEl('span', { text: '메인 초안 파이프라인과 동일한 통합 엔진을 사용합니다.' })
         ]) : null,
         inputAssistMode !== 'off' ? guiEl('div', { class: 'sga-simple-choice-grid two' }, Object.entries(INPUT_ASSIST_LORE_ACTIVATION_MODE_DEFS).map(([mode, def]) => simpleChoiceCard({
           active: inputAssistLoreActivationMode === mode,
           title: def.label,
           description: def.description,
           meta: def.meta,
-          badge: mode === DEFAULT_INPUT_ASSIST_LORE_ACTIVATION_MODE ? '기본' : '확장',
+          badge: '통합',
           onClick: () => applyInputAssistLoreActivationModeToGui(mode)
         }))) : null,
         !authorDirectedInput ? guiEl('div', { class: 'sga-stage-detail-head', style: { marginTop: '14px', marginBottom: '9px' } }, [
@@ -35717,7 +36991,7 @@ html,body{width:100%;height:100%;overflow:hidden}
         guiEl('div', { class: 'sga-simple-stage-provider-grid', style: { marginTop: '12px' } }, [
           guiEl('div', { class: 'sga-simple-stage-provider' }, [
             fieldNode(
-              '인풋 도우미 LLM 프로필',
+              '인풋 도우미 AI 프리셋',
               selectNode(inputAssistProvider.selected, presetChoicesFromState(true), next => applyQuickStageProviderToGui(INPUT_ASSIST_STAGE_ID, next)),
               `실제 사용: ${inputAssistProvider.resolved} · 자동 동작 보정: ${inputAssistProvider.behavior.label}`
             ),
@@ -35844,16 +37118,14 @@ html,body{width:100%;height:100%;overflow:hidden}
       ]),
 
       guiEl('div', { class: 'sga-simple-step' }, [
-        guiEl('div', { class: 'sga-simple-step-head' }, [guiEl('b', { text: '8' }), guiEl('div', {}, [guiEl('strong', { text: '초안 파이프라인 로어를 어떻게 선택할까요?' }), guiEl('span', { text: '이번 요청의 로어 후보는 한 번만 수집하고, SHADOW ACT·인물·세계관·플롯이 각자 다른 리랭커로 점수화합니다. 낮은 관련도는 컷하며 기본값은 단계마다 상위 8개입니다. 최대 개수는 자료 선택 페이지에서 조정할 수 있습니다.' })])]),
-        guiEl('div', { class: 'sga-simple-choice-grid three' }, Object.entries(LORE_ACTIVATION_MODE_DEFS).map(([mode, def]) => simpleChoiceCard({
-          active: normalizeLoreActivationMode(runtime.loreActivationMode) === mode,
-          title: def.label,
-          description: def.description,
-          meta: def.meta,
-          badge: mode === DEFAULT_LORE_ACTIVATION_MODE ? '권장' : mode === 'risu_key' ? '독립' : '확장',
-          onClick: () => applyLoreActivationModeToGui(mode)
-        }))),
-        guiEl('div', { class: 'sga-note', text: 'RisuAI 선별 모드는 호스트가 고른 후보 집합과 항목 경계를 존중하지만 순서는 그대로 고정하지 않습니다. 모든 모드에서 후보 수집 뒤 단계별 리랭킹을 거쳐 관련도 순으로 최대 8개만 전달합니다.' })
+        guiEl('div', { class: 'sga-simple-step-head' }, [guiEl('b', { text: '8' }), guiEl('div', {}, [guiEl('strong', { text: '참고 자료' }), guiEl('span', { text: '허용한 자료 안에서 현재 장면에 필요한 로어를 GRADIA가 자동으로 찾습니다.' })])]),
+        guiEl('div', { class: 'sga-summary-table' }, [
+          guiEl('span', { text: '검색' }), guiEl('strong', { text: '자동' }),
+          guiEl('span', { text: '사용 범위' }), guiEl('strong', { text: '자료 화면에서 관리' })
+        ]),
+        guiEl('div', { class: 'sga-actions', style: { marginTop: '10px' } }, [
+          guiEl('button', { class: 'sga-btn', text: '자료 관리', onClick: () => navigateGui('flow', '', 'references') })
+        ])
       ]),
 
       guiEl('div', { class: 'sga-simple-step' }, [
@@ -36104,15 +37376,9 @@ html,body{width:100%;height:100%;overflow:hidden}
           })
         ]),
         mode !== 'off'
-          ? guiEl('div', { class: 'sga-simple-choice-grid one', style: { marginTop: '14px' } }, [simpleChoiceCard({
-              active: true,
-              title: '선택지 창에서 직접 결정',
-              description: playerControlled
-                ? '세 후보는 오직 유저가 다음에 취할 수 있는 행동입니다. NPC·세계의 반응, 행동 성공, 관계 결과, 감정 결론은 후보 안에서 확정하지 않습니다.'
-                : 'AI가 주인공 중심 · 현장 인물 중심 · 세계/외부 인물 중심의 작가 입력을 모두 제안합니다. 유저가 원본 또는 세 후보 중 하나를 선택하기 전에는 전송되지 않습니다.',
-              meta: playerControlled ? '원본 + 유저 행동 3개 · 자동 선택 없음' : '원본 + 3관점 비교 · 재생성 가능 · 자동 선택 없음',
-              badge: '고정'
-            })])
+          ? guiEl('div', { class: 'sga-callout good', style: { marginTop: '14px' }, text: playerControlled
+              ? '원본 입력과 유저 행동 후보 3개를 보여주며 자동 선택하지 않습니다. 사용자가 고른 항목만 실제 입력으로 확정됩니다.'
+              : '원본 입력과 세 작가 관점 후보를 비교해 사용자가 직접 하나를 고릅니다. 자동 전송하지 않습니다.' })
           : guiEl('div', { class: 'sga-callout', style: { marginTop: '14px' }, text: playerControlled ? '직접 입력 모드입니다. GRADIA는 유저 행동을 제안하거나 다시 쓰지 않습니다.' : '인풋 관리자가 꺼져 있어 별도 선택창을 사용하지 않습니다.' }),
       ]),
       guiEl('div', { class: 'sga-card wide' }, [
@@ -36133,7 +37399,7 @@ html,body{width:100%;height:100%;overflow:hidden}
                   ['three_choices', `유저 행동 ${AUTHOR_DIRECTED_INPUT_CHOICE_TARGET}가지 제안`]
                 ], next => applyInputAssistModeToGui(next === 'off' ? 'off' : 'user_focus')), mode === 'off' ? '내가 작성한 입력만 유저 행동으로 인정합니다.' : 'AI가 유저가 취할 수 있는 서로 다른 행동만 제안하며 NPC·세계의 반응이나 결과를 선결정하지 않습니다.'),
                 fieldNode(
-                  '인풋 도우미 LLM 프로필',
+                  '인풋 도우미 AI 프리셋',
                   selectNode(slot.presetName || '', presetChoicesFromState(true), next => applyQuickStageProviderToGui(INPUT_ASSIST_STAGE_ID, next)),
                   `실제 사용: ${resolvedPresetNameForStage(INPUT_ASSIST_STAGE_ID)} · 자동 동작 보정: ${resolvedModelBehaviorForStageInGui(INPUT_ASSIST_STAGE_ID).label}`
                 )
@@ -36151,44 +37417,35 @@ html,body{width:100%;height:100%;overflow:hidden}
               guiEl('div', { class: 'sga-row2' }, [
                 fieldNode('목표 글자 수', selectNode(targetChoice.id, INPUT_ASSIST_TARGET_CHAR_CHOICES.map(choice => [choice.id, choice.label]), next => applyInputAssistTargetCharsToGui(next)), targetChoice.chars ? `약 ${targetChoice.chars.toLocaleString('ko-KR')}자를 목표로 완결된 입력을 만듭니다.` : '입력과 문맥의 복잡도에 맞춰 AI가 적절한 길이를 정합니다.'),
                 fieldNode(
-                  '인풋 도우미 LLM 프로필',
+                  '인풋 도우미 AI 프리셋',
                   selectNode(slot.presetName || '', presetChoicesFromState(true), next => applyQuickStageProviderToGui(INPUT_ASSIST_STAGE_ID, next)),
                   `실제 사용: ${resolvedPresetNameForStage(INPUT_ASSIST_STAGE_ID)} · 자동 동작 보정: ${resolvedModelBehaviorForStageInGui(INPUT_ASSIST_STAGE_ID).label}`
                 )
               ])
             ]),
-        mode !== 'off' ? guiEl('div', { class: 'sga-stage-detail-head', style: { marginTop: '14px', marginBottom: '9px' } }, [
-          guiEl('strong', { text: '인풋 도우미 로어 선택 방식' }),
-          guiEl('span', { text: '메인 초안 파이프라인의 로어 선택 설정과 별도로 저장' })
-        ]) : null,
-        mode !== 'off' ? guiEl('div', { class: 'sga-simple-choice-grid two' }, Object.entries(INPUT_ASSIST_LORE_ACTIVATION_MODE_DEFS).map(([modeId, def]) => simpleChoiceCard({
-          active: loreActivationMode === modeId,
-          title: def.label,
-          description: def.description,
-          meta: def.meta,
-          badge: modeId === DEFAULT_INPUT_ASSIST_LORE_ACTIVATION_MODE ? '기본' : '확장',
-          onClick: () => applyInputAssistLoreActivationModeToGui(modeId)
-        }))) : null,
-        mode !== 'off' ? guiEl('div', { class: 'sga-note', style: { marginTop: '10px' }, text: loreActivationMode === 'gradia_extended'
-          ? 'RisuAI식 활성화 키로 고른 로어에 현재 인풋과 직전 AI 응답 종결부의 장면 관련 로어를 Jaccard 방식으로 보강합니다.'
-          : '현재 인풋과 직전 AI 응답 종결부를 검색 문맥으로 삼아 RisuAI 호환 활성화 키·재귀·우선순위·토큰 예산을 적용합니다.' }) : null,
-        mode !== 'off' ? guiEl('div', { class: 'sga-stage-detail' }, [
-          guiEl('div', { class: 'sga-stage-detail-head' }, [guiEl('strong', { text: '참고 범위' }), guiEl('span', { text: `직전 AI 응답 종결부 · 최대 대기 ${Math.round(slot.timeoutMs / 1000)}초` })]),
-          guiEl('div', { class: 'sga-row2' }, [
-            fieldNode('설정·로어 참고량', inputNode(slot.maxChars, next => { slotValue.maxChars = Number(next); }, { type: 'number', min: 1000, max: defaultContextCharsForStage(INPUT_ASSIST_STAGE_ID) })),
-            fieldNode('최대 대기 시간(초)', inputNode(Math.round(slot.timeoutMs / 1000), next => { slotValue.timeoutMs = Math.max(5, Number(next) || 5) * 1000; }, { type: 'number', min: 5, max: 300 }))
+        mode !== 'off' ? guiEl('details', { class: 'sga-advanced sga-stage-advanced', style: { marginTop: '14px' } }, [
+          guiEl('summary', {}, [
+            guiEl('span', { text: '세부 설정 · 참고 범위와 대기 시간' }),
+            guiEl('span', { class: 'sga-advanced-hint', text: `자료 자동 선별 · 최대 ${Math.round(slot.timeoutMs / 1000)}초` })
           ]),
-          guiEl('div', { class: 'sga-reference-box' }, [
-            guiEl('div', { class: 'sga-reference-head' }, [guiEl('strong', { text: '참고할 RisuAI 정보' }), guiEl('span', { text: playerControlled ? '체크한 자료는 행동 후보의 가능성/정합성에만 사용' : '체크한 자료만 실제 재구성 프롬프트에 포함' })]),
-            guiEl('div', { class: 'sga-reference-grid' }, [
-              checkboxNode(slot.risuRefs.persona, '페르소나', next => { slotValue.risuRefs.persona = next; }),
-              checkboxNode(slot.risuRefs.characterDescription, '캐릭터 설명', next => { slotValue.risuRefs.characterDescription = next; }),
-              checkboxNode(slot.risuRefs.characterLorebook, '캐릭터 로어북', next => { slotValue.risuRefs.characterLorebook = next; }),
-              checkboxNode(slot.risuRefs.moduleLorebook, '선택한 모듈 로어북', next => { slotValue.risuRefs.moduleLorebook = next; })
+          guiEl('div', { class: 'sga-advanced-body' }, [
+            guiEl('div', { class: 'sga-note', style: { marginBottom: '10px' }, text: '현재 인풋과 직전 AI 응답 종결부를 기준으로 필요한 자료를 자동으로 찾습니다. 자료 허용 여부는 “자료” 화면에서 공통 관리합니다.' }),
+            guiEl('div', { class: 'sga-row2' }, [
+              fieldNode('설정·로어 참고량', inputNode(slot.maxChars, next => { slotValue.maxChars = Number(next); }, { type: 'number', min: 1000, max: defaultContextCharsForStage(INPUT_ASSIST_STAGE_ID) })),
+              fieldNode('최대 대기 시간(초)', inputNode(Math.round(slot.timeoutMs / 1000), next => { slotValue.timeoutMs = Math.max(5, Number(next) || 5) * 1000; }, { type: 'number', min: 5, max: 300 }))
             ]),
-            guiEl('div', { class: 'sga-note', text: playerControlled
-              ? '참고 자료는 가능한 유저 행동 후보를 만드는 배경일 뿐입니다. 자료 속 사건·감정·선택을 유저가 이미 수행한 것으로 승격하지 않습니다.'
-              : '현재 인풋과 직전 AI 응답의 종결부만 위에서 선택한 독립 로어 파이프라인의 검색 문맥으로 사용합니다. 모듈 로어북은 모듈 선택창에서 고른 활성 모듈의 항목만 전달합니다.' })
+            guiEl('div', { class: 'sga-reference-box' }, [
+              guiEl('div', { class: 'sga-reference-head' }, [guiEl('strong', { text: '참고할 RisuAI 정보' }), guiEl('span', { text: playerControlled ? '행동 후보의 가능성/정합성에만 사용' : '체크한 자료만 재구성 프롬프트에 포함' })]),
+              guiEl('div', { class: 'sga-reference-grid' }, [
+                checkboxNode(slot.risuRefs.persona, '페르소나', next => { slotValue.risuRefs.persona = next; }),
+                checkboxNode(slot.risuRefs.characterDescription, '캐릭터 설명', next => { slotValue.risuRefs.characterDescription = next; }),
+                checkboxNode(slot.risuRefs.characterLorebook, '캐릭터 로어북', next => { slotValue.risuRefs.characterLorebook = next; }),
+                checkboxNode(slot.risuRefs.moduleLorebook, '선택한 모듈 로어북', next => { slotValue.risuRefs.moduleLorebook = next; })
+              ]),
+              guiEl('div', { class: 'sga-note', text: playerControlled
+                ? '참고 자료는 가능한 유저 행동 후보를 만드는 배경일 뿐입니다. 자료 속 사건·감정·선택을 유저가 이미 수행한 것으로 승격하지 않습니다.'
+                : '현재 인풋과 직전 AI 응답의 종결부만 검색 문맥으로 사용합니다. 모듈 로어북은 자료 화면에서 고른 항목만 전달합니다.' })
+            ])
           ])
         ]) : null,
         guiEl('div', { class: 'sga-callout', text: '리롤·롤백 예외: 현재 입력과 같은 U가 채팅의 마지막 사용자 메시지로 이미 저장되어 있으면 LLM을 호출하거나 입력을 다시 쓰지 않고 이 단계만 자동으로 건너뜁니다.' })
@@ -36214,7 +37471,6 @@ html,body{width:100%;height:100%;overflow:hidden}
         guiEl('p', { text: `${sequenceText} 순서로 실행합니다. 현재 선택한 단계만 불러와 초기 렌더링 부담을 줄였습니다.` })
       ]),
       settings.mode === 'lite' ? guiEl('div', { class: 'sga-callout', text: '현재 라이트 모드에서는 인물 AIDE와 세계관 AIDE를 건너뜁니다. 속도·품질 프로필을 바꿔도 이 작동 방식은 유지됩니다.', style: { marginBottom: '14px' } }) : null,
-      selectedDef?.id !== 'shadow_act' ? buildAideOrderPanel() : null,
       card
     ]);
   };
@@ -36465,32 +37721,32 @@ html,body{width:100%;height:100%;overflow:hidden}
     runtime.excludedCharacterLoreIds = excludedIds;
     const excluded = new Set(excludedIds);
     const catalog = Array.isArray(Gui.characterLoreCatalog) ? Gui.characterLoreCatalog : [];
-    const currentExcludedCount = catalog.filter(item => excluded.has(item.key)).length;
-    const setExcluded = (item, checked) => {
+    const currentUsedCount = catalog.filter(item => !excluded.has(item.key)).length;
+    const setUsed = (item, used) => {
       const next = new Set(normalizeExcludedCharacterLoreIds(runtime.excludedCharacterLoreIds));
-      if (checked) next.add(item.key);
-      else next.delete(item.key);
+      if (used) next.delete(item.key);
+      else next.add(item.key);
       runtime.excludedCharacterLoreIds = Array.from(next);
       markGuiDirty();
       renderSettingsGui();
     };
     const rows = catalog.map(item => {
-      const checked = excluded.has(item.key);
+      const used = !excluded.has(item.key);
       return guiEl('label', {
-        class: `sga-module-lore-item${checked ? ' excluded' : ''}`,
-        title: checked ? `${item.name} · GRADIA 컨텍스트에서 영구 배제` : item.name
+        class: `sga-module-lore-item${used ? ' selected' : ' excluded'}`,
+        title: used ? `${item.name} · GRADIA가 사용할 수 있음` : `${item.name} · GRADIA가 읽지 않음`
       }, [
         guiEl('input', {
-          class: 'sga-module-lore-check sga-character-lore-exclusion-check',
+          class: 'sga-module-lore-check',
           type: 'checkbox',
-          checked,
-          'aria-label': `${item.name} 캐릭터 로어북 영구 배제`,
-          onChange: event => setExcluded(item, event.target.checked)
+          checked: used,
+          'aria-label': `${item.name} 캐릭터 로어북 사용`,
+          onChange: event => setUsed(item, event.target.checked)
         }),
         guiEl('div', { class: 'sga-module-lore-copy' }, [
           guiEl('div', { class: 'sga-module-lore-head' }, [
             guiEl('strong', { text: item.name }),
-            guiEl('span', { class: `sga-badge ${checked ? 'danger' : 'off'}`, text: checked ? '영구 배제' : '활성화 가능' })
+            guiEl('span', { class: `sga-badge ${used ? 'good' : 'off'}`, text: used ? '사용' : '사용 안 함' })
           ]),
           guiEl('div', { class: 'sga-module-lore-meta' }, [
             item.activationKey ? guiEl('span', { text: `키 · ${item.activationKey}` }) : guiEl('span', { text: '활성화 키 없음' }),
@@ -36507,29 +37763,29 @@ html,body{width:100%;height:100%;overflow:hidden}
     return guiEl('div', { class: 'sga-card wide' }, [
       guiEl('div', { class: 'sga-agent-head' }, [
         guiEl('div', {}, [
-          guiEl('h3', { text: '캐릭터 로어북 영구 배제' }),
-          guiEl('div', { class: 'sga-note', text: '체크한 캐릭터 로어북은 후보 수집 단계에서 제거됩니다. RisuAI 선택 재사용·호환 키 판정·GRADIA 확장 판정 모두 해당 항목을 다시 활성화할 수 없습니다.' })
+          guiEl('h3', { text: '캐릭터 로어북' }),
+          guiEl('div', { class: 'sga-note', text: '체크한 항목만 GRADIA가 사용할 수 있습니다. 체크를 끈 항목은 검색·활성화·RisuAI 선택 여부와 관계없이 읽지 않습니다.' })
         ]),
-        guiEl('span', { class: `sga-badge ${currentExcludedCount ? 'danger' : 'good'}`, text: `${currentExcludedCount}/${catalog.length} 배제` })
+        guiEl('span', { class: `sga-badge ${currentUsedCount ? 'good' : 'off'}`, text: `${currentUsedCount}/${catalog.length} 사용` })
       ]),
       guiEl('div', { class: 'sga-actions', style: { marginTop: '10px' } }, [
         guiEl('button', {
-          class: 'sga-btn danger',
-          text: '현재 캐릭터 전체 배제',
-          disabled: !catalog.length || currentExcludedCount === catalog.length,
+          class: 'sga-btn',
+          text: '모두 사용',
+          disabled: !catalog.length || currentUsedCount === catalog.length,
           onClick: () => {
-            runtime.excludedCharacterLoreIds = normalizeExcludedCharacterLoreIds([...excludedIds, ...catalog.map(item => item.key)]);
+            const currentKeys = new Set(catalog.map(item => item.key));
+            runtime.excludedCharacterLoreIds = excludedIds.filter(key => !currentKeys.has(key));
             markGuiDirty();
             renderSettingsGui();
           }
         }),
         guiEl('button', {
-          class: 'sga-btn',
-          text: '현재 캐릭터 배제 해제',
-          disabled: !currentExcludedCount,
+          class: 'sga-btn ghost',
+          text: '모두 끄기',
+          disabled: !catalog.length || currentUsedCount === 0,
           onClick: () => {
-            const currentKeys = new Set(catalog.map(item => item.key));
-            runtime.excludedCharacterLoreIds = excludedIds.filter(key => !currentKeys.has(key));
+            runtime.excludedCharacterLoreIds = normalizeExcludedCharacterLoreIds([...excludedIds, ...catalog.map(item => item.key)]);
             markGuiDirty();
             renderSettingsGui();
           }
@@ -36545,7 +37801,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       Gui.characterLoreCatalogError ? guiEl('div', { class: 'sga-callout danger', text: `캐릭터 로어북 목록을 불러오지 못했습니다: ${Gui.characterLoreCatalogError}` }) : null,
       !Gui.characterLoreCatalogLoading && !catalog.length ? guiEl('div', { class: 'sga-callout', text: '현재 캐릭터에 선택 가능한 캐릭터 로어북이 없습니다.' }) : null,
       rows.length ? guiEl('div', { class: 'sga-module-lore-grid' }, rows) : null,
-      guiEl('div', { class: 'sga-note', text: `배제 목록은 설정에 영구 저장됩니다. 현재 다른 캐릭터에서 저장된 배제 항목을 포함한 전체 저장 수는 ${excludedIds.length}개입니다. 채팅 로어북은 이 창의 배제 대상에 포함하지 않습니다.` })
+      guiEl('div', { class: 'sga-note', text: `체크 해제한 항목은 내부적으로 제외 목록에 저장됩니다. 다른 캐릭터의 저장값을 포함한 전체 제외 수는 ${excludedIds.length}개입니다.` })
     ]);
   };
 
@@ -36558,38 +37814,38 @@ html,body{width:100%;height:100%;overflow:hidden}
     const shadowSelectedIds = new Set(
       Runtime.lastRisuContext?.shared?.meta?.hypaContinuity?.selectedRecordIds || []
     );
-    const currentExcludedCount = catalog.filter(item => excluded.has(item.id)).length;
-    const setExcluded = (item, checked) => {
+    const currentUsedCount = catalog.filter(item => !excluded.has(item.id)).length;
+    const setUsed = (item, used) => {
       const next = new Set(normalizeExcludedHypaRecordIds(runtime.excludedHypaRecordIds));
-      if (checked) next.add(item.id);
-      else next.delete(item.id);
+      if (used) next.delete(item.id);
+      else next.add(item.id);
       runtime.excludedHypaRecordIds = Array.from(next);
       markGuiDirty();
       renderSettingsGui();
     };
     const rows = catalog.map((item, index) => {
-      const checked = excluded.has(item.id);
-      const selectedByShadow = shadowSelectedIds.has(item.id);
+      const used = !excluded.has(item.id);
+      const selectedByShadow = used && shadowSelectedIds.has(item.id);
       return guiEl('article', {
-        class: `sga-module-lore-item${checked ? ' excluded' : selectedByShadow ? ' selected' : ''}`,
+        class: `sga-module-lore-item${used ? selectedByShadow ? ' selected' : '' : ' excluded'}`,
         style: { cursor: 'default' }
       }, [
         guiEl('label', { class: 'sga-check', style: { alignSelf: 'flex-start', gridColumn: '1 / -1' } }, [
           guiEl('input', {
             class: 'sga-module-lore-check',
             type: 'checkbox',
-            checked,
-            'aria-label': `${item.title} HypaV3 기록 제외`,
-            onChange: event => setExcluded(item, event.target.checked)
+            checked: used,
+            'aria-label': `${item.title} HypaV3 기록 사용`,
+            onChange: event => setUsed(item, event.target.checked)
           }),
-          guiEl('span', { text: '이 기록을 제외' })
+          guiEl('span', { text: '이 기록 사용' })
         ]),
         guiEl('div', { class: 'sga-module-lore-copy', style: { gridColumn: '1 / -1' } }, [
           guiEl('div', { class: 'sga-module-lore-head' }, [
             guiEl('strong', { text: item.title || `HypaV3 기록 ${index + 1}` }),
             guiEl('span', {
-              class: `sga-badge ${checked ? 'danger' : selectedByShadow ? 'good' : 'off'}`,
-              text: checked ? 'GRADIA 제외' : selectedByShadow ? '현재 GRADIA 채택' : item.risuSelected ? 'RisuAI 최근 선택' : '사용 가능'
+              class: `sga-badge ${!used ? 'off' : selectedByShadow ? 'good' : item.risuSelected ? 'good' : 'off'}`,
+              text: !used ? '사용 안 함' : selectedByShadow ? '현재 채택' : item.risuSelected ? 'RisuAI 최근 선택' : '사용 가능'
             })
           ]),
           guiEl('div', { class: 'sga-module-lore-meta' }, [
@@ -36608,27 +37864,29 @@ html,body{width:100%;height:100%;overflow:hidden}
     return guiEl('div', { class: 'sga-card wide' }, [
       guiEl('div', { class: 'sga-agent-head' }, [
         guiEl('div', {}, [
-          guiEl('h3', { text: '하이파V3 제외' }),
-          guiEl('div', { class: 'sga-note', text: '현재 채팅방의 HypaV3 요약 기록입니다. RisuAI가 이번 요청에서 선택한 기록 중 여기서 제외하지 않은 항목만 GRADIA 내부로 가져오며, SHADOW ACT와 모든 AIDE가 동일한 결과를 재사용합니다.' })
+          guiEl('h3', { text: 'HypaV3 기록' }),
+          guiEl('div', { class: 'sga-note', text: '체크는 “GRADIA가 사용할 수 있음”을 뜻합니다. 실제 주입은 RisuAI가 현재 요청에서 선택한 기록 중 허용된 항목만 사용합니다.' })
         ]),
-        guiEl('div', {
-          class: `sga-hypa-count${currentExcludedCount ? ' has-exclusions' : ''}`,
-          title: `전체 ${catalog.length}개 중 ${currentExcludedCount}개 제외`
-        }, [
-          guiEl('span', { class: 'sga-hypa-count-label', text: '제외' }),
-          guiEl('strong', { text: String(currentExcludedCount) }),
-          guiEl('span', { class: 'sga-hypa-count-dot', 'aria-hidden': 'true' }),
-          guiEl('span', { class: 'sga-hypa-count-total', text: `전체 ${catalog.length}` })
-        ])
+        guiEl('span', { class: `sga-badge ${currentUsedCount ? 'good' : 'off'}`, text: `${currentUsedCount}/${catalog.length} 사용` })
       ]),
       guiEl('div', { class: 'sga-actions', style: { marginTop: '10px' } }, [
         guiEl('button', {
           class: 'sga-btn',
-          text: '현재 기록 제외 전부 해제',
-          disabled: !currentExcludedCount,
+          text: '모두 사용',
+          disabled: !catalog.length || currentUsedCount === catalog.length,
           onClick: () => {
             const currentIds = new Set(catalog.map(item => item.id));
             runtime.excludedHypaRecordIds = excludedIds.filter(id => !currentIds.has(id));
+            markGuiDirty();
+            renderSettingsGui();
+          }
+        }),
+        guiEl('button', {
+          class: 'sga-btn ghost',
+          text: '모두 끄기',
+          disabled: !catalog.length || currentUsedCount === 0,
+          onClick: () => {
+            runtime.excludedHypaRecordIds = normalizeExcludedHypaRecordIds([...excludedIds, ...catalog.map(item => item.id)]);
             markGuiDirty();
             renderSettingsGui();
           }
@@ -36644,14 +37902,12 @@ html,body{width:100%;height:100%;overflow:hidden}
       Gui.hypaCatalogError ? guiEl('div', { class: 'sga-callout danger', text: `HypaV3 기록을 불러오지 못했습니다: ${Gui.hypaCatalogError}` }) : null,
       !Gui.hypaCatalogLoading && !catalog.length ? guiEl('div', { class: 'sga-callout', text: '현재 채팅방에 HypaV3 기록이 없거나 플러그인 API에서 기록에 접근할 수 없습니다.' }) : null,
       rows.length ? guiEl('div', { class: 'sga-module-lore-grid' }, rows) : null,
-      guiEl('div', { class: 'sga-note', text: `체크한 항목은 설정 저장 후 RisuAI가 선택하더라도 GRADIA 내부 자료에서 제거됩니다. 대체 기록을 자체 선별하거나 보충하지 않습니다. 다른 채팅방 기록을 포함한 전체 제외 저장 수는 ${excludedIds.length}개입니다.` })
+      guiEl('div', { class: 'sga-note', text: `체크 해제한 항목은 RisuAI가 선택해도 GRADIA 내부 자료에서 제외됩니다. 다른 채팅방 기록을 포함한 전체 제외 저장 수는 ${excludedIds.length}개입니다.` })
     ]);
   };
 
   const buildModuleLoreSelectionPanel = () => {
     const runtime = Gui.state.runtime;
-    const loreActivationMode = normalizeLoreActivationMode(runtime.loreActivationMode);
-    runtime.loreActivationMode = loreActivationMode;
     const selectedIds = normalizeSelectedModuleLoreIds(runtime.selectedModuleLoreIds);
     runtime.selectedModuleLoreIds = selectedIds;
     const excludedIds = normalizeExcludedModuleLoreIds(runtime.excludedModuleLoreIds);
@@ -36663,7 +37919,10 @@ html,body{width:100%;height:100%;overflow:hidden}
     const matchedKeys = new Set(catalog.flatMap(item => item.aliases || [item.key]).filter(Boolean));
     const unavailableSelected = selectedIds.filter(key => !matchedKeys.has(key));
     const moduleIsSelected = item => selected.has(item.key) || (item.aliases || []).some(alias => selected.has(alias));
-    if (!activeModules.some(item => item.key === Gui.moduleCatalogFocusedKey)) Gui.moduleCatalogFocusedKey = activeModules.find(moduleIsSelected)?.key || activeModules[0]?.key || '';
+    const selectedModules = activeModules.filter(moduleIsSelected);
+    const selectedLoreTotal = selectedModules.reduce((sum, item) => sum + (item.loreEntries || []).length, 0);
+    const selectedLoreUsed = selectedModules.reduce((sum, item) => sum + (item.loreEntries || []).filter(entry => !excluded.has(entry.key)).length, 0);
+    if (!activeModules.some(item => item.key === Gui.moduleCatalogFocusedKey)) Gui.moduleCatalogFocusedKey = selectedModules[0]?.key || activeModules[0]?.key || '';
     const focusedModule = activeModules.find(item => item.key === Gui.moduleCatalogFocusedKey) || null;
     const setFocused = item => {
       Gui.moduleCatalogFocusedKey = item?.key || '';
@@ -36712,17 +37971,24 @@ html,body{width:100%;height:100%;overflow:hidden}
       const checked = moduleIsSelected(item);
       const enabledEntries = checked ? (item.loreEntries || []).filter(entry => !excluded.has(entry.key)).length : 0;
       const focused = item.key === Gui.moduleCatalogFocusedKey;
+      const searchText = normalizeForLoreMatch([
+        item.name,
+        item.namespace,
+        item.description,
+        ...(item.loreEntries || []).flatMap(entry => [entry.name, entry.activationKey, entry.contentPreview])
+      ].filter(Boolean).join('\n'));
       return guiEl('div', {
         class: `sga-module-list-row${checked ? ' selected' : ''}${focused ? ' focused' : ''}`,
         title: item.description || item.name,
-        'data-module-lore-module': item.key
+        'data-module-lore-module': item.key,
+        'data-lore-search-text': searchText
       }, [
         guiEl('input', {
           class: 'sga-module-lore-check',
           type: 'checkbox',
           checked,
           'data-module-lore-module-toggle': item.key,
-          'aria-label': `${item.name} 모듈 로어북 선택`,
+          'aria-label': `${item.name} 모듈 로어북 사용`,
           onChange: event => setModuleSelected(item, event.target.checked)
         }),
         guiEl('button', {
@@ -36733,16 +37999,14 @@ html,body{width:100%;height:100%;overflow:hidden}
         }, [
           guiEl('div', { class: 'sga-module-list-head' }, [
             guiEl('strong', { text: item.name }),
-            guiEl('span', { class: `sga-badge ${checked ? 'good' : 'off'}`, text: checked ? `${enabledEntries}/${item.loreCount}` : '미선택' })
+            guiEl('span', { class: `sga-badge ${checked ? 'good' : 'off'}`, text: checked ? `${enabledEntries}/${item.loreCount}` : '사용 안 함' })
           ]),
           guiEl('div', { class: 'sga-module-list-meta' }, [
             guiEl('span', { text: `로어 ${item.loreCount}개` }),
             item.namespace ? guiEl('span', { text: item.namespace }) : null,
             item.embedded ? guiEl('span', { text: '페르소나 내장' }) : null
           ]),
-          item.description
-            ? guiEl('p', { class: 'sga-module-list-description', text: item.description })
-            : null
+          item.description ? guiEl('p', { class: 'sga-module-list-description', text: item.description }) : null
         ])
       ]);
     });
@@ -36751,10 +38015,12 @@ html,body{width:100%;height:100%;overflow:hidden}
     const enabledFocusedCount = focusedSelected ? focusedEntries.filter(entry => !excluded.has(entry.key)).length : 0;
     const entryRows = focusedEntries.map(entry => {
       const checked = focusedSelected && !excluded.has(entry.key);
+      const searchText = normalizeForLoreMatch([entry.name, entry.activationKey, entry.contentPreview].filter(Boolean).join('\n'));
       return guiEl('label', {
         class: `sga-module-entry-item${checked ? ' selected' : ''}${focusedSelected ? '' : ' disabled'}`,
         title: entry.contentPreview || entry.name,
-        'data-module-lore-entry': entry.key
+        'data-module-lore-entry': entry.key,
+        'data-lore-search-text': searchText
       }, [
         guiEl('input', {
           class: 'sga-module-lore-check',
@@ -36762,7 +38028,7 @@ html,body{width:100%;height:100%;overflow:hidden}
           checked,
           disabled: !focusedSelected,
           'data-module-lore-entry-toggle': entry.key,
-          'aria-label': `${entry.name} 로어 선택`,
+          'aria-label': `${entry.name} 로어 사용`,
           onChange: event => setEntrySelected(entry, event.target.checked)
         }),
         guiEl('div', { class: 'sga-module-entry-copy' }, [
@@ -36779,35 +38045,36 @@ html,body{width:100%;height:100%;overflow:hidden}
         ])
       ]);
     });
+    const filterVisibleLoreRows = event => {
+      const root = event?.currentTarget?.closest?.('.sga-card');
+      if (!root) return;
+      const query = normalizeForLoreMatch(event.currentTarget.value || '');
+      root.querySelectorAll('[data-lore-search-text]').forEach(node => {
+        const searchable = text(node.getAttribute('data-lore-search-text') || '');
+        node.style.display = !query || searchable.includes(query) ? '' : 'none';
+      });
+    };
     return guiEl('div', { class: 'sga-card wide' }, [
       guiEl('div', { class: 'sga-agent-head' }, [
         guiEl('div', {}, [
-          guiEl('h3', { text: '모듈 로어북 선택' }),
-          guiEl('div', { class: 'sga-note', text: '오른쪽에서 활성 모듈을 고르고, 왼쪽에서 그 안의 로어를 확인하거나 개별 해제합니다. 모듈을 새로 선택하면 내부 로어는 모두 선택됩니다.' })
+          guiEl('h3', { text: '모듈 로어북' }),
+          guiEl('div', { class: 'sga-note', text: '체크한 모듈과 내부 로어만 GRADIA가 사용할 수 있습니다. 모듈을 처음 켜면 내부 로어는 모두 사용 상태가 됩니다.' })
         ]),
-        guiEl('span', { class: `sga-badge ${selectedIds.length ? 'good' : 'off'}`, text: `${selectedIds.length}개 선택` })
+        guiEl('span', { class: `sga-badge ${selectedModules.length ? 'good' : 'off'}`, text: `${selectedModules.length}개 모듈 · ${selectedLoreUsed}/${selectedLoreTotal} 로어 사용` })
       ]),
-      guiEl('div', { class: 'sga-stage-detail-head', style: { marginTop: '12px', marginBottom: '9px' } }, [
-        guiEl('strong', { text: '메인 초안 파이프라인 로어 선택 방식' }),
-        guiEl('span', { text: 'SHADOW ACT와 뒤이은 AIDE가 공유할 로어를 선택합니다.' })
-      ]),
-      guiEl('div', { class: 'sga-simple-choice-grid three' }, Object.entries(LORE_ACTIVATION_MODE_DEFS).map(([mode, def]) => simpleChoiceCard({
-        active: loreActivationMode === mode,
-        title: def.label,
-        description: def.description,
-        meta: def.meta,
-        badge: mode === DEFAULT_LORE_ACTIVATION_MODE ? '권장' : mode === 'risu_key' ? '독립' : '확장',
-        onClick: () => applyLoreActivationModeToGui(mode)
-      }))),
-      guiEl('div', { class: 'sga-note', style: { marginTop: '10px' }, text: loreActivationMode === 'gradia_extended'
-        ? 'GRADIA 확장은 RisuAI 호환 키 판정에 현재 입력의 의미 검색과 직전 장면에 직접 등장한 인물·장소 앵커를 추가합니다.'
-        : loreActivationMode === 'risu_key'
-          ? 'RisuAI 호환 판정은 설정된 검색 깊이의 최근 사용자·AI 메시지와 재귀 로어에서 활성화 키를 찾고, 우선순위와 토큰 예산을 적용합니다.'
-          : '이번 메인 요청에 RisuAI가 실제로 넣은 로어만 내부에서 채택합니다. 인풋 관리자는 자체 설정에서 RisuAI식 또는 GRADIA식을 별도로 선택합니다.' }),
-      guiEl('div', { class: 'sga-actions', style: { marginTop: '10px' } }, [
-        guiEl('button', { class: 'sga-btn', text: '활성 모듈 전체 선택', disabled: !activeModules.length, onClick: () => setAllModules(true) }),
-        guiEl('button', { class: 'sga-btn danger', text: '모듈 선택 전체 해제', disabled: !selectedIds.length, onClick: () => setAllModules(false) }),
-        guiEl('button', { class: 'sga-btn ghost', text: Gui.moduleCatalogLoading ? '불러오는 중…' : '모듈 목록 새로고침', disabled: Gui.moduleCatalogLoading, onClick: () => { void refreshModuleLoreCatalog(true); } })
+      guiEl('div', { class: 'sga-row2', style: { marginTop: '10px' } }, [
+        fieldNode('찾기', guiEl('input', {
+          class: 'sga-input',
+          type: 'search',
+          placeholder: '모듈명 · 로어 제목 · 활성화 키 검색',
+          autocomplete: 'off',
+          onInput: filterVisibleLoreRows
+        }), '현재 목록만 빠르게 필터링합니다.'),
+        guiEl('div', { class: 'sga-actions', style: { alignItems: 'end' } }, [
+          guiEl('button', { class: 'sga-btn', text: '모두 사용', disabled: !activeModules.length || selectedModules.length === activeModules.length, onClick: () => setAllModules(true) }),
+          guiEl('button', { class: 'sga-btn ghost', text: '모두 끄기', disabled: !selectedModules.length, onClick: () => setAllModules(false) }),
+          guiEl('button', { class: 'sga-btn ghost', text: Gui.moduleCatalogLoading ? '불러오는 중…' : '새로고침', disabled: Gui.moduleCatalogLoading, onClick: () => { void refreshModuleLoreCatalog(true); } })
+        ])
       ]),
       Gui.moduleCatalogLoading ? guiEl('div', { class: 'sga-callout', text: 'RisuAI의 모듈 목록을 불러오고 있습니다.' }) : null,
       Gui.moduleCatalogError ? guiEl('div', { class: 'sga-callout danger', text: `모듈 목록을 불러오지 못했습니다: ${Gui.moduleCatalogError}` }) : null,
@@ -36816,11 +38083,11 @@ html,body{width:100%;height:100%;overflow:hidden}
         guiEl('section', { class: 'sga-module-browser-pane', 'data-module-lore-entries-pane': '' }, [
           guiEl('div', { class: 'sga-module-browser-title' }, [
             guiEl('strong', { text: focusedModule ? focusedModule.name : '내부 로어북' }),
-            guiEl('span', { text: focusedModule ? (focusedSelected ? `${enabledFocusedCount}/${focusedEntries.length}개 선택` : '모듈 미선택') : '모듈을 선택하세요' })
+            guiEl('span', { text: focusedModule ? (focusedSelected ? `${enabledFocusedCount}/${focusedEntries.length}개 사용` : '모듈 사용 안 함') : '모듈을 선택하세요' })
           ]),
           guiEl('div', { class: 'sga-module-entry-toolbar' }, [
-            guiEl('button', { class: 'sga-btn', text: '로어 전체 선택', 'data-module-lore-select-all': '', disabled: !focusedSelected || !focusedEntries.length || enabledFocusedCount === focusedEntries.length, onClick: () => setAllFocusedEntries(true) }),
-            guiEl('button', { class: 'sga-btn danger', text: '로어 전체 해제', 'data-module-lore-clear-all': '', disabled: !focusedSelected || !enabledFocusedCount, onClick: () => setAllFocusedEntries(false) })
+            guiEl('button', { class: 'sga-btn', text: '모두 사용', 'data-module-lore-select-all': '', disabled: !focusedSelected || !focusedEntries.length || enabledFocusedCount === focusedEntries.length, onClick: () => setAllFocusedEntries(true) }),
+            guiEl('button', { class: 'sga-btn ghost', text: '모두 끄기', 'data-module-lore-clear-all': '', disabled: !focusedSelected || !enabledFocusedCount, onClick: () => setAllFocusedEntries(false) })
           ]),
           entryRows.length
             ? guiEl('div', { class: 'sga-module-entry-list' }, entryRows)
@@ -36835,7 +38102,7 @@ html,body{width:100%;height:100%;overflow:hidden}
         ])
       ]) : null,
       unavailableSelected.length ? guiEl('div', { class: 'sga-note', text: `현재 찾을 수 없거나 비활성인 선택값: ${unavailableSelected.join(', ')}. 이 값들은 실행 시 읽지 않습니다.` }) : null,
-      guiEl('div', { class: 'sga-note', text: '개별 해제한 로어는 후보 수집 단계에서 제외됩니다. 남은 항목 중 실제 전달 항목은 SHADOW ACT·인물·세계관·플롯 리랭커가 관련도 순으로 고릅니다.' })
+      guiEl('div', { class: 'sga-note', text: '체크를 끈 항목은 후보 수집 단계에서 제외됩니다. 체크한 항목 안에서 실제로 필요한 로어는 GRADIA가 자동으로 선별합니다.' })
     ]);
   };
 
@@ -36958,10 +38225,8 @@ html,body{width:100%;height:100%;overflow:hidden}
             note: 'SHADOW ACT의 초안, 세 AIDE의 자연어 분석값과 수정문, 최종 장면 본문에 적용합니다. 참고 원문과 고유명사·태그·JSON 키는 번역하지 않습니다.'
           }),
           runtimeField('내장 작성 방식', 'builtInStylePreset', { choices: [['unified_stylepack','GRADIA 통합 작성 방식']] }),
-          runtimeField('메인 초안 로어 선택 방식', 'loreActivationMode', {
-            choices: [['risu_selected','RisuAI가 선별한 로어 그대로'],['risu_key','RisuAI 호환 · 최근 문맥 활성화 키'],['gradia_extended','GRADIA 확장 · 활성화 키 + 장면 Jaccard']],
-            note: 'SHADOW ACT와 AIDE에만 적용됩니다. 인풋 관리자의 선택 방식은 해당 도우미 설정에서 별도로 관리합니다.'
-          }),
+          fieldNode('로어 검색 엔진', guiEl('div', { class: 'sga-provider-note-box' }, [guiEl('span', { text: '자동 · GRADIA 통합 검색' })]), 'RisuAI 실제 선택·활성화 키·BM25F/Jaccard/Entity를 RRF로 합치고 Confidence Gate와 MMR을 적용합니다.'),
+          runtimeField('단계별 일반 로어 최대', 'loreRerankerTopK', { number: true, min: 1, max: 32, note: '기본 8. 강제/항상 활성 로어는 이 수와 별도로 보호되며 관련도가 낮으면 슬롯을 억지로 채우지 않습니다.' }),
           runtimeField('오류가 났을 때', 'failureMode', { choices: [['soft','다음 단계 계속 · 추천'],['degraded','직전 정상 초안 사용'],['hard','전체 실행 중단']] })
         ]),
         guiEl('div', { class: 'sga-card' }, [
@@ -37501,7 +38766,7 @@ html,body{width:100%;height:100%;overflow:hidden}
                     `모델 안전량 ${formatChars(canonicalReferenceBudget.safeAvailableChars)}`,
                     `실제 사용 ${formatChars(canonicalReferenceBudget.usedChars)}`,
                     `제외 ${formatChars(canonicalReferenceBudget.omittedChars)}`,
-                    '공통 후보 1회 수집 · 단계별 로어 Top 8 리랭킹'
+                    '공통 후보 1회 수집 · 일반 로어 Top 8 + 필수 로어 보호'
                   ].join(' · ')
                 }),
                 guiEl('div', { class: 'sga-code', text: JSON.stringify(canonicalReferenceBudget, null, 2) })
@@ -37604,6 +38869,28 @@ html,body{width:100%;height:100%;overflow:hidden}
           ]),
           guiEl('span', { class: `sga-badge ${guided ? 'good' : 'warn'}`, text: engine ? '자체 엔진' : '초안 주입' })
         ]),
+        guiEl('div', { class: 'sga-simple-choice-grid two', style: { marginTop: '14px', marginBottom: '14px' } }, [
+          simpleChoiceCard({
+            active: guided,
+            title: '일반 · 메인 모델이 마무리',
+            description: playerControlled
+              ? 'GRADIA 초안과 유저 행동 불가침 지시를 메인 응답 모델에 전달해 같은 장면 안에서 자연스럽게 다듬습니다.'
+              : 'GRADIA 최종 초안을 메인 응답 모델에 전달해 활성 로어와 최근 문맥을 활용해 같은 장면 안에서 마무리합니다.',
+            meta: '기본 · 가장 안정적인 전달 방식',
+            badge: guided ? '현재' : '추천',
+            onClick: () => applySimpleOutputToGui('draft_guided')
+          }),
+          simpleChoiceCard({
+            active: engine,
+            title: '확장 · GRADIA가 추가 처리',
+            description: playerControlled
+              ? 'RP 전용 Risu Engine 구성을 한 단계 더 거친 뒤 메인 응답 모델에 전달합니다.'
+              : 'GRADIA 자체 promptTemplate/RAG 엔진으로 한 번 더 구성한 결과를 메인 응답 모델에 전달합니다.',
+            meta: '추가 처리 · 더 많은 호출/문맥 사용 가능',
+            badge: engine ? '현재' : '고급',
+            onClick: () => applySimpleOutputToGui('risu_engine')
+          })
+        ]),
         guiEl('div', { class: 'sga-main-response-grid' }, [
           guiEl('div', { class: 'sga-provider-note-box' }, [
             guiEl('strong', { text: '출력 방식' }),
@@ -37665,9 +38952,9 @@ html,body{width:100%;height:100%;overflow:hidden}
       return page('응답 옵션', 'Skill과 분리된 NSFW 표현 정책과 Assistant Prefill 상태를 관리합니다.', buildInternalResponseImprovementPanel());
     }
     if (section === 'runtime') return page('전문가 설정', '내부 한도와 실행 방식을 조정합니다.', buildRuntimeTab());
-    if (section === 'modules') return page('모듈 로어북 선택', 'GRADIA 내부 에이전트가 읽을 활성 모듈을 직접 선택합니다.', buildModuleLoreSelectionPanel());
-    if (section === 'character_lore_exclusions') return page('캐릭터 로어북 제외', '선택한 캐릭터 로어북을 GRADIA의 모든 컨텍스트와 활성화 판정에서 영구 배제합니다.', buildCharacterLoreExclusionPanel());
-    if (section === 'hypa_v3') return page('하이파V3 제외', '현재 채팅방의 장기 기록을 확인하고 RisuAI가 선택하더라도 GRADIA 내부에서 읽지 않을 기록을 지정합니다.', buildHypaV3Panel());
+    if (section === 'modules') return page('모듈 로어북', '사용할 모듈과 내부 로어를 선택합니다.', buildModuleLoreSelectionPanel());
+    if (section === 'character_lore_exclusions') return page('캐릭터 로어북', 'GRADIA가 사용할 캐릭터 로어북을 선택합니다.', buildCharacterLoreExclusionPanel());
+    if (section === 'hypa_v3') return page('HypaV3 기록', 'GRADIA가 사용할 수 있는 장기 기록을 선택합니다.', buildHypaV3Panel());
     if (section === 'information_transfer') return page('정보 전달 도우미', 'GRADIA의 최종 초안과 단계별 분석 자료 중 무엇을 메인 응답 모델에 제공할지 선택합니다.', buildInformationTransferSettingsPanel());
     if (section === 'main') return page('메인 응답', 'GRADIA 초안을 최종 응답 모델에 전달하는 방식을 확인합니다.', buildMainResponseBridge());
     if (section === 'transfer') return page('가져오기 / 내보내기', '설정 JSON을 이동하거나 병합합니다.', buildTransferTab());
@@ -37766,8 +39053,7 @@ html,body{width:100%;height:100%;overflow:hidden}
             guiEl('button', { class: 'sga-btn', text: '스토리 아크', onClick: () => navigateGui('flow', '', 'arc') }),
             guiEl('button', { class: 'sga-btn', text: 'SHADOW 설정', onClick: () => navigateToStageAgent('shadow_act', 'agent_shadow_act') }),
             guiEl('button', { class: 'sga-btn', text: 'AI 연결', onClick: () => navigateGui('providers', '', 'providers') }),
-            guiEl('button', { class: 'sga-btn', text: '모듈 로어북', onClick: () => navigateGui('flow', '', 'modules') }),
-            guiEl('button', { class: 'sga-btn', text: '캐릭터 로어북 제외', onClick: () => navigateGui('flow', '', 'character_lore_exclusions') }),
+            guiEl('button', { class: 'sga-btn', text: '자료', onClick: () => navigateGui('flow', '', 'references') }),
             guiEl('button', { class: 'sga-btn', text: '정보 전달', onClick: () => navigateGui('flow', '', 'information_transfer') }),
             guiEl('button', { class: 'sga-btn', text: '디버그', onClick: () => navigateGui('flow', '', 'debug') })
           ])
@@ -37966,37 +39252,42 @@ const buildNarrativeEmbeddingPage = () => {
         fieldNode('Endpoint / Base URL', urlInput),
         fieldNode('API Key / Token', embeddingDraftInput(normalized.key, 'key', { type: 'password', autocomplete: 'new-password', placeholder: caps.requiresKey ? 'API key' : '선택 사항' }), '비밀값은 가능한 경우 기기 로컬 저장소에만 보관합니다.')
       ]),
-      guiEl('div', { class: 'sga-row2' }, [
-        fieldNode('Dimensions', allowedDims.length
-          ? embeddingDraftSelect(normalized.dimensions, 'dimensions', [['auto', 'Auto'], ...allowedDims.map(value => [String(value), String(value)])])
-          : embeddingDraftInput(normalized.dimensions, 'dimensions', { placeholder: 'auto 또는 정수' }),
-          allowedDims.length ? `이 모델의 허용값: ${allowedDims.join(', ')}` : 'auto는 프로바이더 기본 차원을 사용합니다.'),
-        fieldNode('Batch Size', embeddingDraftInput(normalized.batchSize, 'batchSize', { type: 'number', number: true, min: 1, max: 128 }))
-      ]),
-      guiEl('div', { class: 'sga-row2' }, [
-        fieldNode('Timeout (ms)', embeddingDraftInput(normalized.timeoutMs, 'timeoutMs', { type: 'number', number: true, min: 5000, max: 600000 })),
-        fieldNode('재시도', embeddingDraftSelect(String(normalized.maxRetries), 'maxRetries', [['0','0'],['1','1'],['2','2'],['3','3'],['4','4'],['5','5']], draftRef => { draftRef.maxRetries = Number(draftRef.maxRetries); }))
-      ]),
-      caps.supportsPurpose ? guiEl('div', { class: 'sga-row2' }, [
-        fieldNode('Query Task', embeddingDraftInput(normalized.queryTask, 'queryTask', { placeholder: '자동 매핑 또는 직접 입력' })),
-        fieldNode('Document Task', embeddingDraftInput(normalized.documentTask, 'documentTask', { placeholder: '자동 매핑 또는 직접 입력' }))
-      ]) : null,
-      guiEl('details', { class: 'sga-stage-advanced' }, [
-        guiEl('summary', { text: '고급 임베딩 전처리' }),
-        guiEl('div', { class: 'sga-row2' }, [
-          fieldNode('Query Prefix', embeddingDraftInput(normalized.queryPrefix, 'queryPrefix', { placeholder: '선택 사항' })),
-          fieldNode('Document Prefix', embeddingDraftInput(normalized.documentPrefix, 'documentPrefix', { placeholder: '선택 사항' }))
+      guiEl('details', { class: 'sga-advanced sga-stage-advanced', style: { marginTop: '10px' } }, [
+        guiEl('summary', {}, [
+          guiEl('span', { text: '고급 연결 설정' }),
+          guiEl('span', { class: 'sga-advanced-hint', text: 'Dimensions · Batch · Timeout · Task · Prefix' })
         ]),
-        guiEl('label', { class: 'sga-check' }, [guiEl('input', { type: 'checkbox', checked: normalized.normalizeVectors, onChange: event => { draft.normalizeVectors = !!event.target.checked; } }), guiEl('span', { text: '벡터 정규화' })]),
-        fieldNode('Custom Headers JSON', embeddingDraftInput(JSON.stringify(normalized.customHeaders || {}, null, 2), 'customHeaders', { tag: 'textarea', placeholder: '{"x-api-key":"..."}' }), 'OpenAI-compatible / Custom HTTP 등에서 추가 헤더가 필요할 때 사용합니다.'),
-        normalized.provider === 'custom_http' ? guiEl('div', {}, [
-          fieldNode('Custom Method', embeddingDraftSelect(normalized.customMethod, 'customMethod', [['POST','POST'],['GET','GET']])),
-          fieldNode('Request JSON Template', embeddingDraftInput(typeof normalized.customRequestTemplate === 'string' ? normalized.customRequestTemplate : JSON.stringify(normalized.customRequestTemplate, null, 2), 'customRequestTemplate', { tag: 'textarea', placeholder: '{"input":"{{text}}"}' })),
+        guiEl('div', { class: 'sga-advanced-body' }, [
           guiEl('div', { class: 'sga-row2' }, [
-            fieldNode('Vector response path', embeddingDraftInput(normalized.customResponsePath, 'customResponsePath')),
-            fieldNode('Error path', embeddingDraftInput(normalized.customErrorPath, 'customErrorPath'))
-          ])
-        ]) : null
+            fieldNode('Dimensions', allowedDims.length
+              ? embeddingDraftSelect(normalized.dimensions, 'dimensions', [['auto', 'Auto'], ...allowedDims.map(value => [String(value), String(value)])])
+              : embeddingDraftInput(normalized.dimensions, 'dimensions', { placeholder: 'auto 또는 정수' }),
+              allowedDims.length ? `이 모델의 허용값: ${allowedDims.join(', ')}` : 'auto는 프로바이더 기본 차원을 사용합니다.'),
+            fieldNode('Batch Size', embeddingDraftInput(normalized.batchSize, 'batchSize', { type: 'number', number: true, min: 1, max: 128 }))
+          ]),
+          guiEl('div', { class: 'sga-row2' }, [
+            fieldNode('Timeout (ms)', embeddingDraftInput(normalized.timeoutMs, 'timeoutMs', { type: 'number', number: true, min: 5000, max: 600000 })),
+            fieldNode('재시도', embeddingDraftSelect(String(normalized.maxRetries), 'maxRetries', [['0','0'],['1','1'],['2','2'],['3','3'],['4','4'],['5','5']], draftRef => { draftRef.maxRetries = Number(draftRef.maxRetries); }))
+          ]),
+          caps.supportsPurpose ? guiEl('div', { class: 'sga-row2' }, [
+            fieldNode('Query Task', embeddingDraftInput(normalized.queryTask, 'queryTask', { placeholder: '자동 매핑 또는 직접 입력' })),
+            fieldNode('Document Task', embeddingDraftInput(normalized.documentTask, 'documentTask', { placeholder: '자동 매핑 또는 직접 입력' }))
+          ]) : null,
+          guiEl('div', { class: 'sga-row2' }, [
+            fieldNode('Query Prefix', embeddingDraftInput(normalized.queryPrefix, 'queryPrefix', { placeholder: '선택 사항' })),
+            fieldNode('Document Prefix', embeddingDraftInput(normalized.documentPrefix, 'documentPrefix', { placeholder: '선택 사항' }))
+          ]),
+          guiEl('label', { class: 'sga-check' }, [guiEl('input', { type: 'checkbox', checked: normalized.normalizeVectors, onChange: event => { draft.normalizeVectors = !!event.target.checked; } }), guiEl('span', { text: '벡터 정규화' })]),
+          fieldNode('Custom Headers JSON', embeddingDraftInput(JSON.stringify(normalized.customHeaders || {}, null, 2), 'customHeaders', { tag: 'textarea', placeholder: '{"x-api-key":"..."}' }), 'OpenAI-compatible / Custom HTTP 등에서 추가 헤더가 필요할 때 사용합니다.'),
+          normalized.provider === 'custom_http' ? guiEl('div', {}, [
+            fieldNode('Custom Method', embeddingDraftSelect(normalized.customMethod, 'customMethod', [['POST','POST'],['GET','GET']])),
+            fieldNode('Request JSON Template', embeddingDraftInput(typeof normalized.customRequestTemplate === 'string' ? normalized.customRequestTemplate : JSON.stringify(normalized.customRequestTemplate, null, 2), 'customRequestTemplate', { tag: 'textarea', placeholder: '{"input":"{{text}}"}' })),
+            guiEl('div', { class: 'sga-row2' }, [
+              fieldNode('Vector response path', embeddingDraftInput(normalized.customResponsePath, 'customResponsePath')),
+              fieldNode('Error path', embeddingDraftInput(normalized.customErrorPath, 'customErrorPath'))
+            ])
+          ]) : null
+        ])
       ]),
       normalized.provider === 'ollama' ? guiEl('div', { class: 'sga-provider-note-box', style: { marginTop: '10px' } }, [
         guiEl('strong', { text: 'Ollama 임베딩 모델' }),
@@ -38333,7 +39624,7 @@ const buildNarrativeArchiveViewerPage = () => {
           markGuiDirty();
           queueGuiRender(0);
         }), 'T5 · T10 · T15 … 완료 시점의 정본을 다음 요청에서 확인해 DB를 갱신합니다. 중간 턴에서는 LLM을 호출하지 않고 저장된 DB를 읽기만 합니다.'),
-        fieldNode('Arc Director LLM 프로필', selectNode(slot.presetName || '', presetChoicesFromState(true), next => {
+        fieldNode('Arc Director AI 프리셋', selectNode(slot.presetName || '', presetChoicesFromState(true), next => {
           slot.presetName = next;
           markGuiDirty();
         }), `비어 있으면 기본 연결을 사용합니다. 현재 선택: ${resolvedPresetNameForStage(ARC_DIRECTOR_STAGE_ID)}`)
@@ -38354,7 +39645,13 @@ const buildNarrativeArchiveViewerPage = () => {
       ]),
       stale ? guiEl('div', { class: 'sga-callout', text: `리롤·롤백 등으로 기존 DB의 정본 기반이 바뀌었습니다. 5턴 주기 규칙을 지키기 위해 지금은 DB 참조를 중지하며, 다음 5턴 경계(T${nextBoundary})에서 자동 재기반화합니다.` }) : null,
       control.coldStartRunning === true ? guiEl('div', { class: 'sga-callout', dataset: { arcColdStartProgress: '' }, text: `5턴 분석 진행 중 · ${control.coldStartCurrentWindow || '구간 준비'} · 저장 ${Number(control.coldStartCompleted || 0)}/${Number(control.coldStartTotal || 0)}` }) : null,
-      guiEl('div', { class: 'sga-actions', style: { marginTop: '10px' } }, [
+      guiEl('details', { class: 'sga-advanced', style: { marginTop: '10px' } }, [
+        guiEl('summary', {}, [
+          guiEl('span', { text: 'Story Arc 관리' }),
+          guiEl('span', { class: 'sga-advanced-hint', text: '재생성 · 콜드스타트 · DB 관리' })
+        ]),
+        guiEl('div', { class: 'sga-advanced-body' }, [
+          guiEl('div', { class: 'sga-actions' }, [
         guiEl('button', { class: 'sga-btn primary', type: 'button', disabled: control.busy === true || runtime.arcDirectorEnabled !== true || !atBoundary, text: control.busy ? 'Story Arc 갱신 중…' : '현재 5턴 경계에서 DB 재생성', onClick: async () => {
           try {
             await rebuildArcDirectorFromGui('manual_five_turn_boundary_rebuild');
@@ -38399,6 +39696,8 @@ const buildNarrativeArchiveViewerPage = () => {
           try { await clearCurrentStoryArcFromGui(); await renderSettingsGui(); guiSetStatus('현재 채팅의 Story Arc DB를 삭제했습니다.'); }
           catch (error) { guiSetStatus(`Story Arc DB 삭제 실패: ${error?.message || error}`, true, true); }
         } })
+          ])
+        ])
       ])
     ].filter(Boolean));
 
@@ -38406,11 +39705,11 @@ const buildNarrativeArchiveViewerPage = () => {
       guiEl('div', { class: 'sga-agent-head' }, [
         guiEl('div', {}, [
           guiEl('h3', { text: '현재 Story Arc DB' }),
-          guiEl('div', { class: 'sga-note', text: arc ? `정본 U+A T${arc.basis?.throughTurn || 0}까지 분석 · 다음 계획 T${arc.basis?.nextWindowStart || '?'}-T${arc.basis?.nextWindowEnd || '?'} · revision ${arc.revision}` : stale ? '저장 DB는 있지만 정본 변경 때문에 다음 5턴 경계까지 참조를 중지합니다.' : '아직 사용 가능한 Story Arc DB가 없습니다.' })
+          guiEl('div', { class: 'sga-note', text: arc ? `정본 U+A T${arc.basis?.throughTurn || 0}까지 분석 · 다음 계획 T${arc.basis?.nextWindowStart || '?'}-T${arc.basis?.nextWindowEnd || '?'} · 변경 #${arc.revision}` : stale ? '저장 DB는 있지만 정본 변경 때문에 다음 5턴 경계까지 참조를 중지합니다.' : '아직 사용 가능한 Story Arc DB가 없습니다.' })
         ]),
         guiEl('div', { class: 'sga-actions' }, [
           control.busy || control.coldStartRunning ? guiEl('span', { class: 'sga-badge warn', text: control.coldStartRunning ? '콜드스타트 중' : '관리 작업 중' }) : null,
-          stale ? guiEl('span', { class: 'sga-badge warn', text: 'STALE' }) : guiEl('span', { class: `sga-badge ${arc ? 'good' : 'off'}`, text: arc ? '사용 가능' : '대기' })
+          stale ? guiEl('span', { class: 'sga-badge warn', text: '재분석 대기' }) : guiEl('span', { class: `sga-badge ${arc ? 'good' : 'off'}`, text: arc ? '사용 가능' : '대기' })
         ])
       ]),
       arc ? guiEl('div', { class: 'sga-summary-table' }, [
@@ -38430,7 +39729,7 @@ const buildNarrativeArchiveViewerPage = () => {
           guiEl('h3', { text: 'Arc Destination · 서사 목적지' }),
           guiEl('div', { class: 'sga-note', text: '고정 플롯이 아니라 매 5턴 경로를 다시 계산할 때 사용하는 목적지입니다. 잠그면 Arc Director가 임의로 바꾸지 않습니다.' })
         ]),
-        guiEl('span', { class: `sga-badge ${arc.destination?.locked ? 'good' : ''}`, text: arc.destination?.locked ? 'USER LOCKED' : (arc.destination?.source || 'INFERRED').toUpperCase() })
+        guiEl('span', { class: `sga-badge ${arc.destination?.locked ? 'good' : ''}`, text: arc.destination?.locked ? '사용자 고정' : 'AI 추론' })
       ]),
       guiEl('div', { class: 'sga-field' }, [
         guiEl('label', { text: '목적지' }),
@@ -38794,10 +40093,25 @@ const buildNarrativeArchiveViewerPage = () => {
       guiEl('div', { class: 'sga-code', text: history.slice(0, ARC_DIRECTOR_HISTORY_MAX).map(item => `r${item.revision} · T${item.throughTurn} · ${item.status || 'UPDATE'}\n${item.summary || ''}`).join('\n\n') })
     ]) : null;
 
+    const arcFold = (title, hint, content) => content ? guiEl('details', { class: 'sga-advanced', style: { marginTop: '0' } }, [
+      guiEl('summary', {}, [
+        guiEl('span', { text: title }),
+        guiEl('span', { class: 'sga-advanced-hint', text: hint || '' })
+      ]),
+      guiEl('div', { class: 'sga-advanced-body' }, [content])
+    ]) : null;
+
     return guiPageFrame('arc', currentWritingModeFromGui() === 'rp' ? '서사 연속성' : '스토리 아크', currentWritingModeFromGui() === 'rp'
       ? 'RP 모드에서는 Story Arc와 Narrative Archive가 연속성을 지키고 NPC·세계의 가능한 방향과 자율 전개를 보조합니다. 미래 비트는 유저 행동을 만들거나 강제할 수 없습니다.'
       : 'Story Arc DB는 목적지 → 현재 서사 연속성 → 다음 5턴 소프트 경로의 3층 구조로 작동합니다. 목적지와 비트는 사용자가 직접 수정할 수 있으며 실제 U+A가 항상 최우선입니다.', [
-      settingsCard, statusCard, destinationCard, macroCard, continuityLocksCard, beatsCard, ledgerCard, historyCard
+      settingsCard,
+      statusCard,
+      arcFold('서사 목적지 수정', arc?.destination?.locked ? '사용자 고정' : 'AI 추론', destinationCard),
+      arcFold('연속성 상세', '진행 중 스레드 · 열린 질문 · 관계 궤적', macroCard),
+      arcFold('Narrative Locks', `${narrativeLocks.length}개`, continuityLocksCard),
+      arcFold('다음 5턴 비트', `${beats.length}개 계획`, beatsCard),
+      arcFold('진행 기록', '실제 진행과 반영 상태', ledgerCard),
+      arcFold('변경 이력', history.length ? `${history.length}개 변경` : '기록 없음', historyCard)
     ].filter(Boolean));
   };
 
@@ -38821,34 +40135,97 @@ const buildNarrativeArchiveViewerPage = () => {
     ]);
   };
 
+  const buildReferenceSummaryPanel = () => {
+    const runtime = Gui.state.runtime || (Gui.state.runtime = {});
+    const characterCatalog = Array.isArray(Gui.characterLoreCatalog) ? Gui.characterLoreCatalog : [];
+    const characterExcluded = new Set(normalizeExcludedCharacterLoreIds(runtime.excludedCharacterLoreIds));
+    const characterUsed = characterCatalog.filter(item => !characterExcluded.has(item.key)).length;
+
+    const moduleCatalog = Array.isArray(Gui.moduleCatalog) ? Gui.moduleCatalog : [];
+    const activeModules = moduleCatalog.filter(item => item.active && item.loreCount > 0);
+    const selectedModuleIds = new Set(normalizeSelectedModuleLoreIds(runtime.selectedModuleLoreIds));
+    const moduleExcluded = new Set(normalizeExcludedModuleLoreIds(runtime.excludedModuleLoreIds));
+    const moduleIsSelected = item => selectedModuleIds.has(item.key) || (item.aliases || []).some(alias => selectedModuleIds.has(alias));
+    const selectedModules = activeModules.filter(moduleIsSelected);
+    const moduleLoreTotal = selectedModules.reduce((sum, item) => sum + (item.loreEntries || []).length, 0);
+    const moduleLoreUsed = selectedModules.reduce((sum, item) => sum + (item.loreEntries || []).filter(entry => !moduleExcluded.has(entry.key)).length, 0);
+
+    const hypaCatalog = Array.isArray(Gui.hypaCatalog) ? Gui.hypaCatalog : [];
+    const hypaExcluded = new Set(normalizeExcludedHypaRecordIds(runtime.excludedHypaRecordIds));
+    const hypaUsed = hypaCatalog.filter(item => !hypaExcluded.has(item.id)).length;
+
+    return guiEl('div', { class: 'sga-card wide' }, [
+      guiEl('div', { class: 'sga-agent-head' }, [
+        guiEl('div', {}, [
+          guiEl('h3', { text: '자료' }),
+          guiEl('div', { class: 'sga-note', text: '사용할 자료만 켜두면 됩니다. 실제로 어떤 로어가 필요한지는 GRADIA가 현재 장면에 맞춰 자동으로 결정합니다.' })
+        ]),
+        guiEl('span', { class: 'sga-badge good', text: '자동 검색' })
+      ]),
+      guiEl('div', { class: 'sga-simple-choice-grid four', style: { marginTop: '12px' } }, [
+        simpleChoiceCard({
+          active: characterUsed > 0,
+          title: '캐릭터',
+          description: characterCatalog.length ? `${characterUsed}/${characterCatalog.length} 사용` : '목록 불러오는 중 또는 없음',
+          meta: '캐릭터 로어북',
+          badge: '관리',
+          onClick: () => navigateGui('flow', '', 'character_lore_exclusions')
+        }),
+        simpleChoiceCard({
+          active: selectedModules.length > 0,
+          title: '모듈',
+          description: `${selectedModules.length}개 모듈 · ${moduleLoreUsed}/${moduleLoreTotal} 로어 사용`,
+          meta: `${activeModules.length}개 활성 모듈`,
+          badge: '관리',
+          onClick: () => navigateGui('flow', '', 'modules')
+        }),
+        simpleChoiceCard({
+          active: hypaUsed > 0,
+          title: 'HypaV3',
+          description: hypaCatalog.length ? `${hypaUsed}/${hypaCatalog.length} 사용 가능` : '현재 기록 없음 또는 불러오는 중',
+          meta: '장기 기록',
+          badge: '관리',
+          onClick: () => navigateGui('flow', '', 'hypa_v3')
+        }),
+        simpleChoiceCard({
+          active: true,
+          title: '로어 검색',
+          description: '자동',
+          meta: `단계별 일반 로어 최대 ${clampInt(runtime.loreRerankerTopK, 1, 32, DEFAULT_STAGE_LORE_RERANK_TOP_K)}개`,
+          badge: '고급',
+          onClick: () => navigateGui('flow', '#sga-flow-runtime', 'runtime')
+        })
+      ]),
+      (Gui.moduleCatalogLoading || Gui.characterLoreCatalogLoading || Gui.hypaCatalogLoading)
+        ? guiEl('div', { class: 'sga-note', style: { marginTop: '10px' }, text: '자료 목록을 불러오는 중입니다…' })
+        : null,
+      guiEl('details', { class: 'sga-advanced', style: { marginTop: '12px' } }, [
+        guiEl('summary', { text: '검색 방식 보기' }),
+        guiEl('div', { class: 'sga-advanced-body' }, [
+          guiEl('div', { class: 'sga-summary-table' }, [
+            guiEl('span', { text: '후보 찾기' }), guiEl('strong', { text: 'RisuAI 선택 + 활성화 키 + 내용 관련도' }),
+            guiEl('span', { text: '중복 정리' }), guiEl('strong', { text: '자동' }),
+            guiEl('span', { text: '강제/항상 활성' }), guiEl('strong', { text: '별도 보호' }),
+            guiEl('span', { text: '세부 한도' }), guiEl('strong', { text: '전문가 설정에서 조정' })
+          ])
+        ])
+      ])
+    ]);
+  };
+
   const buildReferenceSettingsPage = () => {
     const subview = ['selection', 'modules', 'character_lore_exclusions', 'hypa_v3'].includes(Gui.pageSubview) ? Gui.pageSubview : 'selection';
     const tabs = [
-      ['selection', '선택 방식'],
-      ['modules', '모듈 로어북'],
-      ['character_lore_exclusions', '캐릭터 로어북 제외'],
-      ['hypa_v3', 'HypaV3 제외']
+      ['selection', '요약'],
+      ['character_lore_exclusions', '캐릭터'],
+      ['modules', '모듈'],
+      ['hypa_v3', 'HypaV3']
     ];
-    const runtime = Gui.state.runtime || (Gui.state.runtime = {});
-    const selectionPanel = guiEl('div', { class: 'sga-card wide' }, [
-      guiEl('div', { class: 'sga-agent-head' }, [guiEl('div', {}, [guiEl('h3', { text: '메인 초안 로어 선택' }), guiEl('div', { class: 'sga-note', text: '로어 후보 수집은 한 번만 하고, 각 단계가 자기 담당 영역에 맞게 후보를 다시 정렬·컷합니다. 기본 상한은 단계별 Top 8입니다.' })])]),
-      guiEl('div', { class: 'sga-simple-choice-grid three' }, Object.entries(LORE_ACTIVATION_MODE_DEFS).map(([mode, def]) => simpleChoiceCard({ active: normalizeLoreActivationMode(runtime.loreActivationMode) === mode, title: def.label, description: def.description, meta: def.meta, badge: mode === DEFAULT_LORE_ACTIVATION_MODE ? '기본' : '', onClick: () => applyLoreActivationModeToGui(mode) }))),
-      fieldNode(
-        '단계별 로어 최대 개수',
-        inputNode(clampInt(runtime.loreRerankerTopK, 1, 32, DEFAULT_STAGE_LORE_RERANK_TOP_K), next => { runtime.loreRerankerTopK = clampInt(next, 1, 32, DEFAULT_STAGE_LORE_RERANK_TOP_K); markGuiDirty(); }, { type: 'number', min: 1, max: 32 }),
-        'SHADOW ACT·인물·세계관·플롯 AIDE가 각자 리랭킹 후 사용할 최대 로어 수입니다. 관련도 컷을 통과한 항목이 적으면 이 수를 억지로 채우지 않습니다. 기본값은 8입니다.'
-      ),
-      guiEl('div', { class: 'sga-stage-detail-head', style: { marginTop: '16px', marginBottom: '9px' } }, [
-        guiEl('strong', { text: '동적 Skill Router' }),
-        guiEl('button', { class: 'sga-btn ghost', type: 'button', text: 'Skill 관리 열기', onClick: () => navigateGui('flow', '', 'skills') })
-      ]),
-      guiEl('div', { class: 'sga-note', text: 'Skill Router, 단계별 적용 결과, 원문/GRADIA 컴파일본 뷰어, 사용자 Skill 추가, 수동 우선도는 새 Skill 화면에서 관리합니다.' })
-    ]);
     const body = subview === 'modules' ? buildModuleLoreSelectionPanel()
       : subview === 'character_lore_exclusions' ? buildCharacterLoreExclusionPanel()
         : subview === 'hypa_v3' ? buildHypaV3Panel()
-          : selectionPanel;
-    return guiPageFrame('references', '자료 선택과 영구 제외', '로어 선택 방식과 제외 목록을 한곳에서 관리합니다.', [
+          : buildReferenceSummaryPanel();
+    return guiPageFrame('references', '자료', 'GRADIA가 읽을 수 있는 자료를 한곳에서 관리합니다.', [
       guiEl('div', { class: 'sga-redesign-subnav' }, tabs.map(([id, label]) => guiEl('button', { class: `sga-btn${subview === id ? ' primary' : ' ghost'}`, text: label, onClick: () => navigateGui('flow', '', id === 'selection' ? 'references' : id) }))),
       body
     ]);
@@ -39257,9 +40634,15 @@ const buildNarrativeArchiveViewerPage = () => {
       await renderSettingsGui();
     }
     if (route.pageId === 'references') {
-      if (route.subview === 'modules') void refreshModuleLoreCatalog(false);
-      if (route.subview === 'character_lore_exclusions') void refreshCharacterLoreCatalog(false);
-      if (route.subview === 'hypa_v3') void refreshHypaV3Catalog(false);
+      if (!route.subview || route.subview === 'selection') {
+        void refreshModuleLoreCatalog(false);
+        void refreshCharacterLoreCatalog(false);
+        void refreshHypaV3Catalog(false);
+      } else {
+        if (route.subview === 'modules') void refreshModuleLoreCatalog(false);
+        if (route.subview === 'character_lore_exclusions') void refreshCharacterLoreCatalog(false);
+        if (route.subview === 'hypa_v3') void refreshHypaV3Catalog(false);
+      }
     }
     if (selector) setTimeout(() => {
       const target = Gui.root?.querySelector(selector) || (typeof document !== 'undefined' ? document.querySelector(selector) : null);
@@ -39288,9 +40671,7 @@ const buildNarrativeArchiveViewerPage = () => {
     Object.freeze({ value: 'flow|user_intent_ooc', section: 'user_intent_ooc', tab: 'flow', label: '창작 지침 OOC', icon: '✦' }),
     Object.freeze({ value: 'flow|embedding', section: 'embedding', tab: 'flow', label: '임베딩 연결', icon: '◎' }),
     Object.freeze({ value: 'flow|runtime', section: 'runtime', tab: 'flow', label: '전문가 설정', icon: '⚙' }),
-    Object.freeze({ value: 'flow|modules', section: 'modules', tab: 'flow', label: '모듈 로어북', icon: '▦' }),
-    Object.freeze({ value: 'flow|character_lore_exclusions', section: 'character_lore_exclusions', tab: 'flow', label: '캐릭터 로어북 제외', icon: '⊘' }),
-    Object.freeze({ value: 'flow|hypa_v3', section: 'hypa_v3', tab: 'flow', label: '하이파V3 제외', icon: '◫' }),
+    Object.freeze({ value: 'flow|references', section: 'references', tab: 'flow', label: '자료', icon: '▦' }),
     Object.freeze({ value: 'flow|internal_response_improvement', section: 'internal_response_improvement', tab: 'flow', label: '응답 옵션', icon: '✧' }),
     Object.freeze({ value: 'flow|agent_input_assist', section: 'agent_input_assist', tab: 'flow', stageId: INPUT_ASSIST_STAGE_ID, label: '인풋 관리자', icon: '◇' }),
     Object.freeze({ value: 'flow|agent_shadow_act', section: 'agent_shadow_act', tab: 'flow', stageId: 'shadow_act', label: 'SHADOW ACT', icon: '◆' }),
@@ -39362,9 +40743,7 @@ const buildNarrativeArchiveViewerPage = () => {
         item('results', '실행 결과', '▤', 'flow', '#sga-execution-results'),
         item('user_intent_ooc', '창작 지침 OOC', '✦', 'flow', '#sga-user-intent-ooc'),
         item('runtime', '전문가 설정', '⚙', 'flow', '#sga-flow-runtime'),
-        item('modules', '모듈 로어북', '▦', 'flow', ''),
-        item('character_lore_exclusions', '캐릭터 로어북 제외', '⊘', 'flow', ''),
-        item('hypa_v3', '하이파V3 제외', '◫', 'flow', ''),
+        item('references', '자료', '▦', 'flow', ''),
         item('skills', 'Skill', '✺', 'flow', ''),
         item('internal_response_improvement', '응답 옵션', '✧', 'flow', '#sga-response-options'),
         guiEl('div', { class: 'sga-side-group', text: '입력 처리' }),
@@ -40305,7 +41684,7 @@ const buildNarrativeArchiveViewerPage = () => {
       const previousCandidate = Runtime.inputAssistStaticCandidate;
       const previousHandoff = Runtime.inputAssistStaticHandoff;
       const previousLast = Runtime.lastInputAssist;
-      const settings = { inputAssistMode: 'user_focus', loreActivationMode: 'risu_key' };
+      const settings = { inputAssistMode: 'user_focus', loreActivationMode: UNIFIED_LORE_ACTIVATION_MODE };
       Runtime.lastInputAssist = { ok: true };
       Runtime.inputAssistStaticCandidate = {
         createdAt: Date.now() - Math.max(0, Number(ageMs || 0)),
@@ -40617,6 +41996,39 @@ const buildNarrativeArchiveViewerPage = () => {
     debugRetrieveLoreExcerpt(content = '', query = '', maxChars = 1800) {
       return JSON.parse(JSON.stringify(retrieveLoreExcerptWithJaccard(content, query, maxChars)));
     },
+    debugBm25fSections(content = '', query = '') {
+      const sections = loreJaccardSplitSections(content);
+      const result = loreBm25fSectionScoreDetails(query, sections);
+      return JSON.parse(JSON.stringify({
+        ...result,
+        scores: result.scores.map((score, index) => ({
+          ...score,
+          heading: sections[index]?.path?.join(' > ') || sections[index]?.heading || '',
+          chars: text(sections[index]?.body || '').length
+        }))
+      }));
+    },
+    debugBm25fLoreCorpus(activeLore = [], query = '') {
+      return JSON.parse(JSON.stringify(loreBm25fLoreCorpusScores(activeLore, query, 6200)));
+    },
+    debugSemanticLoreCandidateEligible(candidate = {}, currentQuery = '', terminalQuery = '', recentMessages = [], chatLength = 1, defaultScanDepth = DEFAULT_RECENT_TURNS) {
+      return loreSemanticCandidateEligible(candidate, currentQuery, terminalQuery, chatLength, { recentMessages, defaultScanDepth });
+    },
+    debugBuildSharedLoreCandidatePool(semanticLore = [], keyActiveLore = [], hostSelectedLore = [], currentQuery = '', terminalQuery = '', topK = DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K) {
+      const merged = mergeLoreCandidateSignals(semanticLore, keyActiveLore, hostSelectedLore);
+      const rerank = rerankLoreForStage(merged, 'shadow_act', {
+        primaryQuery: currentQuery,
+        terminalQuery,
+        topK: clampInt(topK, 1, 64, DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K),
+        candidatePoolMode: true
+      });
+      return JSON.parse(JSON.stringify({
+        engine: LORE_SHARED_CANDIDATE_POOL_VERSION,
+        universeCount: merged.length,
+        selected: rerank.selected || [],
+        rerank
+      }));
+    },
     debugRerankLoreForStage(activeLore = [], stageName = 'shadow_act', primaryQuery = '', terminalQuery = '', topK = DEFAULT_STAGE_LORE_RERANK_TOP_K) {
       return JSON.parse(JSON.stringify(rerankLoreForStage(
         activeLore,
@@ -40707,12 +42119,28 @@ const buildNarrativeArchiveViewerPage = () => {
         { maxPromotions: 6, chatLength: 1, terminalQuery }
       )));
     },
+    debugRerankLoreForStage(activeLore = [], stageName = 'shadow_act', query = '', terminalQuery = '', topK = DEFAULT_STAGE_LORE_RERANK_TOP_K) {
+      return cloneJson(rerankLoreForStage(activeLore, stageName, {
+        primaryQuery: query,
+        terminalQuery,
+        topK
+      }));
+    },
+    debugLoreIdentityConflict(lore = {}, query = '', terminalQuery = '') {
+      return cloneJson(loreRerankerIdentityConflict(lore, query, terminalQuery));
+    },
+    debugBuildRelationshipCanonLock(lorePool = [], currentInput = '', terminalScene = '', snapshot = {}) {
+      return cloneJson(buildRelationshipCanonLock(lorePool, currentInput, terminalScene, snapshot));
+    },
     debugBuildContinuityLedger(currentInput = '', previousTurnText = '', snapshot = {}) {
       return JSON.parse(JSON.stringify(buildRequestContinuityLedger(
         currentInput,
         { latestUser: currentInput, previousTurnText },
         snapshot
       )));
+    },
+    debugBuildCurrentRunHardAnchor(recent = {}, draft = '', settings = {}) {
+      return buildCurrentRunHardAnchor(recent || {}, draft || '', {}, settings || {});
     },
     debugBuildHistoricalContinuityFacts(earlierTurnsText = '', maxChars = 1800) {
       return JSON.parse(JSON.stringify(buildHistoricalContinuityFacts(
@@ -41519,6 +42947,20 @@ const buildNarrativeArchiveViewerPage = () => {
         ? null
         : { draft: { rp_text: text(previousDraft || '') } };
       return cloneJson(buildCompactMandatoryAnalysisRetryPrompts(settings, safeStage, prompts, recent || {}, previous));
+    },
+    debugBuildAidePatchPrompt(stageName = 'aide_character', draft = '', recent = {}, settings = {}, ledger = {}) {
+      const safeStage = CORE_AIDE_STAGE_IDS.includes(stageName) ? stageName : 'aide_character';
+      const safeSettings = {
+        mode: 'normal',
+        writingMode: 'novel',
+        quickProfile: 'balanced',
+        beforeCustomPrompts: {},
+        ...settings,
+        activeStageName: safeStage
+      };
+      const previous = { stage: 'shadow_act', draft: { rp_text: text(draft || 'debug draft') } };
+      const prompts = aidePatchPrompt(safeStage, recent || {}, previous, safeSettings, ledger || {}, null);
+      return { system: prompts.system, user: prompts.user, sourceHash: prompts.document?.sourceHash || '' };
     },
     debugEvaluateAidePatch(stageName = 'aide_character', draft = '', value = {}) {
       const safeStage = CORE_AIDE_STAGE_IDS.includes(stageName) ? stageName : 'aide_character';
