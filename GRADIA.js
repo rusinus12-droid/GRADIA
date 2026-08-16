@@ -1,7 +1,7 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.74
+//@display-name GRADIA v0.25.79
 //@api 3.0
-//@version 0.25.74
+//@version 0.25.79
 
 /* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
 //@allowed-ipc flashback_hayaku_bridge
@@ -46,7 +46,7 @@
 //@arg nsfw_mode string off|soft|direct|explicit — shared mature-scene guidance for SHADOW ACT and all three AIDEs
 //@arg nsfw_guidance_enabled string true|false — inject the selected NSFW guidance into stage analysis and writing prompts
 //@arg lore_activation_mode string unified — single lore retrieval engine combining RisuAI host selection, activation-key evidence, BM25F/Jaccard/entity retrieval, RRF and MMR
-//@arg lore_reranker_top_k int Maximum ordinary relevance-ranked lore entries per SHADOW/AIDE stage; force/always-active lore is protected in addition; default 8
+//@arg lore_reranker_top_k int Adaptive lore starting count per SHADOW/AIDE stage; GRADIA expands beyond it when protected evidence, uncovered anchors, flat relevance clusters, or available context require more lore; default 8
 //@arg skill_router_enabled string true|false — enable local per-stage selection of embedded AI writing skills; default true
 //@arg skill_router_top_k int Maximum full SKILL.md documents injected per stage; default 2, maximum 3
 //@arg skill_router_references string true|false — allow at most one relevant reference document under each selected skill; default true
@@ -843,6 +843,11 @@
  * v0.25.72 collapses the three lore activation modes into one unified retrieval engine. RisuAI host-selected lore, Risu-compatible activation keys, and GRADIA semantic retrieval are always collected as independent evidence signals, legacy mode values auto-migrate to unified, activation-key evidence becomes route-strength aware, and both the main draft pipeline and Input Assist share the same selection path.
  * v0.25.73 simplifies reference management without changing retrieval semantics. The three separate lore-management destinations collapse into one Materials page, every visible checkbox now means ‘use this item’, module/character/Hypa summaries show allowed counts at a glance, module lore gets a local filter, and search-engine/Top-K tuning moves out of normal setup into Expert Settings.
  * v0.25.74 keeps the existing GRADIA GUI design but improves progressive disclosure: stage cards and Input Assist hide rarely changed limits under expandable advanced sections, AI remains preset-first while generation/reasoning/Flex/request-body controls collapse behind advanced panels, output mode is editable again on the Output page, Story Arc maintenance and OOC connection/history are folded away, execution telemetry is separated from user-facing results, and Narrative Archive embedding exposes only common connection fields by default.
+ * v0.25.75 fixes the unified-lore performance regression that could stall beforeRequest on large WingLore/module databases. Permitted lore now goes through a bounded lightweight prefilter before the precision reranker; document-level Jaccard uses linear exact-token overlap instead of fuzzy O(n²) token matching; long-lore scoring uses query-guided passage windows instead of full section/chunk retrieval; deep rerankers have fail-soft deadlines; and protected/host/key evidence remains preserved while expensive section/chunk retrieval stays reserved for explicit excerpt/debug paths.
+ * v0.25.76 removes the next request-path bottlenecks without changing retrieval semantics: Continuity/Canon Lock now share one request-scoped entity index with linear alias merging and precomputed alias forms, lore prefiltering uses bounded five-window fingerprints instead of normalizing whole documents, recursive activation-key scanning caches static windows and only rechecks recursive evidence after the first pass, native-chat-copy checks consult a lightweight chat-scope cache before loading full character/chat payloads, Risu static snapshots coalesce duplicate reads through a conservative sub-second TTL cache, and buildRecentChat normalizes only the recent visible window plus the last system/meta messages.
+ * v0.25.77 removes the bounded-fingerprint and candidate-sampling shortcuts from unified lore retrieval. Every permitted lore body is token-indexed in full, unchanged entries reuse an in-memory full-text index while changed entries alone are rebuilt, all permitted lore participate in first-pass BM25F/lexical ranking, stage BM25F/Jaccard and MMR consume the same full-body index, and time-budget early exits no longer leave candidate lore unscored. Cross-request Risu static snapshot TTL reuse is also removed so lore changed immediately before a request is re-read. Context-window packing remains a separate final-delivery budget and does not change search coverage.
+ * v0.25.78 replaces fixed 48→24→8 lore cuts with an adaptive evidence frontier. Every permitted lore remains fully indexed; the shared pool and each stage expand beyond the configured starting count when exact host/key/entity evidence, uncovered query anchors, or a flat relevance cluster requires more material. Long lore is injected through query-ranked, offset-preserving passages built from the complete source rather than a leading truncation. Passage-level coverage-aware MMR, budget-aware selection, candidate/injection protection, and shared-core diagnostics prevent required lore from disappearing while keeping simple scenes compact.
+ * v0.25.79 removes SHADOW-gated shared-lore discovery without multiplying the all-lore precision cost. One complete full-index frontier is built once, then each enabled AIDE runs a cheap stage-domain rescue lane over the same inverted index so Character/World/Plot-only candidates can join the union before CBS rendering. The source snapshot now uses the OR-union of enabled stages' reference categories, while each stage filters that snapshot back to its own character/module/reference toggles before Canon Lock, reranking, and packet materialization, so SHADOW cannot suppress a category that a later AIDE explicitly enables. The common frontier uses a linear fast path and a sub-linear optional safety ceiling, while forced/always/host/key/coverage evidence may overflow it; fuzzy identity can improve rank but only exact indexed identity may create mandatory protection. No extra database/API/model call is added; diagnostics expose stage rescue contributions, per-stage reference categories, and lore discovered only outside SHADOW.
  * v0.25.60 adds explicit Story Arc cold-start maintenance shared by the Story Arc and Narrative Archive pages. “최근 완료 5턴으로 기준 생성” analyzes the latest complete canonical five-turn window even off-boundary, while the full cold start processes only missing canonical windows in chronological order, saves every successful window immediately to Narrative Archive, keeps the newest result as the active Story Arc, resumes after failure without repeating stored windows, and confirms the estimated Arc Director/document-embedding calls before execution.
  * v0.25.51 fixes copy/manual-send clipboard delivery in iframe/WebView runtimes. The copy action now runs inside the originating button click before any modal restore/hide await can consume transient user activation; it tries synchronous selection/execCommand first, then navigator.clipboard, records the method for diagnostics, and keeps the dialog open with the generated text selected when browser policy blocks automated copying.
  *
@@ -932,7 +937,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.74';
+  const PLUGIN_VERSION = '0.25.79';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -1043,8 +1048,8 @@
   const LORE_ACTIVATION_MODE_DEFS = Object.freeze({
     unified: Object.freeze({
       label: 'GRADIA 통합 로어 검색',
-      description: 'RisuAI 실제 선별, RisuAI 호환 활성화 키, BM25F·Jaccard·엔티티 검색을 동시에 증거로 수집한 뒤 RRF와 MMR로 한 번에 선별합니다.',
-      meta: 'Risu Selected + Key + BM25F/Jaccard/Entity → RRF → MMR'
+      description: 'RisuAI 실제 선별, 활성화 키, 전체 passage BM25F·Jaccard·엔티티 검색을 합친 뒤 필요한 정본 증거가 충분해질 때까지 동적으로 확장합니다.',
+      meta: 'Full Passage Index → RRF → Coverage MMR → Adaptive Evidence'
     })
   });
   const INPUT_ASSIST_LORE_ACTIVATION_MODES = Object.freeze([UNIFIED_LORE_ACTIVATION_MODE]);
@@ -1058,14 +1063,35 @@
   });
   const LORE_JACCARD_ENGINE_VERSION = 'gradia_lore_jaccard_v1';
   const LORE_BM25F_ENGINE_VERSION = 'gradia_lore_bm25f_v2';
-  const LORE_HYBRID_RETRIEVAL_ENGINE_VERSION = 'gradia_lore_hybrid_bm25f_v2_rrf_v2_mmr_v1_unified_v1';
+  const LORE_HYBRID_RETRIEVAL_ENGINE_VERSION = 'gradia_lore_hybrid_bm25f_v2_rrf_v2_mmr_v2_unified_v4_adaptive_passage';
   const LORE_RRF_ENGINE_VERSION = 'gradia_lore_rrf_v1';
-  const LORE_MMR_ENGINE_VERSION = 'gradia_lore_mmr_v1';
+  const LORE_MMR_ENGINE_VERSION = 'gradia_lore_mmr_v2_coverage';
+  const LORE_DYNAMIC_SELECTION_VERSION = 'gradia_dynamic_lore_frontier_v1';
+  const LORE_PASSAGE_INDEX_VERSION = 'gradia_lore_passage_index_v1';
   const LORE_MMR_SHARED_POOL_LAMBDA = 0.72;
   const LORE_MMR_STAGE_LAMBDA = 0.82;
   const LORE_MMR_SECTION_LAMBDA = 0.78;
   const LORE_MMR_CHUNK_LAMBDA = 0.84;
-  const LORE_SHARED_CANDIDATE_POOL_VERSION = 'gradia_lore_shared_candidate_pool_v3';
+  const LORE_SHARED_CANDIDATE_POOL_VERSION = 'gradia_lore_shared_candidate_pool_v7_multistage_union_v1';
+  const LORE_SHARED_MULTI_STAGE_DISCOVERY_VERSION = 'gradia_lore_multistage_union_v1';
+  const LORE_SHARED_PREFILTER_ENGINE_VERSION = 'gradia_lore_adaptive_full_index_frontier_v1';
+  const DEFAULT_SHARED_LORE_PREFILTER_TOP_K = 48; // adaptive starting frontier, not a hard cap
+  const LORE_DYNAMIC_SHARED_MAX = 512;
+  const LORE_DYNAMIC_STAGE_MAX = 128;
+  const LORE_DYNAMIC_SCORE_CLUSTER_MIN_RATIO = 0.48;
+  const LORE_DYNAMIC_SCORE_CLUSTER_GAP = 0.085;
+  const LORE_DYNAMIC_ANCHOR_MAX = 28;
+  const LORE_DYNAMIC_ANCHOR_DOC_RATIO = 0.18;
+  const LORE_PASSAGE_TARGET_CHARS = 1200;
+  const LORE_PASSAGE_OVERLAP_CHARS = 180;
+  const LORE_PASSAGE_SHORT_WHOLE_CHARS = 2800;
+  const LORE_PASSAGE_DEFAULT_EVIDENCE_CHARS = 2600;
+  const LORE_PASSAGE_PROTECTED_EVIDENCE_CHARS = 4200;
+  const LORE_PASSAGE_MAX_EVIDENCE_ITEMS = 12;
+  const LORE_PASSAGE_EVIDENCE_CACHE_MAX = 2048;
+  const LORE_FULL_TEXT_INDEX_VERSION = 'gradia_lore_full_text_passage_index_v2';
+  const LORE_FULL_TEXT_INDEX_CACHE_MAX = 4096;
+  const CONTINUITY_ENTITY_INDEX_VERSION = 'gradia_continuity_entity_index_v1';
   const LORE_RRF_K = 60;
   const LORE_BM25F_K1 = 1.35;
   const LORE_BM25F_SCORE_SCALE = 1.55;
@@ -1083,7 +1109,7 @@
     heading: Object.freeze({ weight: 2.2, b: 0.16, limit: 240 }),
     body: Object.freeze({ weight: 1.0, b: 0.76, limit: 900 })
   });
-  const DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K = 24;
+  const DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K = 24; // adaptive starting frontier, not a hard cap
   const SHARED_LORE_CANDIDATE_POOL_ABSOLUTE_FLOOR = 0.025;
   const SHARED_LORE_CANDIDATE_POOL_RELATIVE_FLOOR = 0.12;
   const loreRrfFuse = (entries = [], rankers = [], options = {}) => {
@@ -1164,14 +1190,21 @@
     currentInputWeight: 1,
     continuityWeight: 0.24
   });
-  const STAGE_LORE_RERANKER_VERSION = 'gradia_stage_lore_reranker_v7';
-  const DEFAULT_STAGE_LORE_RERANK_TOP_K = 8;
+  const STAGE_LORE_RERANKER_VERSION = 'gradia_stage_lore_reranker_v10_adaptive_passage';
+  const DEFAULT_STAGE_LORE_RERANK_TOP_K = 8; // adaptive starting count, not a hard cap
   const RELATIONSHIP_CANON_LOCK_VERSION = 'gradia_relationship_canon_lock_v1';
   const RELATIONSHIP_CANON_LOCK_MAX_ITEMS = 12;
   const RELATIONSHIP_CANON_LOCK_MAX_CHARS = 3200;
   const LORE_RERANK_TOP_K_REPAIR_VERSION = 1;
   const STAGE_LORE_RERANKER_CACHE_MAX = 768;
   const StageLoreRerankerFeatureCache = new Map();
+  const LoreFullTextIndexCache = new Map();
+  const LorePassageEvidenceCache = new Map();
+  let LoreFullTextLastCorpus = null;
+  let LoreFullTextUniverseCorpus = null;
+  const ContinuityEntityIndexCache = new WeakMap();
+  const RisuStaticSnapshotInFlight = new Map();
+  let CurrentChatIdentityCache = { value: '', expiresAt: 0 };
   const setStageLoreRerankerCache = (key, value) => {
     if (!key) return value;
     if (StageLoreRerankerFeatureCache.size >= STAGE_LORE_RERANKER_CACHE_MAX) {
@@ -2434,6 +2467,24 @@
     characterLorebook: asBool(value?.characterLorebook ?? value?.character_lorebook ?? value?.include_character_lorebook, fallback.characterLorebook === true),
     moduleLorebook: asBool(value?.moduleLorebook ?? value?.module_lorebook ?? value?.include_module_lorebook, fallback.moduleLorebook === true)
   });
+  const unionRisuReferences = (...values) => {
+    const out = { authorNote: false, persona: false, characterDescription: false, characterLorebook: false, moduleLorebook: false };
+    for (const value of values.flat().filter(Boolean)) {
+      const normalized = normalizeRisuReferences(value, out);
+      out.authorNote ||= normalized.authorNote === true;
+      out.persona ||= normalized.persona === true;
+      out.characterDescription ||= normalized.characterDescription === true;
+      out.characterLorebook ||= normalized.characterLorebook === true;
+      out.moduleLorebook ||= normalized.moduleLorebook === true;
+    }
+    return out;
+  };
+  const sameRisuReferences = (left = {}, right = {}) => {
+    const a = normalizeRisuReferences(left, {});
+    const b = normalizeRisuReferences(right, {});
+    return ['authorNote', 'persona', 'characterDescription', 'characterLorebook', 'moduleLorebook']
+      .every(key => a[key] === b[key]);
+  };
 
   const PROVIDERS = Object.freeze([
     'openai', 'claude', 'anthropic', 'gemini', 'google', 'google_ai',
@@ -3213,6 +3264,7 @@
     hookStatus: { input: false, beforeRequest: false, afterRequest: false, replacerPermission: 'unknown', unload: false, setting: false, button: false, inputAssistSendButton: false, retraceIpc: false }
   };
   const NativeChatCopyCheckCache = new Map();
+  const NativeChatCopyScopeCache = new Map();
   const NativeChatCopyInFlight = new Map();
 
   const log = (...args) => {
@@ -9948,7 +10000,18 @@ ${text(paired.leadingAssistant.content || '')}
   };
 
   const buildRecentChat = (messages, settings) => {
-    const normalized = normalizeMessages(messages);
+    // v0.25.76: keep old message bodies as lightweight strings while pairing the
+    // recent window, then run the expensive history sanitizer only on content that
+    // can actually reach a prompt. This preserves turn numbering without repeatedly
+    // regex-cleaning hundreds/thousands of old messages.
+    const normalized = Array.isArray(messages)
+      ? messages.map((msg, index) => ({
+          role: text(msg?.role || 'unknown').toLowerCase(),
+          content: contentToText(msg?.content),
+          name: text(msg?.name || ''),
+          index
+        }))
+      : [];
     const allowed = normalized
       .filter(m => ['system', 'user', 'assistant', 'developer'].includes(m.role))
       .filter(m => text(m.content || '').trim())
@@ -9963,13 +10026,53 @@ ${text(paired.leadingAssistant.content || '')}
       if (isLikelyMetaUserMessage(m.content) || isOthersInfoMessage(m.content)) return false;
       return true;
     });
-    const systemSliced = systemContextMessages.slice(-6);
-    const otherSliced = otherInfoMessages.slice(-8);
+    const sanitizeWindowMessage = message => message ? {
+      ...message,
+      content: sanitizeMessageContentForHistory(message.role, message.content)
+    } : null;
+    const systemSliced = systemContextMessages.slice(-6).map(sanitizeWindowMessage).filter(m => text(m?.content || '').trim());
+    const otherSliced = otherInfoMessages.slice(-8).map(sanitizeWindowMessage).filter(m => text(m?.content || '').trim());
     const currentTurnResolution = settings?.currentTurnResolution?.text
       ? settings.currentTurnResolution
       : resolveSgaCurrentTurn(messages);
     const latestUser = text(currentTurnResolution.text || '');
-    const turnWindow = buildCompleteRecentTurnWindow(visibleChatMessages, settings.turnWindow, latestUser);
+    const rawTurnWindow = buildCompleteRecentTurnWindow(visibleChatMessages, settings.turnWindow, latestUser);
+    const sanitizedSelectedTurns = (rawTurnWindow.selectedTurns || []).map(turn => ({
+      user: sanitizeWindowMessage(turn.user),
+      assistant: sanitizeWindowMessage(turn.assistant)
+    })).filter(turn => text(turn.user?.content || '').trim() || text(turn.assistant?.content || '').trim());
+    const sanitizedLeadingAssistant = sanitizeWindowMessage(rawTurnWindow.leadingAssistant);
+    const sanitizedCurrentUser = sanitizeWindowMessage(rawTurnWindow.currentUser);
+    const startNumber = Math.max(1, (rawTurnWindow.turns || []).length - sanitizedSelectedTurns.length + 1);
+    const previousTurn = sanitizedSelectedTurns[sanitizedSelectedTurns.length - 1] || null;
+    const includePrelude = !!sanitizedLeadingAssistant?.content && sanitizedSelectedTurns.length === (rawTurnWindow.turns || []).length;
+    const preludeText = includePrelude ? `<INITIAL_ASSISTANT_SCENE>\n${text(sanitizedLeadingAssistant.content || '')}\n</INITIAL_ASSISTANT_SCENE>` : '';
+    const turnsText = formatCompleteTurnWindow(sanitizedSelectedTurns, startNumber);
+    const completeTurnsText = [preludeText, turnsText].filter(Boolean).join('\n\n');
+    const previousTurnText = previousTurn
+      ? formatCompleteTurnWindow([previousTurn], Math.max(1, (rawTurnWindow.turns || []).length))
+      : preludeText;
+    const earlierTurns = previousTurn ? sanitizedSelectedTurns.slice(0, -1) : [];
+    const earlierTurnsText = previousTurn
+      ? [preludeText, formatCompleteTurnWindow(earlierTurns, startNumber)].filter(Boolean).join('\n\n')
+      : '';
+    const selectedMessages = sanitizedSelectedTurns.flatMap(turn => [turn.user, turn.assistant]).filter(Boolean);
+    if (includePrelude) selectedMessages.unshift(sanitizedLeadingAssistant);
+    if (sanitizedCurrentUser?.content) selectedMessages.push(sanitizedCurrentUser);
+    const turnWindow = {
+      ...rawTurnWindow,
+      leadingAssistant: sanitizedLeadingAssistant,
+      currentUser: sanitizedCurrentUser,
+      selectedTurns: sanitizedSelectedTurns,
+      selectedMessages,
+      completeTurnsText,
+      earlierTurnsText,
+      previousTurn,
+      previousTurnText,
+      previousTurnUser: text(previousTurn?.user?.content || ''),
+      previousTurnAssistant: text(previousTurn?.assistant?.content || sanitizedLeadingAssistant?.content || ''),
+      recentTurnCount: sanitizedSelectedTurns.length
+    };
     const latestAssistantRaw = turnWindow.previousTurnAssistant || '';
     const latestAssistant = deriveNarrativeContinuityCopy(latestAssistantRaw);
     const terminalVisibleScene = extractInputAssistTerminalTail(
@@ -10064,7 +10167,13 @@ ${text(paired.leadingAssistant.content || '')}
     return /[A-Za-z가-힣]/.test(valueText);
   };
 
-  const buildContinuityEntityCatalog = (snapshot) => {
+  const buildContinuityEntityIndex = (snapshot = {}) => {
+    const cacheable = !!snapshot && typeof snapshot === 'object';
+    if (cacheable) {
+      const cached = ContinuityEntityIndexCache.get(snapshot);
+      if (cached?.version === CONTINUITY_ENTITY_INDEX_VERSION) return cached;
+    }
+    const startedAt = Date.now();
     const catalog = new Map();
     const add = (canonicalValue, aliases = []) => {
       const canonical = cleanContinuityEntity(canonicalValue);
@@ -10087,9 +10196,7 @@ ${text(paired.leadingAssistant.content || '')}
         latinNameParts.length >= 2
         && latinNameParts.length <= 4
         && !/(?:division|entertainment|company|agency|group|team|organization|profile|overview|order)/i.test(canonical)
-      ) {
-        entry.aliases.add(latinNameParts[latinNameParts.length - 1]);
-      }
+      ) entry.aliases.add(latinNameParts[latinNameParts.length - 1]);
       const koreanNames = canonical.match(/[가-힣]{2,8}/g) || [];
       koreanNames.forEach((alias) => {
         if (continuityEntityUsable(alias)) entry.aliases.add(alias);
@@ -10152,10 +10259,6 @@ ${text(paired.leadingAssistant.content || '')}
           )
         ) add(primary, candidateAliases);
       }
-      // Character cards often expose an English `Name:` inside a lore entry while the
-      // RisuAI lore label itself is localized (for example Cecilia <-> 세실리아).
-      // Keep the label/key aliases attached to that explicit profile name so the
-      // request continuity ledger can recognize either spelling in the live input.
       const explicitProfileName = content.match(/^\s*(?:Name|이름)\s*[:：]\s*([^\n,;|]{2,80})/im);
       if (explicitProfileName) add(explicitProfileName[1], candidateAliases);
       const stageNameMatches = content.matchAll(/^\s*(?:Stage\s*Name|활동명|이름|Name)\s*[:：]\s*([^\n,;|]{2,80})/gim);
@@ -10166,69 +10269,76 @@ ${text(paired.leadingAssistant.content || '')}
       for (const match of memberMatches) add(match[1]);
     });
 
+    // v0.25.76: merge alias-equivalent entries in linear time. The previous
+    // merged.find(...aliasKeys...) path became O(E²) on large WingLore databases.
     const merged = [];
-    Array.from(catalog.values()).forEach((entry) => {
+    const aliasOwner = new Map();
+    for (const entry of catalog.values()) {
       const aliases = uniqueContinuityStrings([entry.canonical, ...entry.aliases]);
-      const aliasKeys = new Set(aliases.map(normalizeContinuityAlias).filter((key) => key.length >= 3));
-      const existing = merged.find((item) => Array.from(item.aliasKeys).some((key) => aliasKeys.has(key)));
-      if (existing) {
-        aliases.forEach((alias) => existing.aliases.add(alias));
-        aliasKeys.forEach((key) => existing.aliasKeys.add(key));
-      } else {
-        merged.push({
-          canonical: entry.canonical,
-          aliases: new Set(aliases),
-          aliasKeys
-        });
+      const aliasKeys = aliases.map(normalizeContinuityAlias).filter((key) => key.length >= 3);
+      let ownerIndex = -1;
+      for (const key of aliasKeys) {
+        if (aliasOwner.has(key)) { ownerIndex = aliasOwner.get(key); break; }
       }
+      if (ownerIndex < 0) {
+        ownerIndex = merged.length;
+        merged.push({ canonical: entry.canonical, aliases: new Set(aliases) });
+      } else {
+        aliases.forEach((alias) => merged[ownerIndex].aliases.add(alias));
+      }
+      aliasKeys.forEach((key) => aliasOwner.set(key, ownerIndex));
+    }
+
+    const romanizationVariants = (value) => uniqueContinuityStrings([
+      value,
+      value?.startsWith('r') ? `l${value.slice(1)}` : '',
+      value?.startsWith('l') ? `r${value.slice(1)}` : '',
+      value ? value.replace(/r/g, 'l') : '',
+      value ? value.replace(/l/g, 'r') : ''
+    ]).filter((item) => item.length >= 3);
+    const entries = merged.map((entry) => {
+      const aliases = uniqueContinuityStrings([entry.canonical, ...entry.aliases]);
+      const aliasForms = [];
+      for (const alias of aliases) {
+        const latinNameParts = alias.match(/\b[A-Z][a-z'’-]{2,}\b/g) || [];
+        const candidatesForAlias = uniqueContinuityStrings([
+          alias,
+          latinNameParts.length >= 2 && !/(?:division|entertainment|company|agency|group|team|organization|profile|overview|order)/i.test(alias)
+            ? latinNameParts[latinNameParts.length - 1]
+            : ''
+        ]);
+        for (const candidate of candidatesForAlias) {
+          const lower = candidate.toLocaleLowerCase();
+          const normalized = normalizeContinuityAlias(candidate);
+          let romanized = '';
+          try { romanized = loreJaccardRomanizeHangul(candidate); } catch (_) {}
+          aliasForms.push({
+            raw: candidate,
+            lower,
+            normalized,
+            romanized: romanizationVariants(romanized)
+          });
+        }
+      }
+      return { canonical: entry.canonical, aliases, aliasForms };
     });
-    return merged.map((entry) => ({
-      canonical: entry.canonical,
-      aliases: Array.from(entry.aliases)
-    }));
+    const byCanonical = new Map(entries.map((entry) => [entry.canonical, entry]));
+    const index = {
+      version: CONTINUITY_ENTITY_INDEX_VERSION,
+      entries,
+      byCanonical,
+      candidateCount: candidates.length,
+      entityCount: entries.length,
+      buildMs: Math.max(0, Date.now() - startedAt)
+    };
+    if (cacheable) ContinuityEntityIndexCache.set(snapshot, index);
+    return index;
   };
 
-  const continuityTextContainsAlias = (textValue, aliasValue) => {
-    const valueText = String(textValue || '');
-    const alias = String(aliasValue || '').trim();
-    if (!valueText || !alias) return false;
-    const normalizedText = normalizeContinuityAlias(valueText);
-    const latinNameParts = alias.match(/\b[A-Z][a-z'’-]{2,}\b/g) || [];
-    const aliasCandidates = uniqueContinuityStrings([
-      alias,
-      latinNameParts.length >= 2 && !/(?:division|entertainment|company|agency|group|team|organization|profile|overview|order)/i.test(alias)
-        ? latinNameParts[latinNameParts.length - 1]
-        : ''
-    ]);
-    try {
-      const romanizedText = loreJaccardRomanizeHangul(valueText);
-      const variants = (value) => uniqueContinuityStrings([
-        value,
-        value.startsWith('r') ? `l${value.slice(1)}` : '',
-        value.startsWith('l') ? `r${value.slice(1)}` : '',
-        value.replace(/r/g, 'l'),
-        value.replace(/l/g, 'r')
-      ]);
-      const textVariants = variants(romanizedText);
-      return aliasCandidates.some((candidate) => {
-        if (valueText.toLowerCase().includes(candidate.toLowerCase())) return true;
-        const normalizedAlias = normalizeContinuityAlias(candidate);
-        if (normalizedAlias.length >= 2 && normalizedText.includes(normalizedAlias)) return true;
-        const romanizedAlias = loreJaccardRomanizeHangul(candidate);
-        if (romanizedAlias.length < 3) return false;
-        const aliasVariants = variants(romanizedAlias);
-        return textVariants.some((textVariant) => aliasVariants.some((aliasVariant) => (
-          aliasVariant.length >= 3 && textVariant.includes(aliasVariant)
-        )));
-      });
-    } catch (_) {
-      return aliasCandidates.some((candidate) => {
-        if (valueText.toLowerCase().includes(candidate.toLowerCase())) return true;
-        const normalizedAlias = normalizeContinuityAlias(candidate);
-        return normalizedAlias.length >= 2 && normalizedText.includes(normalizedAlias);
-      });
-    }
-  };
+  const buildContinuityEntityCatalog = (snapshot) => buildContinuityEntityIndex(snapshot).entries.map((entry) => ({
+    canonical: entry.canonical,
+    aliases: entry.aliases.slice()
+  }));
 
   const sanitizeContinuityParticipantText = (value) => String(value || '')
     .replace(/```[\s\S]*?```/g, ' ')
@@ -10240,14 +10350,107 @@ ${text(paired.leadingAssistant.content || '')}
     .replace(/\s+/g, ' ')
     .trim();
 
-  const continuityEntitiesInText = (textValue, catalog) => {
-    const narrativeText = sanitizeContinuityParticipantText(textValue);
-    const found = [];
-    (Array.isArray(catalog) ? catalog : []).forEach((entry) => {
-      const aliases = [entry.canonical, ...(entry.aliases || [])];
-      if (aliases.some((alias) => continuityTextContainsAlias(narrativeText, alias))) found.push(entry.canonical);
+  const continuityPreparedText = (value) => {
+    const raw = sanitizeContinuityParticipantText(value);
+    const normalized = normalizeContinuityAlias(raw);
+    let romanized = '';
+    try { romanized = loreJaccardRomanizeHangul(raw); } catch (_) {}
+    const romanizedVariants = uniqueContinuityStrings([
+      romanized,
+      romanized?.startsWith('r') ? `l${romanized.slice(1)}` : '',
+      romanized?.startsWith('l') ? `r${romanized.slice(1)}` : '',
+      romanized ? romanized.replace(/r/g, 'l') : '',
+      romanized ? romanized.replace(/l/g, 'r') : ''
+    ]);
+    return { raw, lower: raw.toLocaleLowerCase(), normalized, romanizedVariants };
+  };
+
+  const continuityAliasFormMatches = (prepared, form) => {
+    if (!prepared?.raw || !form) return false;
+    if (form.lower && prepared.lower.includes(form.lower)) return true;
+    if (form.normalized?.length >= 2 && prepared.normalized.includes(form.normalized)) return true;
+    if (Array.isArray(form.romanized) && form.romanized.length) {
+      return prepared.romanizedVariants.some((textVariant) => form.romanized.some((aliasVariant) => (
+        aliasVariant.length >= 3 && textVariant.includes(aliasVariant)
+      )));
+    }
+    return false;
+  };
+
+  const continuityTextContainsAlias = (textValue, aliasValue) => {
+    const alias = String(aliasValue || '').trim();
+    if (!alias) return false;
+    const prepared = continuityPreparedText(textValue);
+    const latinNameParts = alias.match(/\b[A-Z][a-z'’-]{2,}\b/g) || [];
+    const aliasCandidates = uniqueContinuityStrings([
+      alias,
+      latinNameParts.length >= 2 && !/(?:division|entertainment|company|agency|group|team|organization|profile|overview|order)/i.test(alias)
+        ? latinNameParts[latinNameParts.length - 1]
+        : ''
+    ]);
+    return aliasCandidates.some((candidate) => {
+      let romanized = '';
+      try { romanized = loreJaccardRomanizeHangul(candidate); } catch (_) {}
+      const form = {
+        lower: candidate.toLocaleLowerCase(),
+        normalized: normalizeContinuityAlias(candidate),
+        romanized: uniqueContinuityStrings([
+          romanized,
+          romanized?.startsWith('r') ? `l${romanized.slice(1)}` : '',
+          romanized?.startsWith('l') ? `r${romanized.slice(1)}` : '',
+          romanized ? romanized.replace(/r/g, 'l') : '',
+          romanized ? romanized.replace(/l/g, 'r') : ''
+        ])
+      };
+      return continuityAliasFormMatches(prepared, form);
     });
+  };
+
+  const continuityEntityIndexFromCatalog = (catalog) => {
+    if (catalog?.version === CONTINUITY_ENTITY_INDEX_VERSION && Array.isArray(catalog.entries)) return catalog;
+    const entries = (Array.isArray(catalog) ? catalog : []).map((entry) => {
+      const aliases = uniqueContinuityStrings([entry?.canonical, ...(entry?.aliases || [])]);
+      return {
+        canonical: entry?.canonical || '',
+        aliases,
+        aliasForms: aliases.map((alias) => {
+          let romanized = '';
+          try { romanized = loreJaccardRomanizeHangul(alias); } catch (_) {}
+          return {
+            raw: alias,
+            lower: alias.toLocaleLowerCase(),
+            normalized: normalizeContinuityAlias(alias),
+            romanized: uniqueContinuityStrings([romanized, romanized.replace(/r/g, 'l'), romanized.replace(/l/g, 'r')]).filter((item) => item.length >= 3)
+          };
+        })
+      };
+    }).filter((entry) => entry.canonical);
+    return { version: CONTINUITY_ENTITY_INDEX_VERSION, entries, byCanonical: new Map(entries.map((entry) => [entry.canonical, entry])) };
+  };
+
+  const continuityEntitiesInText = (textValue, catalogOrIndex) => {
+    const index = continuityEntityIndexFromCatalog(catalogOrIndex);
+    const prepared = continuityPreparedText(textValue);
+    if (!prepared.raw) return [];
+    const found = [];
+    for (const entry of index.entries || []) {
+      if ((entry.aliasForms || []).some((form) => continuityAliasFormMatches(prepared, form))) found.push(entry.canonical);
+      if (found.length >= 24) break;
+    }
     return uniqueContinuityStrings(found).slice(0, 24);
+  };
+
+  const continuityTextMentionsAny = (textValue, catalogOrIndex, canonicalSet) => {
+    const index = continuityEntityIndexFromCatalog(catalogOrIndex);
+    const wanted = canonicalSet instanceof Set ? canonicalSet : new Set(Array.isArray(canonicalSet) ? canonicalSet : []);
+    if (!wanted.size) return false;
+    const prepared = continuityPreparedText(textValue);
+    if (!prepared.raw) return false;
+    for (const canonical of wanted) {
+      const entry = index.byCanonical?.get(canonical);
+      if (entry && (entry.aliasForms || []).some((form) => continuityAliasFormMatches(prepared, form))) return true;
+    }
+    return false;
   };
 
   const AUTHORITATIVE_COMMITMENT_GUARD_VERSION = 'gradia_authoritative_commitment_guard_v1';
@@ -10378,7 +10581,7 @@ ${text(paired.leadingAssistant.content || '')}
   const inputAssistTerminalLockRequired = (previousTurnText, boundary) =>
     !!String(previousTurnText || '').trim() && boundary?.active !== true;
 
-  const buildRequestContinuityLedger = (currentInputValue, recent, snapshot) => {
+  const buildRequestContinuityLedger = (currentInputValue, recent, snapshot, entityIndex = null) => {
     const currentInput = String(currentInputValue || recent?.latestUser || '').trim();
     const previousTurn = String(
       recent?.terminalVisibleScene
@@ -10387,7 +10590,7 @@ ${text(paired.leadingAssistant.content || '')}
       || recent?.previousTurnText
       || ''
     ).trim();
-    const catalog = buildContinuityEntityCatalog(snapshot);
+    const catalog = entityIndex || buildContinuityEntityIndex(snapshot);
     const currentCast = continuityEntitiesInText(currentInput, catalog);
     const previousCast = continuityEntitiesInText(previousTurn, catalog);
     const carriedCast = currentCast.filter((name) => previousCast.includes(name));
@@ -10721,13 +10924,19 @@ ${text(paired.leadingAssistant.content || '')}
     return out;
   };
 
-  const loadCurrentChatIdentity = async (debugLog = false) => {
+  const loadCurrentChatIdentity = async (debugLog = false, options = {}) => {
+    const now = Date.now();
+    if (options.force !== true && CurrentChatIdentityCache.value && CurrentChatIdentityCache.expiresAt > now) return CurrentChatIdentityCache.value;
     const liveApi = getLiveApi(['getCurrentCharacterIndex', 'getCurrentChatIndex']);
     if (typeof liveApi?.getCurrentCharacterIndex !== 'function' || typeof liveApi?.getCurrentChatIndex !== 'function') return '';
-    const charIndex = await safeApi('getCurrentCharacterIndex', () => liveApi.getCurrentCharacterIndex(), debugLog);
-    const chatIndex = await safeApi('getCurrentChatIndex', () => liveApi.getCurrentChatIndex(), debugLog);
+    const [charIndex, chatIndex] = await Promise.all([
+      safeApi('getCurrentCharacterIndex', () => liveApi.getCurrentCharacterIndex(), debugLog),
+      safeApi('getCurrentChatIndex', () => liveApi.getCurrentChatIndex(), debugLog)
+    ]);
     if (!Number.isFinite(Number(charIndex)) || !Number.isFinite(Number(chatIndex))) return '';
-    return `${parseInt(charIndex, 10)}:${parseInt(chatIndex, 10)}`;
+    const value = `${parseInt(charIndex, 10)}:${parseInt(chatIndex, 10)}`;
+    CurrentChatIdentityCache = { value, expiresAt: Date.now() + 250 };
+    return value;
   };
 
   const personaLooksUsable = (persona) => !!persona && typeof persona === 'object' && !!firstFilled(
@@ -12526,10 +12735,6 @@ function mergeAgentCbsWarnings(...warningLists) {
     const currentInputSearchMessages = currentInput
       ? [loreSearchableMessage({ source: 'current user input', role: 'user', prompt: `\x01{{user}}:${currentInput}\x01`, data: currentInput })]
       : [];
-    // RisuAI scans the configured depth of recent chat messages regardless of
-    // whether a lore entry happened to be active on the previous request.
-    // Keep the separately supplied current input at the front and remove its
-    // duplicate from stored chat before applying each entry's scan depth.
     const recentBaseSearchMessages = baseMessages
       .filter(message => {
         const role = text(message?.role || '').toLowerCase();
@@ -12545,6 +12750,23 @@ function mergeAgentCbsWarnings(...warningLists) {
     const defaultScanDepth = clampInt(settings?.loreBookDepth || settings?.turnWindow || DEFAULT_RECENT_TURNS, 1, 128, DEFAULT_RECENT_TURNS);
     const defaultFullWordMatching = settings?.loreFullWordMatching === true;
     const defaultRecursiveScanning = settings?.loreRecursiveScanning !== false;
+    const windowCache = new Map();
+    const staticRouteCache = new Map();
+
+    const windowsForDepth = scanDepth => {
+      if (windowCache.has(scanDepth)) return windowCache.get(scanDepth);
+      const recentContextWindow = recentBaseSearchMessages.slice(-scanDepth);
+      const terminalAssistantIndex = recentContextWindow.map(message => message.role).lastIndexOf('assistant');
+      const result = {
+        terminal: terminalAssistantIndex >= 0 ? [recentContextWindow[terminalAssistantIndex]] : [],
+        recent: terminalAssistantIndex >= 0
+          ? recentContextWindow.filter((_, index) => index !== terminalAssistantIndex)
+          : recentContextWindow
+      };
+      windowCache.set(scanDepth, result);
+      return result;
+    };
+
     let matching = true;
     let guard = 0;
     while (matching && guard < 12) {
@@ -12557,22 +12779,9 @@ function mergeAgentCbsWarnings(...warningLists) {
         if (candidate.activationEvery && chatLength % candidate.activationEvery !== 0) continue;
         if (candidate.forceState === 'deactivate') continue;
         const scanDepth = clampInt(candidate.scanDepth || defaultScanDepth, 1, 128, defaultScanDepth);
-        const recentContextWindow = recentBaseSearchMessages.slice(-scanDepth);
-        const terminalAssistantIndex = recentContextWindow
-          .map(message => message.role)
-          .lastIndexOf('assistant');
-        const terminalSceneSearchMessages = terminalAssistantIndex >= 0
-          ? [recentContextWindow[terminalAssistantIndex]]
-          : [];
-        const recentContextSearchMessages = terminalAssistantIndex >= 0
-          ? recentContextWindow.filter((_, index) => index !== terminalAssistantIndex)
-          : recentContextWindow;
+        const windows = windowsForDepth(scanDepth);
         const recursiveForCandidate = candidate.dontSearchWhenRecursive ? [] : recursiveSearchMessages;
         const continuityEligible = previousActiveIds.has(loreContinuityIdentity(candidate));
-        const supportMessages = currentInputSearchMessages
-          .concat(terminalSceneSearchMessages)
-          .concat(recentContextSearchMessages)
-          .concat(recursiveForCandidate);
         const fullWordMatching = candidate.fullWordMatching == null ? defaultFullWordMatching : candidate.fullWordMatching;
         const matchKeys = (keys, messages, all = false) => loreKeyMatchesSearchMessages(keys, messages, {
           useRegex: candidate.useRegex,
@@ -12591,36 +12800,46 @@ function mergeAgentCbsWarnings(...warningLists) {
         if (!isActive) {
           const primaryKeys = candidate.keys || [];
           if (!primaryKeys.length) continue;
-          const currentMatched = matchKeys(primaryKeys, currentInputSearchMessages);
-          const terminalMatched = terminalSceneSearchMessages.length
-            ? matchKeys(primaryKeys, terminalSceneSearchMessages)
-            : false;
-          const recentContextMatched = recentContextSearchMessages.length
-            ? matchKeys(primaryKeys, recentContextSearchMessages)
-            : false;
-          const recursiveMatched = recursiveForCandidate.length ? matchKeys(primaryKeys, recursiveForCandidate) : false;
-          isActive = currentMatched || terminalMatched || recentContextMatched || recursiveMatched;
-          activationRoute = currentMatched
-            ? 'current_input'
-            : terminalMatched
-              ? 'terminal_scene'
-              : recentContextMatched
-                ? 'recent_context'
-                : recursiveMatched
-                  ? 'recursive'
+          let staticRoute = staticRouteCache.get(i);
+          if (staticRoute === undefined) {
+            const currentMatched = matchKeys(primaryKeys, currentInputSearchMessages);
+            const terminalMatched = !currentMatched && windows.terminal.length
+              ? matchKeys(primaryKeys, windows.terminal)
+              : false;
+            const recentContextMatched = !currentMatched && !terminalMatched && windows.recent.length
+              ? matchKeys(primaryKeys, windows.recent)
+              : false;
+            staticRoute = currentMatched
+              ? 'current_input'
+              : terminalMatched
+                ? 'terminal_scene'
+                : recentContextMatched
+                  ? 'recent_context'
                   : '';
+            staticRouteCache.set(i, staticRoute);
+          }
+          const recursiveMatched = !staticRoute && recursiveForCandidate.length
+            ? matchKeys(primaryKeys, recursiveForCandidate)
+            : false;
+          isActive = !!staticRoute || recursiveMatched;
+          activationRoute = staticRoute || (recursiveMatched ? 'recursive' : '');
+          if (!isActive) continue;
 
-          if (isActive && candidate.keys?.length && candidate.secondaryKeys?.length && candidate.selective) {
-            isActive = matchKeys(candidate.secondaryKeys, supportMessages);
-          }
-          if (isActive && candidate.additionalKeys?.length) {
-            isActive = matchKeys(candidate.additionalKeys, supportMessages);
-          }
-          if (isActive && candidate.excludeKeys?.length && matchKeys(candidate.excludeKeys, supportMessages)) {
-            isActive = false;
-          }
-          if (isActive && candidate.excludeKeysAll?.length && matchKeys(candidate.excludeKeysAll, supportMessages, true)) {
-            isActive = false;
+          const hasConditionalKeys = !!(
+            (candidate.selective && candidate.secondaryKeys?.length)
+            || candidate.additionalKeys?.length
+            || candidate.excludeKeys?.length
+            || candidate.excludeKeysAll?.length
+          );
+          if (hasConditionalKeys) {
+            const supportMessages = currentInputSearchMessages
+              .concat(windows.terminal)
+              .concat(windows.recent)
+              .concat(recursiveForCandidate);
+            if (candidate.selective && candidate.keys?.length && candidate.secondaryKeys?.length && !matchKeys(candidate.secondaryKeys, supportMessages)) isActive = false;
+            if (isActive && candidate.additionalKeys?.length && !matchKeys(candidate.additionalKeys, supportMessages)) isActive = false;
+            if (isActive && candidate.excludeKeys?.length && matchKeys(candidate.excludeKeys, supportMessages)) isActive = false;
+            if (isActive && candidate.excludeKeysAll?.length && matchKeys(candidate.excludeKeysAll, supportMessages, true)) isActive = false;
           }
         }
         if (!isActive) continue;
@@ -12636,9 +12855,10 @@ function mergeAgentCbsWarnings(...warningLists) {
           activationEvidence: {
             route: activationRoute || 'unknown',
             scanDepth,
-            searchedTerminalScene: terminalSceneSearchMessages.length,
-            searchedRecentMessages: recentContextSearchMessages.length,
-            previousTurnActive: continuityEligible
+            searchedTerminalScene: windows.terminal.length,
+            searchedRecentMessages: windows.recent.length,
+            previousTurnActive: continuityEligible,
+            recursivePass: guard
           }
         };
         active.push(matchable);
@@ -13012,37 +13232,58 @@ function mergeAgentCbsWarnings(...warningLists) {
     shadowRisuContextMaxChars: Number(settings.shadowRisuContextMaxChars || 0)
   }));
 
-  const loadRisuStaticContextSnapshot = async (settings) => {
-    const characterInfo = await loadCurrentCharacterForRisuContext(settings.debugLog);
-    const character = characterInfo.character;
-    // plugins.md is authoritative: request only documented database keys.
-    // globalChatVariables is intentionally not exposed to plugins. Conditional
-    // lore therefore uses host-formatted request evidence instead of treating
-    // an unavailable global toggle as false.
-    const baseDb = typeof API.getDatabase === 'function'
-      ? await safeApi('getDatabase', () => API.getDatabase(['personas', 'selectedPersona', 'modules', 'enabledModules', 'moduleIntergration']), settings.debugLog)
-      : null;
-    const db = { ...(baseDb || {}) };
-    const chatInfo = await loadCurrentChatForRisuContext(character, settings.debugLog);
-    const persona = selectedPersonaFromDb(db, chatInfo.chat);
-    const candidates = collectRisuLorebookCandidates(character, db, chatInfo.chat, persona, {
-      selectedModuleLoreIds: settings.selectedModuleLoreIds,
-      excludedModuleLoreIds: settings.excludedModuleLoreIds,
-      excludedCharacterLoreIds: settings.excludedCharacterLoreIds
-    });
-    return {
-      routeVersion: RAG_ROUTE_VERSION,
-      route: 'plugins.md:getCharacter+getDatabase+getCurrentCharacterIndex+getCurrentChatIndex+getChatFromIndex',
-      characterInfo,
-      character,
-      db,
-      chatInfo,
-      persona,
-      candidates,
-      rawLoreSettings: character?.loreSettings || character?.lore_settings || {},
-      staticSettingsHash: risuStaticSettingsHash(settings),
-      loadedAt: Date.now()
-    };
+  const loadRisuStaticContextSnapshot = async (settings, options = {}) => {
+    const staticSettingsHash = risuStaticSettingsHash(settings);
+    const scopeIdentity = text(options.scopeIdentity || await loadCurrentChatIdentity(settings.debugLog)).trim();
+    const cacheKey = scopeIdentity ? `${scopeIdentity}|${staticSettingsHash}` : '';
+    // Do not reuse a previous request's lore/database snapshot by TTL. WingLore or
+    // another plugin may have changed lore immediately before this request. Only coalesce
+    // truly concurrent reads; explicit Input Assist handoff passes its exact snapshot directly.
+    if (cacheKey && options.force !== true && RisuStaticSnapshotInFlight.has(cacheKey)) {
+      return await RisuStaticSnapshotInFlight.get(cacheKey);
+    }
+
+    const task = (async () => {
+      const characterInfo = await loadCurrentCharacterForRisuContext(settings.debugLog);
+      const character = characterInfo.character;
+      // plugins.md is authoritative: request only documented database keys.
+      // globalChatVariables is intentionally not exposed to plugins. Conditional
+      // lore therefore uses host-formatted request evidence instead of treating
+      // an unavailable global toggle as false.
+      const baseDb = typeof API.getDatabase === 'function'
+        ? await safeApi('getDatabase', () => API.getDatabase(['personas', 'selectedPersona', 'modules', 'enabledModules', 'moduleIntergration']), settings.debugLog)
+        : null;
+      const db = { ...(baseDb || {}) };
+      const chatInfo = await loadCurrentChatForRisuContext(character, settings.debugLog);
+      const persona = selectedPersonaFromDb(db, chatInfo.chat);
+      const candidates = collectRisuLorebookCandidates(character, db, chatInfo.chat, persona, {
+        selectedModuleLoreIds: settings.selectedModuleLoreIds,
+        excludedModuleLoreIds: settings.excludedModuleLoreIds,
+        excludedCharacterLoreIds: settings.excludedCharacterLoreIds
+      });
+      const snapshot = {
+        routeVersion: RAG_ROUTE_VERSION,
+        route: 'plugins.md:getCharacter+getDatabase+getCurrentCharacterIndex+getCurrentChatIndex+getChatFromIndex',
+        characterInfo,
+        character,
+        db,
+        chatInfo,
+        persona,
+        candidates,
+        rawLoreSettings: character?.loreSettings || character?.lore_settings || {},
+        staticSettingsHash,
+        loadedAt: Date.now(),
+        staticCache: { hit: false, key: cacheKey, ageMs: 0 }
+      };
+      return snapshot;
+    })();
+
+    if (cacheKey) {
+      RisuStaticSnapshotInFlight.set(cacheKey, task);
+      try { return await task; }
+      finally { RisuStaticSnapshotInFlight.delete(cacheKey); }
+    }
+    return await task;
   };
 
   const loadRisuContextSnapshot = async (settings, requestMessages = [], seedRecent = null, staticSnapshot = null) => {
@@ -13715,6 +13956,1392 @@ function mergeAgentCbsWarnings(...warningLists) {
     loreBm25fSectionScoreDetails(query, sections).scores.map(item => Number(item.score || 0))
   );
 
+  const loreFullTextIndexIdentityText = lore => [
+    lore?.label,
+    lore?.name,
+    lore?.key,
+    ...(Array.isArray(lore?.keys) ? lore.keys : []),
+    ...(Array.isArray(lore?.secondaryKeys) ? lore.secondaryKeys : []),
+    lore?.source,
+    lore?.moduleName,
+    lore?.moduleNamespace
+  ].filter(Boolean).join(' ');
+
+  const loreFullTextIndexFieldStats = (value = '') => {
+    const words = loreJaccardCleanText(value).split(/\s+/).filter(Boolean);
+    const wordCounts = new Map();
+    let lexicalLength = 0;
+    for (const word of words) {
+      if (word.length < 2) continue;
+      lexicalLength += 1;
+      wordCounts.set(word, Math.min(65535, (wordCounts.get(word) || 0) + 1));
+    }
+    const counts = new Map();
+    const add = (tokenValue, amount) => {
+      const token = loreJaccardNormalizeKey(tokenValue);
+      if (!token) return;
+      counts.set(token, Math.min(65535, (counts.get(token) || 0) + amount));
+    };
+    // Process each distinct lexical form once. Repeated long-lore prose therefore does
+    // not repeatedly pay stemming/romanization cost, while every occurrence still
+    // contributes its exact term frequency.
+    for (const [word, amount] of wordCounts.entries()) {
+      const stripped = loreJaccardStripKoreanParticles(word) || word;
+      add(loreJaccardStem(stripped), amount);
+      if (/^[가-힣]{2,}$/u.test(stripped)) {
+        const romanized = loreJaccardRomanizeHangul(stripped);
+        if (romanized.length >= 3) {
+          add(romanized, amount);
+          if (romanized.startsWith('r')) add(`l${romanized.slice(1)}`, amount);
+        }
+      }
+    }
+    return { counts, length: lexicalLength, unique: counts.size };
+  };
+
+  const setLorePassageEvidenceCache = (key, value) => {
+    if (!key) return value;
+    if (LorePassageEvidenceCache.size >= LORE_PASSAGE_EVIDENCE_CACHE_MAX) {
+      const oldest = LorePassageEvidenceCache.keys().next().value;
+      if (oldest !== undefined) LorePassageEvidenceCache.delete(oldest);
+    }
+    LorePassageEvidenceCache.set(key, value);
+    return value;
+  };
+
+  const lorePassageIndexFromContent = (value = '') => {
+    const source = text(value || '').replace(/\r\n?/g, '\n').trim();
+    if (!source) return { engine: LORE_PASSAGE_INDEX_VERSION, sourceChars: 0, coveredChars: 0, passageCount: 0, passages: [] };
+    const paragraphs = [];
+    const headingStack = [];
+    const headingTitles = [];
+    const lines = source.split('\n');
+    let offset = 0;
+    let paragraphStart = -1;
+    let paragraphEnd = -1;
+    let paragraphPath = [];
+    const flushParagraph = () => {
+      if (paragraphStart < 0 || paragraphEnd <= paragraphStart) {
+        paragraphStart = -1;
+        paragraphEnd = -1;
+        paragraphPath = [];
+        return;
+      }
+      paragraphs.push({
+        start: paragraphStart,
+        end: paragraphEnd,
+        path: paragraphPath.slice()
+      });
+      paragraphStart = -1;
+      paragraphEnd = -1;
+      paragraphPath = [];
+    };
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      const lineStart = offset;
+      const lineEnd = lineStart + line.length;
+      const heading = line.match(/^\s*(#{1,6})\s+(.+?)\s*$/);
+      if (heading) {
+        flushParagraph();
+        const level = heading[1].length;
+        const title = heading[2].trim();
+        headingStack.length = level;
+        headingStack[level - 1] = title;
+        headingTitles.push(title);
+      } else if (!line.trim()) {
+        flushParagraph();
+      } else {
+        if (paragraphStart < 0) {
+          paragraphStart = lineStart;
+          paragraphPath = headingStack.filter(Boolean);
+        }
+        paragraphEnd = lineEnd;
+      }
+      offset = lineEnd + (index < lines.length - 1 ? 1 : 0);
+    }
+    flushParagraph();
+    if (!paragraphs.length) paragraphs.push({ start: 0, end: source.length, path: [] });
+
+    const rawPassages = [];
+    let group = null;
+    const samePath = (left = [], right = []) => left.length === right.length && left.every((item, index) => item === right[index]);
+    const flushGroup = () => {
+      if (!group) return;
+      rawPassages.push(group);
+      group = null;
+    };
+    const addLongSpan = span => {
+      flushGroup();
+      const target = Math.max(600, LORE_PASSAGE_TARGET_CHARS);
+      const overlap = Math.max(80, Math.min(target - 120, LORE_PASSAGE_OVERLAP_CHARS));
+      const step = Math.max(240, target - overlap);
+      let cursor = span.start;
+      let guard = 0;
+      while (cursor < span.end && guard < 100000) {
+        guard += 1;
+        let end = Math.min(span.end, cursor + target);
+        if (span.end - end < Math.floor(overlap * 0.55)) end = span.end;
+        rawPassages.push({ start: cursor, end, path: span.path.slice() });
+        if (end >= span.end) break;
+        cursor = Math.max(cursor + 1, end - overlap);
+        if (cursor + 80 >= span.end) cursor = Math.max(span.start, span.end - target);
+      }
+    };
+    for (const paragraph of paragraphs) {
+      const length = Math.max(0, paragraph.end - paragraph.start);
+      if (length > LORE_PASSAGE_TARGET_CHARS * 1.45) {
+        addLongSpan(paragraph);
+        continue;
+      }
+      if (
+        group
+        && samePath(group.path, paragraph.path)
+        && paragraph.end - group.start <= LORE_PASSAGE_TARGET_CHARS
+      ) {
+        group.end = paragraph.end;
+      } else {
+        flushGroup();
+        group = { start: paragraph.start, end: paragraph.end, path: paragraph.path.slice() };
+      }
+    }
+    flushGroup();
+
+    if (source.length <= LORE_PASSAGE_SHORT_WHOLE_CHARS) {
+      rawPassages.length = 0;
+      rawPassages.push({ start: 0, end: source.length, path: headingTitles.slice(0, 8) });
+    }
+
+    const passages = rawPassages.map((span, index) => {
+      const body = source.slice(Math.max(0, span.start), Math.min(source.length, span.end)).trim();
+      const heading = (span.path || []).filter(Boolean).join(' > ');
+      return {
+        id: `passage-${index + 1}`,
+        order: index,
+        start: Math.max(0, span.start),
+        end: Math.min(source.length, span.end),
+        heading,
+        path: (span.path || []).slice(),
+        text: body,
+        chars: body.length,
+        fields: {
+          heading: loreFullTextIndexFieldStats(heading),
+          body: loreFullTextIndexFieldStats(body)
+        }
+      };
+    }).filter(passage => passage.text);
+
+    // Coverage is computed over the original source offsets. Overlap is allowed; gaps in
+    // blank-line separators or Markdown heading lines remain searchable through the full
+    // document body/heading fields and are represented as passage metadata.
+    const sorted = passages.slice().sort((left, right) => left.start - right.start || left.end - right.end);
+    let coveredChars = 0;
+    let coveredUntil = 0;
+    for (const passage of sorted) {
+      const start = Math.max(0, Number(passage.start || 0));
+      const end = Math.max(start, Number(passage.end || start));
+      if (end <= coveredUntil) continue;
+      coveredChars += Math.max(0, end - Math.max(start, coveredUntil));
+      coveredUntil = end;
+    }
+    return {
+      engine: LORE_PASSAGE_INDEX_VERSION,
+      sourceChars: source.length,
+      coveredChars,
+      passageCount: passages.length,
+      targetChars: LORE_PASSAGE_TARGET_CHARS,
+      overlapChars: LORE_PASSAGE_OVERLAP_CHARS,
+      passages
+    };
+  };
+
+  const loreEnsurePassageIndex = record => {
+    if (!record || typeof record !== 'object') return { engine: LORE_PASSAGE_INDEX_VERSION, sourceChars: 0, coveredChars: 0, passageCount: 0, passages: [] };
+    if (record.passageIndex?.engine === LORE_PASSAGE_INDEX_VERSION && Array.isArray(record.passageIndex.passages)) return record.passageIndex;
+    const passageIndex = lorePassageIndexFromContent(record.content || '');
+    record.passageIndex = passageIndex;
+    record.passageCount = Number(passageIndex?.passageCount || 0);
+    record.passageCoveredChars = Number(passageIndex?.coveredChars || 0);
+    return passageIndex;
+  };
+
+  const lorePassageCoverageTokens = (record = {}, query = '', limit = LORE_DYNAMIC_ANCHOR_MAX) => {
+    const queryTokens = loreJaccardUnique(loreBm25Tokens(query, 220), 160);
+    const counts = record?.fields?.body?.counts || new Map();
+    const identityCounts = record?.fields?.identity?.counts || new Map();
+    const headingCounts = record?.fields?.heading?.counts || new Map();
+    return queryTokens
+      .filter(token => counts.has(token) || identityCounts.has(token) || headingCounts.has(token))
+      .slice(0, Math.max(1, Number(limit || LORE_DYNAMIC_ANCHOR_MAX)));
+  };
+
+  const lorePassageScoreRecord = (record = {}, query = '') => {
+    const passageIndex = loreEnsurePassageIndex(record);
+    const passages = Array.isArray(passageIndex?.passages) ? passageIndex.passages : [];
+    const queryTokens = loreJaccardUnique(loreBm25Tokens(query, 220), 160);
+    if (!passages.length || !queryTokens.length) return [];
+    const fieldDefs = {
+      heading: { weight: 2.6, b: 0.20 },
+      body: { weight: 1.0, b: 0.76 }
+    };
+    const averages = {
+      heading: Math.max(1, passages.reduce((sum, passage) => sum + Number(passage.fields?.heading?.length || 0), 0) / passages.length),
+      body: Math.max(1, passages.reduce((sum, passage) => sum + Number(passage.fields?.body?.length || 0), 0) / passages.length)
+    };
+    const documentFrequency = new Map();
+    for (const token of queryTokens) {
+      let count = 0;
+      for (const passage of passages) {
+        if (passage.fields?.heading?.counts?.has(token) || passage.fields?.body?.counts?.has(token)) count += 1;
+      }
+      documentFrequency.set(token, count);
+    }
+    const anchorTokens = new Set(loreDistinctiveAnchorTokens(query).map(loreJaccardNormalizeKey).filter(Boolean).slice(0, LORE_DYNAMIC_ANCHOR_MAX));
+    return passages.map(passage => {
+      let rawScore = 0;
+      const covered = [];
+      for (const token of queryTokens) {
+        let combinedTf = 0;
+        for (const fieldName of ['heading', 'body']) {
+          const stats = passage.fields?.[fieldName] || { counts: new Map(), length: 0 };
+          const tf = Number(stats.counts?.get(token) || 0);
+          if (!tf) continue;
+          const def = fieldDefs[fieldName];
+          const lengthNorm = Math.max(0.12, (1 - def.b) + def.b * (Math.max(0, Number(stats.length || 0)) / averages[fieldName]));
+          combinedTf += def.weight * tf / lengthNorm;
+        }
+        if (!(combinedTf > 0)) continue;
+        const df = Number(documentFrequency.get(token) || 0);
+        const idf = Math.log(1 + (passages.length - df + 0.5) / (df + 0.5));
+        rawScore += idf * (((LORE_BM25F_K1 + 1) * combinedTf) / (LORE_BM25F_K1 + combinedTf));
+        if (anchorTokens.has(token)) covered.push(token);
+      }
+      const bm25f = rawScore > 0 ? rawScore / (rawScore + 1.25) : 0;
+      const coverage = covered.length / Math.max(1, anchorTokens.size || queryTokens.length);
+      const exact = loreExactChunkCoverageScore(query, `${passage.heading || ''}
+${passage.text || ''}`);
+      const confidenceScore = clampNumber(bm25f * 0.62 + coverage * 0.23 + exact * 0.15, 0, 1.2, 0);
+      return {
+        ...passage,
+        bm25f,
+        bm25fRaw: rawScore,
+        coverage,
+        exact,
+        confidenceScore,
+        coveredAnchors: Array.from(new Set(covered))
+      };
+    }).sort((left, right) => (
+      right.confidenceScore - left.confidenceScore
+      || right.bm25f - left.bm25f
+      || right.coverage - left.coverage
+      || left.order - right.order
+    ));
+  };
+
+  const loreBuildPassageEvidence = (lore = {}, query = '', options = {}) => {
+    const record = loreFullTextIndexRecord(lore);
+    const passageIndex = loreEnsurePassageIndex(record);
+    const source = text(record.content || '').trim();
+    const protectedEvidence = options.protected === true;
+    const maxChars = clampInt(
+      options.maxChars ?? (protectedEvidence ? LORE_PASSAGE_PROTECTED_EVIDENCE_CHARS : LORE_PASSAGE_DEFAULT_EVIDENCE_CHARS),
+      600,
+      12000,
+      protectedEvidence ? LORE_PASSAGE_PROTECTED_EVIDENCE_CHARS : LORE_PASSAGE_DEFAULT_EVIDENCE_CHARS
+    );
+    const stage = text(options.stage || '').trim();
+    const queryText = text(query || '').trim();
+    const requiredAnchors = Array.from(new Set((Array.isArray(options.requiredAnchors) ? options.requiredAnchors : [])
+      .map(loreJaccardNormalizeKey).filter(Boolean))).slice(0, LORE_DYNAMIC_ANCHOR_MAX);
+    const cacheKey = [
+      'lore-passage-evidence-v1', record.contentHash, record.identityHash,
+      referenceContentHash(queryText), stage, maxChars, protectedEvidence ? 1 : 0,
+      requiredAnchors.join('|')
+    ].join(':');
+    const cached = LorePassageEvidenceCache.get(cacheKey);
+    if (cached) {
+      LorePassageEvidenceCache.delete(cacheKey);
+      LorePassageEvidenceCache.set(cacheKey, cached);
+      return cached;
+    }
+    if (!source) return setLorePassageEvidenceCache(cacheKey, {
+      engine: LORE_PASSAGE_INDEX_VERSION, text: '', sourceChars: 0, evidenceChars: 0,
+      whole: false, passages: [], coveredAnchors: [], requestedAnchors: requiredAnchors
+    });
+    if (source.length <= Math.min(maxChars, LORE_PASSAGE_SHORT_WHOLE_CHARS)) {
+      const coveredAnchors = lorePassageCoverageTokens(record, queryText);
+      return setLorePassageEvidenceCache(cacheKey, {
+        engine: LORE_PASSAGE_INDEX_VERSION,
+        text: source,
+        sourceChars: source.length,
+        evidenceChars: source.length,
+        whole: true,
+        passages: [{
+          id: 'whole', order: 0, start: 0, end: source.length, heading: '',
+          chars: source.length, confidenceScore: 1, coveredAnchors, block: source
+        }],
+        coveredAnchors,
+        requestedAnchors: requiredAnchors
+      });
+    }
+
+    const ranked = lorePassageScoreRecord(record, queryText);
+    const candidates = ranked.length ? ranked : (passageIndex?.passages || []).map(item => ({ ...item, confidenceScore: 0, coveredAnchors: [] }));
+    const selected = [];
+    const covered = new Set();
+    const selectedFeatures = [];
+    let remaining = maxChars;
+    const required = new Set(requiredAnchors.length ? requiredAnchors : lorePassageCoverageTokens(record, queryText));
+    const bestScore = Number(candidates[0]?.confidenceScore || 0);
+    const maxItems = clampInt(options.maxItems ?? LORE_PASSAGE_MAX_EVIDENCE_ITEMS, 1, 16, LORE_PASSAGE_MAX_EVIDENCE_ITEMS);
+    const candidateFeature = passage => new Set(loreBm25Tokens(`${passage.heading || ''}
+${passage.text || ''}`, 420));
+    const similarityToSelected = feature => {
+      let best = 0;
+      for (const prior of selectedFeatures) best = Math.max(best, loreMmrSetStats(feature, prior).containment);
+      return best;
+    };
+    const passageBlock = passage => [
+      `[관련 로어 구간: ${passage.heading || '본문'} | 원문 ${Number(passage.start || 0) + 1}-${Number(passage.end || 0)}]`,
+      text(passage.text || '').trim()
+    ].filter(Boolean).join('\n');
+    const evidenceLiteralTerms = Array.from(new Set([
+      ...loreDistinctiveAnchorTokens(queryText),
+      ...requiredAnchors
+    ].map(value => text(value || '').trim()).filter(value => value.length >= 2))).slice(0, 48);
+    const passageCoveredAnchorsAfterFit = passage => {
+      const normalized = loreJaccardNormalizeKey(`${passage.heading || ''}\n${passage.text || ''}`);
+      return Array.from(required).filter(token => normalized.includes(token));
+    };
+    const fitPassageToBodyBudget = (passage, bodyBudget) => {
+      const original = text(passage?.text || '').trim();
+      if (!original || original.length <= bodyBudget) {
+        const coveredAnchors = passageCoveredAnchorsAfterFit(passage);
+        return { ...passage, coveredAnchors };
+      }
+      const lower = original.normalize('NFKC').toLocaleLowerCase();
+      const candidates = [0, Math.max(0, original.length - bodyBudget)];
+      for (const termValue of evidenceLiteralTerms) {
+        const term = termValue.normalize('NFKC').toLocaleLowerCase();
+        if (!term) continue;
+        let from = 0;
+        let guard = 0;
+        while (from < lower.length && guard < 8) {
+          const hit = lower.indexOf(term, from);
+          if (hit < 0) break;
+          candidates.push(Math.max(0, Math.min(original.length - bodyBudget, hit - Math.floor(bodyBudget * 0.34))));
+          from = hit + Math.max(1, term.length);
+          guard += 1;
+        }
+      }
+      let best = null;
+      for (const rawStart of candidates) {
+        const start = Math.max(0, Math.min(Math.max(0, original.length - bodyBudget), Number(rawStart || 0)));
+        const textSlice = original.slice(start, Math.min(original.length, start + bodyBudget)).trim();
+        if (!textSlice) continue;
+        const normalized = loreJaccardNormalizeKey(`${passage.heading || ''}\n${textSlice}`);
+        const coveredAnchors = Array.from(required).filter(token => normalized.includes(token));
+        const literalHits = evidenceLiteralTerms.reduce((count, termValue) => (
+          normalized.includes(loreJaccardNormalizeKey(termValue)) ? count + 1 : count
+        ), 0);
+        const score = coveredAnchors.length * 10 + literalHits * 2 - Math.abs(start - Math.floor(original.length / 2)) / Math.max(1, original.length);
+        if (!best || score > best.score) best = { start, textSlice, coveredAnchors, score };
+      }
+      if (!best) return { ...passage, text: original.slice(0, bodyBudget).trim(), end: Number(passage.start || 0) + bodyBudget, coveredAnchors: [] };
+      return {
+        ...passage,
+        start: Number(passage.start || 0) + best.start,
+        end: Number(passage.start || 0) + best.start + best.textSlice.length,
+        text: best.textSlice,
+        coveredAnchors: best.coveredAnchors
+      };
+    };
+
+    const remainingCandidates = candidates.map((passage, order) => ({ passage, order, feature: candidateFeature(passage) }));
+    while (remainingCandidates.length && selected.length < maxItems && remaining > 180) {
+      let bestIndex = -1;
+      let best = null;
+      for (let index = 0; index < remainingCandidates.length; index += 1) {
+        const entry = remainingCandidates[index];
+        const passage = entry.passage;
+        const gainTokens = (passage.coveredAnchors || []).filter(token => required.has(token) && !covered.has(token));
+        const similarity = similarityToSelected(entry.feature);
+        const relevance = clampNumber(Number(passage.confidenceScore || 0), 0, 1.2, 0);
+        const utility = relevance * 0.78 + Math.min(0.42, gainTokens.length * 0.11) - similarity * 0.18;
+        const evaluated = { ...entry, gainTokens, similarity, relevance, utility };
+        if (
+          !best
+          || utility > best.utility + 1e-12
+          || (Math.abs(utility - best.utility) <= 1e-12 && relevance > best.relevance + 1e-12)
+          || (Math.abs(utility - best.utility) <= 1e-12 && Math.abs(relevance - best.relevance) <= 1e-12 && entry.order < best.order)
+        ) {
+          best = evaluated;
+          bestIndex = index;
+        }
+      }
+      if (bestIndex < 0 || !best) break;
+      const mustCover = best.gainTokens.length > 0;
+      const clusterContinues = selected.length === 0
+        || best.relevance >= Math.max(0.018, bestScore * 0.44);
+      if (selected.length > 0 && !mustCover && !clusterContinues) break;
+      const block = passageBlock(best.passage);
+      if (block.length > remaining) {
+        if (!selected.length || mustCover || protectedEvidence) {
+          const headerEnd = block.indexOf('\n');
+          const header = headerEnd >= 0 ? block.slice(0, headerEnd) : '';
+          const bodyBudget = Math.max(0, remaining - header.length - 1);
+          if (bodyBudget < 100) break;
+          const fitted = fitPassageToBodyBudget(best.passage, bodyBudget);
+          if (!text(fitted.text || '').trim()) break;
+          // A coverage-mandatory passage must still contain the anchor after fitting.
+          // If this window cannot preserve it, drop this candidate and let another
+          // passage carrying the same anchor compete instead of recording false coverage.
+          if (mustCover && !(fitted.coveredAnchors || []).some(token => best.gainTokens.includes(token))) {
+            remainingCandidates.splice(bestIndex, 1);
+            continue;
+          }
+          best.passage = fitted;
+          best.feature = candidateFeature(fitted);
+        } else {
+          remainingCandidates.splice(bestIndex, 1);
+          continue;
+        }
+      } else {
+        best.passage = fitPassageToBodyBudget(best.passage, text(best.passage.text || '').length);
+      }
+      remainingCandidates.splice(bestIndex, 1);
+      let fittedBlock = passageBlock(best.passage);
+      if (fittedBlock.length > remaining) {
+        const overflow = fittedBlock.length - remaining;
+        const nextBodyBudget = Math.max(80, text(best.passage.text || '').length - overflow - 4);
+        best.passage = fitPassageToBodyBudget(best.passage, nextBodyBudget);
+        fittedBlock = passageBlock(best.passage);
+      }
+      if (fittedBlock.length > remaining) break;
+      const selectedPassage = {
+        id: best.passage.id,
+        order: best.passage.order,
+        start: best.passage.start,
+        end: best.passage.end,
+        heading: best.passage.heading || '',
+        chars: fittedBlock.length,
+        confidenceScore: Number(Number(best.passage.confidenceScore || 0).toFixed(4)),
+        bm25f: Number(Number(best.passage.bm25f || 0).toFixed(4)),
+        coverage: Number(Number(best.passage.coverage || 0).toFixed(4)),
+        exact: Number(Number(best.passage.exact || 0).toFixed(4)),
+        coveredAnchors: Array.from(new Set(passageCoveredAnchorsAfterFit(best.passage))),
+        maxSimilarity: Number(best.similarity.toFixed(4)),
+        utility: Number(best.utility.toFixed(4)),
+        block: fittedBlock
+      };
+      selected.push(selectedPassage);
+      selectedFeatures.push(best.feature);
+      selectedPassage.coveredAnchors.forEach(token => covered.add(token));
+      remaining -= fittedBlock.length + 2;
+      if (required.size && Array.from(required).every(token => covered.has(token)) && selected.length >= 2 && best.relevance < bestScore * 0.72) break;
+    }
+
+    if (!selected.length) {
+      const fallback = candidates[0] || (passageIndex?.passages || [])[0];
+      if (fallback) {
+        const provisionalHeader = passageBlock({ ...fallback, text: '' });
+        const bodyBudget = Math.max(100, maxChars - provisionalHeader.length - 2);
+        let passage = fitPassageToBodyBudget(fallback, bodyBudget);
+        let block = passageBlock(passage);
+        if (block.length > maxChars) {
+          passage = fitPassageToBodyBudget(passage, Math.max(80, text(passage.text || '').length - (block.length - maxChars) - 4));
+          block = passageBlock(passage);
+        }
+        const coveredAnchors = passageCoveredAnchorsAfterFit(passage);
+        selected.push({
+          id: passage.id, order: passage.order, start: passage.start, end: passage.end,
+          heading: passage.heading || '', chars: block.length,
+          confidenceScore: Number(Number(fallback.confidenceScore || 0).toFixed(4)),
+          bm25f: Number(Number(fallback.bm25f || 0).toFixed(4)),
+          coverage: Number(Number(fallback.coverage || 0).toFixed(4)),
+          exact: Number(Number(fallback.exact || 0).toFixed(4)),
+          coveredAnchors, maxSimilarity: 0,
+          utility: Number(Number(fallback.confidenceScore || 0).toFixed(4)), block
+        });
+        coveredAnchors.forEach(token => covered.add(token));
+      }
+    }
+    const textValue = selected.map(item => item.block).join('\n\n').slice(0, maxChars).trim();
+    const result = {
+      engine: LORE_PASSAGE_INDEX_VERSION,
+      text: textValue,
+      sourceChars: source.length,
+      evidenceChars: textValue.length,
+      whole: false,
+      passages: selected,
+      coveredAnchors: Array.from(covered),
+      requestedAnchors: Array.from(required),
+      uncoveredAnchors: Array.from(required).filter(token => !covered.has(token))
+    };
+    return setLorePassageEvidenceCache(cacheKey, result);
+  };
+
+  const loreFullTextIndexHeadings = (content = '') => {
+    const headings = [];
+    for (const match of text(content || '').matchAll(/^\s*#{1,6}\s+(.+?)\s*$/gm)) {
+      if (match?.[1]) headings.push(match[1]);
+    }
+    return headings.join('\n');
+  };
+
+  const loreFullTextIndexCacheKey = lore => loreContinuityIdentity(lore)
+    || `anonymous:${createTextHasher().update(loreFullTextIndexIdentityText(lore)).digest()}`;
+
+  const pruneLoreFullTextIndexCache = () => {
+    while (LoreFullTextIndexCache.size > LORE_FULL_TEXT_INDEX_CACHE_MAX) {
+      const oldest = LoreFullTextIndexCache.keys().next().value;
+      if (oldest === undefined) break;
+      LoreFullTextIndexCache.delete(oldest);
+    }
+  };
+
+  const loreFullTextIndexRecord = (lore = {}) => {
+    const id = loreFullTextIndexCacheKey(lore);
+    const content = text(lore?.content || lore?.retrievedContent || '').trim();
+    const identityText = loreFullTextIndexIdentityText(lore);
+    const cached = LoreFullTextIndexCache.get(id);
+    if (cached && cached.content === content && cached.identityText === identityText) {
+      LoreFullTextIndexCache.delete(id);
+      LoreFullTextIndexCache.set(id, cached);
+      return cached;
+    }
+    const headingText = loreFullTextIndexHeadings(content);
+    const identityAnchorTokens = loreIdentityLiteralTokens(identityText);
+    const record = {
+      engine: LORE_FULL_TEXT_INDEX_VERSION,
+      id,
+      content,
+      identityText,
+      contentHash: referenceContentHash(content),
+      identityHash: referenceContentHash(identityText),
+      identityAnchorTokens,
+      identityGrams: loreIdentityFuzzyGrams(identityAnchorTokens),
+      chars: content.length,
+      passageIndex: null,
+      passageCount: 0,
+      passageCoveredChars: 0,
+      fields: {
+        identity: loreFullTextIndexFieldStats(identityText),
+        heading: loreFullTextIndexFieldStats(headingText),
+        body: loreFullTextIndexFieldStats(content)
+      }
+    };
+    LoreFullTextIndexCache.delete(id);
+    LoreFullTextIndexCache.set(id, record);
+    pruneLoreFullTextIndexCache();
+    return record;
+  };
+
+  const loreFullTextRecordTokenSet = record => {
+    const tokens = new Set();
+    for (const fieldName of ['identity', 'heading', 'body']) {
+      for (const token of record?.fields?.[fieldName]?.counts?.keys?.() || []) tokens.add(token);
+    }
+    return tokens;
+  };
+
+  const loreFullTextPostingRow = (record, docIndex, token) => {
+    const identity = Number(record?.fields?.identity?.counts?.get(token) || 0);
+    const heading = Number(record?.fields?.heading?.counts?.get(token) || 0);
+    const body = Number(record?.fields?.body?.counts?.get(token) || 0);
+    return (identity || heading || body) ? [docIndex, identity, heading, body] : null;
+  };
+
+  const loreFullTextBuildPostings = records => {
+    const postings = new Map();
+    let postingCount = 0;
+    (records || []).forEach((record, docIndex) => {
+      for (const token of loreFullTextRecordTokenSet(record)) {
+        const row = loreFullTextPostingRow(record, docIndex, token);
+        if (!row) continue;
+        const list = postings.get(token) || [];
+        list.push(row);
+        postings.set(token, list);
+        postingCount += 1;
+      }
+    });
+    return { postings, postingCount };
+  };
+
+  const loreFullTextBuildIdentityGramPostings = records => {
+    const postings = new Map();
+    (records || []).forEach((record, docIndex) => {
+      const grams = record?.identityGrams instanceof Set
+        ? record.identityGrams
+        : loreIdentityFuzzyGrams(record?.identityAnchorTokens || loreIdentityLiteralTokens(record?.identityText || ''));
+      for (const gram of grams) {
+        const list = postings.get(gram) || [];
+        list.push(docIndex);
+        postings.set(gram, list);
+      }
+    });
+    return postings;
+  };
+
+  const loreFullTextIndexCorpus = (lores = [], options = {}) => {
+    const source = Array.isArray(lores) ? lores : [];
+    const universeSlot = options?.slot === 'universe';
+    const rememberCorpus = corpus => {
+      if (universeSlot) LoreFullTextUniverseCorpus = corpus;
+      else LoreFullTextLastCorpus = corpus;
+      return corpus;
+    };
+    const refs = source.map(lore => ({
+      id: loreFullTextIndexCacheKey(lore),
+      content: text(lore?.content || lore?.retrievedContent || '').trim(),
+      identityText: loreFullTextIndexIdentityText(lore)
+    }));
+    const previous = universeSlot ? LoreFullTextUniverseCorpus : LoreFullTextLastCorpus;
+    const exactSame = !!previous
+      && previous.refs?.length === refs.length
+      && refs.every((ref, index) => (
+        previous.refs[index]?.id === ref.id
+        && previous.refs[index]?.content === ref.content
+        && previous.refs[index]?.identityText === ref.identityText
+      ));
+    if (exactSame && previous.postings instanceof Map) {
+      const reused = {
+        ...previous,
+        refs,
+        reusedCount: refs.length,
+        rebuiltCount: 0,
+        postingsUpdateMode: 'reused'
+      };
+      return rememberCorpus(reused);
+    }
+
+    const sameOrder = !!previous
+      && previous.refs?.length === refs.length
+      && refs.every((ref, index) => previous.refs[index]?.id === ref.id);
+    const previousById = previous?.refs?.length
+      ? new Map(previous.refs.map((ref, index) => [ref.id, { ref, record: previous.records[index], index }]))
+      : new Map();
+    let reusedCount = 0;
+    let rebuiltCount = 0;
+    const changedIndices = [];
+    const records = source.map((lore, index) => {
+      const ref = refs[index];
+      const prior = previousById.get(ref.id);
+      if (prior && prior.ref.content === ref.content && prior.ref.identityText === ref.identityText && prior.record) {
+        reusedCount += 1;
+        return prior.record;
+      }
+      const before = LoreFullTextIndexCache.get(ref.id);
+      const record = loreFullTextIndexRecord(lore);
+      if (before === record) reusedCount += 1;
+      else rebuiltCount += 1;
+      changedIndices.push(index);
+      return record;
+    });
+
+    let postings;
+    let postingCount = 0;
+    let postingsUpdateMode = 'rebuilt';
+    if (sameOrder && previous?.postings instanceof Map && changedIndices.length && changedIndices.length <= Math.max(32, Math.ceil(records.length * 0.12))) {
+      postings = new Map(previous.postings);
+      const affectedTokens = new Set();
+      for (const docIndex of changedIndices) {
+        for (const token of loreFullTextRecordTokenSet(previous.records[docIndex])) affectedTokens.add(token);
+        for (const token of loreFullTextRecordTokenSet(records[docIndex])) affectedTokens.add(token);
+      }
+      const changedSet = new Set(changedIndices);
+      for (const token of affectedTokens) {
+        let list = (postings.get(token) || []).filter(row => !changedSet.has(Number(row?.[0])));
+        for (const docIndex of changedIndices) {
+          const row = loreFullTextPostingRow(records[docIndex], docIndex, token);
+          if (row) list.push(row);
+        }
+        list.sort((left, right) => Number(left[0]) - Number(right[0]));
+        if (list.length) postings.set(token, list);
+        else postings.delete(token);
+      }
+      postingCount = Array.from(postings.values()).reduce((sum, list) => sum + list.length, 0);
+      postingsUpdateMode = 'incremental';
+    } else {
+      const built = loreFullTextBuildPostings(records);
+      postings = built.postings;
+      postingCount = built.postingCount;
+    }
+
+    const identityGramPostings = loreFullTextBuildIdentityGramPostings(records);
+    const signatureHasher = createTextHasher().update(LORE_FULL_TEXT_INDEX_VERSION);
+    records.forEach(record => signatureHasher.update(record.id).update(record.contentHash).update(record.identityHash));
+    const corpus = {
+      engine: LORE_FULL_TEXT_INDEX_VERSION,
+      refs,
+      records,
+      postings,
+      postingCount,
+      identityGramPostings,
+      identityGramCount: identityGramPostings.size,
+      postingsUpdateMode,
+      signature: signatureHasher.digest(),
+      reusedCount,
+      rebuiltCount,
+      documentCount: records.length,
+      indexedChars: records.reduce((sum, record) => sum + Number(record.chars || 0), 0)
+    };
+    return rememberCorpus(corpus);
+  };
+
+  const loreFullTextBm25fCorpusScores = (lores = [], query = '', fieldDefs = LORE_BM25F_LORE_FIELD_DEFS, options = {}) => {
+    const source = Array.isArray(lores) ? lores : [];
+    const corpus = options.corpus?.engine === LORE_FULL_TEXT_INDEX_VERSION ? options.corpus : loreFullTextIndexCorpus(source);
+    const queryTokens = loreJaccardUnique(
+      loreBm25Tokens(query, clampInt(options.queryLimit, 40, 360, 220)),
+      clampInt(options.uniqueQueryLimit, 24, 240, 140)
+    );
+    const fieldNames = Object.keys(fieldDefs || {});
+    const emptyScores = () => source.map((lore, index) => ({
+      id: loreContinuityIdentity(lore) || `lore-${index + 1}`,
+      score: 0,
+      rawScore: 0,
+      matchedTerms: [],
+      fieldRaw: Object.fromEntries(fieldNames.map(name => [name, 0]))
+    }));
+    if (!queryTokens.length || !source.length || !fieldNames.length) {
+      return {
+        engine: LORE_BM25F_ENGINE_VERSION,
+        fullIndexEngine: LORE_FULL_TEXT_INDEX_VERSION,
+        k1: LORE_BM25F_K1,
+        queryTokenCount: queryTokens.length,
+        queryTokens,
+        documentCount: source.length,
+        averageFieldLengths: Object.fromEntries(fieldNames.map(name => [name, 0])),
+        index: {
+          reusedCount: corpus.reusedCount,
+          rebuiltCount: corpus.rebuiltCount,
+          indexedChars: corpus.indexedChars,
+          signature: corpus.signature,
+          postingCount: Number(corpus.postingCount || 0),
+          identityGramCount: Number(corpus.identityGramCount || 0),
+          postingsUpdateMode: corpus.postingsUpdateMode || ''
+        },
+        scores: emptyScores()
+      };
+    }
+    const averageFieldLengths = {};
+    for (const fieldName of fieldNames) {
+      averageFieldLengths[fieldName] = Math.max(1, corpus.records.reduce((sum, record) => sum + Number(record.fields?.[fieldName]?.length || 0), 0) / Math.max(1, corpus.records.length));
+    }
+    const scoreScale = Math.max(0.25, Number(options.scoreScale || LORE_BM25F_SCORE_SCALE));
+    const accumulators = corpus.records.map(record => ({
+      id: record.id,
+      rawScore: 0,
+      matchedTerms: [],
+      fieldRaw: Object.fromEntries(fieldNames.map(fieldName => [fieldName, 0]))
+    }));
+    const fieldTupleIndex = { identity: 1, heading: 2, body: 3 };
+    for (const token of queryTokens) {
+      const postingList = corpus.postings?.get(token) || [];
+      const df = postingList.length;
+      if (!df) continue;
+      const idf = Math.log(1 + (corpus.records.length - df + 0.5) / (df + 0.5));
+      for (const row of postingList) {
+        const docIndex = Number(row?.[0]);
+        const record = corpus.records[docIndex];
+        const accumulator = accumulators[docIndex];
+        if (!record || !accumulator) continue;
+        const perFieldTf = {};
+        let combinedTf = 0;
+        for (const fieldName of fieldNames) {
+          const tupleIndex = fieldTupleIndex[fieldName];
+          const tf = tupleIndex == null ? Number(record.fields?.[fieldName]?.counts?.get(token) || 0) : Number(row?.[tupleIndex] || 0);
+          if (!tf) {
+            perFieldTf[fieldName] = 0;
+            continue;
+          }
+          const def = fieldDefs[fieldName] || {};
+          const fieldLength = Math.max(0, Number(record.fields?.[fieldName]?.length || 0));
+          const averageLength = Math.max(1, Number(averageFieldLengths[fieldName] || 1));
+          const b = clampNumber(Number(def.b ?? 0.75), 0, 1, 0.75);
+          const weight = Math.max(0, Number(def.weight ?? 1));
+          const lengthNorm = Math.max(0.12, (1 - b) + b * (fieldLength / averageLength));
+          const normalizedTf = weight * tf / lengthNorm;
+          perFieldTf[fieldName] = normalizedTf;
+          combinedTf += normalizedTf;
+        }
+        if (!(combinedTf > 0)) continue;
+        const termScore = idf * (((LORE_BM25F_K1 + 1) * combinedTf) / (LORE_BM25F_K1 + combinedTf));
+        accumulator.rawScore += termScore;
+        accumulator.matchedTerms.push({ token, idf, termScore });
+        for (const fieldName of fieldNames) {
+          const share = combinedTf > 0 ? Number(perFieldTf[fieldName] || 0) / combinedTf : 0;
+          if (share > 0) accumulator.fieldRaw[fieldName] += termScore * share;
+        }
+      }
+    }
+    const scores = accumulators.map(accumulator => {
+      const score = accumulator.rawScore > 0 ? accumulator.rawScore / (accumulator.rawScore + scoreScale) : 0;
+      return {
+        id: accumulator.id,
+        score: clampNumber(score, 0, 1, 0),
+        rawScore: accumulator.rawScore,
+        matchedTerms: accumulator.matchedTerms
+          .sort((left, right) => right.termScore - left.termScore)
+          .slice(0, 16)
+          .map(item => ({ token: item.token, idf: Number(item.idf.toFixed(4)), score: Number(item.termScore.toFixed(4)) })),
+        fieldRaw: Object.fromEntries(Object.entries(accumulator.fieldRaw).map(([fieldName, value]) => [fieldName, Number(Number(value || 0).toFixed(4))]))
+      };
+    });
+    return {
+      engine: LORE_BM25F_ENGINE_VERSION,
+      fullIndexEngine: LORE_FULL_TEXT_INDEX_VERSION,
+      k1: LORE_BM25F_K1,
+      queryTokenCount: queryTokens.length,
+      queryTokens,
+      documentCount: corpus.records.length,
+      averageFieldLengths: Object.fromEntries(Object.entries(averageFieldLengths).map(([name, value]) => [name, Number(value.toFixed(2))])),
+      index: {
+        reusedCount: corpus.reusedCount,
+        rebuiltCount: corpus.rebuiltCount,
+        indexedChars: corpus.indexedChars,
+        signature: corpus.signature,
+        postingCount: Number(corpus.postingCount || 0),
+        identityGramCount: Number(corpus.identityGramCount || 0),
+        postingsUpdateMode: corpus.postingsUpdateMode || ''
+      },
+      scores
+    };
+  };
+
+  const loreFullTextLexicalQueryProfile = (query = '') => {
+    const tokens = loreJaccardUnique(loreBm25Tokens(query, 180), 120);
+    return { tokens, tokenSet: new Set(tokens), size: tokens.length };
+  };
+
+  const loreFullTextLexicalScorePrepared = (loreOrRecord = {}, profile = null) => {
+    const record = loreOrRecord?.engine === LORE_FULL_TEXT_INDEX_VERSION ? loreOrRecord : loreFullTextIndexRecord(loreOrRecord);
+    const queryProfile = profile?.tokenSet instanceof Set ? profile : loreFullTextLexicalQueryProfile(profile || '');
+    if (!queryProfile.size) return { score: 0, lexical: 0, coverage: 0, heading: 0, overlap: 0 };
+    const bodyCounts = record.fields?.body?.counts || new Map();
+    const headingCounts = record.fields?.heading?.counts || new Map();
+    let bodyOverlap = 0;
+    let headingOverlap = 0;
+    for (const token of queryProfile.tokenSet) {
+      if (bodyCounts.has(token)) bodyOverlap += 1;
+      if (headingCounts.has(token)) headingOverlap += 1;
+    }
+    const bodyUnique = Math.max(1, Number(record.fields?.body?.unique || bodyCounts.size || 1));
+    const headingUnique = Math.max(1, Number(record.fields?.heading?.unique || headingCounts.size || 1));
+    const bodyCoverage = bodyOverlap / Math.max(1, queryProfile.size);
+    const headingCoverage = headingOverlap / Math.max(1, queryProfile.size);
+    const bodyJaccard = bodyOverlap / Math.max(1, queryProfile.size + bodyUnique - bodyOverlap);
+    const headingJaccard = headingOverlap / Math.max(1, queryProfile.size + headingUnique - headingOverlap);
+    const lexical = clampNumber(bodyCoverage * 0.88 + Math.min(0.12, bodyJaccard * 2.4), 0, 1, 0);
+    const heading = clampNumber(headingCoverage * 0.92 + Math.min(0.08, headingJaccard * 2.4), 0, 1, 0);
+    return { score: Math.max(lexical, heading), lexical: bodyJaccard, coverage: bodyCoverage, heading, overlap: bodyOverlap };
+  };
+
+  const loreFullTextLexicalScore = (loreOrRecord = {}, query = '') => (
+    loreFullTextLexicalScorePrepared(loreOrRecord, loreFullTextLexicalQueryProfile(query))
+  );
+
+  const loreFullTextExactAnchorScorePrepared = (record = {}, queryTokens = []) => {
+    const identityCounts = record?.fields?.identity?.counts || new Map();
+    const headingCounts = record?.fields?.heading?.counts || new Map();
+    let headingHit = false;
+    for (const tokenValue of Array.isArray(queryTokens) ? queryTokens : []) {
+      const token = loreJaccardNormalizeKey(tokenValue);
+      if (!token) continue;
+      if (identityCounts.has(token)) return 1;
+      if (headingCounts.has(token)) headingHit = true;
+    }
+    return headingHit ? 0.88 : 0;
+  };
+
+  const loreIdentityLiteralTokens = (value = '') => {
+    const source = text(value || '').normalize('NFKC');
+    const matches = source.match(/[가-힣]{2,16}|[A-Za-z][A-Za-z'’\-]{2,63}/g) || [];
+    return Array.from(new Set(matches.map(token => {
+      const stripped = /^[가-힣]+$/u.test(token) ? (loreJaccardStripKoreanParticles(token) || token) : token;
+      return cleanContinuityEntity(stripped);
+    }).filter(token => {
+      const normalized = normalizeContinuityAlias(token);
+      return normalized.length >= 2
+        && normalized.length <= 64
+        && !GRADIA_CONTINUITY_ENTITY_STOP.has(normalized);
+    }))).slice(0, 64);
+  };
+
+  const loreIdentityFuzzyGrams = (tokens = []) => {
+    const grams = new Set();
+    for (const tokenValue of Array.isArray(tokens) ? tokens : []) {
+      const token = loreJaccardNormalizeKey(tokenValue);
+      if (!token || token.length < 2) continue;
+      if (token.length === 2) {
+        grams.add(token);
+        continue;
+      }
+      for (let index = 0; index <= token.length - 2; index += 1) grams.add(token.slice(index, index + 2));
+      if (token.length >= 4) {
+        for (let index = 0; index <= token.length - 3; index += 1) grams.add(token.slice(index, index + 3));
+      }
+    }
+    return grams;
+  };
+
+  const loreIdentityFuzzyQueryProfile = (query = '') => {
+    // Fuzzy rescue uses only literal surface forms from the request. Generated
+    // stemming/romanization variants remain in the exact full-text index but are not
+    // allowed to create broad character-gram candidate sets across every lore entry.
+    const tokens = loreIdentityLiteralTokens(query).slice(0, LORE_DYNAMIC_ANCHOR_MAX);
+    return { tokens, grams: loreIdentityFuzzyGrams(tokens) };
+  };
+
+  const loreIdentityEditSimilarity = (leftValue = '', rightValue = '') => {
+    const left = loreJaccardNormalizeKey(leftValue);
+    const right = loreJaccardNormalizeKey(rightValue);
+    if (!left || !right) return 0;
+    if (left === right) return 1;
+    const maxLength = Math.max(left.length, right.length);
+    if (maxLength > 40 || Math.abs(left.length - right.length) > 3) return 0;
+    if ((left.length >= 3 && right.includes(left)) || (right.length >= 3 && left.includes(right))) return 0.84;
+    const maxDistance = maxLength <= 4 ? 1 : maxLength <= 9 ? 2 : 3;
+    let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+    for (let i = 1; i <= left.length; i += 1) {
+      const current = [i];
+      let rowMin = current[0];
+      for (let j = 1; j <= right.length; j += 1) {
+        const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+        const value = Math.min(
+          current[j - 1] + 1,
+          previous[j] + 1,
+          previous[j - 1] + cost
+        );
+        current[j] = value;
+        if (value < rowMin) rowMin = value;
+      }
+      if (rowMin > maxDistance) return 0;
+      previous = current;
+    }
+    const distance = previous[right.length];
+    return distance <= maxDistance ? clampNumber(1 - distance / Math.max(1, maxLength), 0, 1, 0) : 0;
+  };
+
+  const loreIdentityFuzzyTokenScore = (queryTokens = [], identityTokens = []) => {
+    let best = 0;
+    for (const queryToken of Array.isArray(queryTokens) ? queryTokens : []) {
+      for (const identityToken of Array.isArray(identityTokens) ? identityTokens : []) {
+        best = Math.max(
+          best,
+          loreIdentityEditSimilarity(queryToken, identityToken),
+          loreJaccardTokenSimilarity(queryToken, identityToken)
+        );
+        if (best >= 0.999) return 1;
+      }
+    }
+    return best;
+  };
+
+  const loreFullTextFuzzyIdentityScores = (corpus = {}, profile = null) => {
+    const queryProfile = profile?.grams instanceof Set ? profile : loreIdentityFuzzyQueryProfile(profile || '');
+    const postings = corpus?.identityGramPostings;
+    if (!(postings instanceof Map) || !queryProfile.tokens.length || !queryProfile.grams.size) return new Map();
+    const overlapByDoc = new Map();
+    for (const gram of queryProfile.grams) {
+      for (const docIndex of postings.get(gram) || []) {
+        overlapByDoc.set(docIndex, (overlapByDoc.get(docIndex) || 0) + 1);
+      }
+    }
+    const scores = new Map();
+    for (const [docIndex, overlap] of overlapByDoc.entries()) {
+      // One shared bi/tri-gram is enough to enter the bounded fuzzy rescue; the
+      // authoritative token similarity below still has to clear its normal floor.
+      if (!(overlap > 0)) continue;
+      const record = corpus.records?.[docIndex];
+      const identityTokens = Array.isArray(record?.identityAnchorTokens)
+        ? record.identityAnchorTokens
+        : loreIdentityLiteralTokens(record?.identityText || '');
+      const score = loreIdentityFuzzyTokenScore(queryProfile.tokens, identityTokens);
+      if (score >= LORE_JACCARD_TUNING.fuzzyMatchThreshold) scores.set(docIndex, score);
+    }
+    return scores;
+  };
+
+  const loreDynamicRequiredAnchors = (entries = [], primaryQuery = '', terminalQuery = '', options = {}) => {
+    const source = Array.isArray(entries) ? entries : [];
+    const lores = source.map(entry => entry?.lore || entry).filter(Boolean);
+    const suppliedCorpus = options?.corpus;
+    const corpus = suppliedCorpus?.engine === LORE_FULL_TEXT_INDEX_VERSION
+      && Number(suppliedCorpus.documentCount || 0) === lores.length
+      ? suppliedCorpus
+      : loreFullTextIndexCorpus(lores, options?.corpusSlot ? { slot: options.corpusSlot } : {});
+    const query = [text(primaryQuery || '').trim(), text(terminalQuery || '').trim()].filter(Boolean).join('\n');
+    const rawQueryLower = query.normalize('NFKC').toLocaleLowerCase();
+    const queryTokens = loreJaccardUnique(loreBm25Tokens(query, 260), 180)
+      .map(loreJaccardNormalizeKey)
+      .filter(token => {
+        if (!token) return false;
+        // Hangul romanization variants are indexed for recall, but they are not separate
+        // semantic requirements unless that Latin token literally appears in the query.
+        if (/^[a-z0-9_-]+$/i.test(token) && /[가-힣]/u.test(query) && !rawQueryLower.includes(token.toLocaleLowerCase())) return false;
+        return true;
+      });
+    if (!queryTokens.length || !corpus.records.length) return [];
+    const maxDf = Math.max(12, Math.ceil(corpus.records.length * LORE_DYNAMIC_ANCHOR_DOC_RATIO));
+    const anchors = [];
+    for (const token of queryTokens) {
+      if (!token || GRADIA_CONTINUITY_ENTITY_STOP.has(token)) continue;
+      if (token.length < 2) continue;
+      const postingList = corpus.postings instanceof Map ? (corpus.postings.get(token) || []) : [];
+      let df = postingList.length;
+      let identityDf = postingList.reduce((count, row) => count + ((Number(row?.[1] || 0) > 0 || Number(row?.[2] || 0) > 0) ? 1 : 0), 0);
+      // Compatibility fallback for externally supplied debug corpora without postings.
+      if (!(corpus.postings instanceof Map)) {
+        df = 0;
+        identityDf = 0;
+        for (const record of corpus.records || []) {
+          const identityHit = record.fields?.identity?.counts?.has(token) || record.fields?.heading?.counts?.has(token);
+          const bodyHit = record.fields?.body?.counts?.has(token);
+          if (identityHit || bodyHit) df += 1;
+          if (identityHit) identityDf += 1;
+        }
+      }
+      if (!df) continue;
+      if (df > maxDf && !identityDf) continue;
+      anchors.push({
+        token,
+        df,
+        identityDf,
+        rarity: Math.log(1 + corpus.records.length / Math.max(1, df)),
+        score: (identityDf ? 3 : 0) + Math.log(1 + corpus.records.length / Math.max(1, df)) + Math.min(1.2, token.length / 10)
+      });
+    }
+    return anchors
+      .sort((left, right) => right.score - left.score || left.df - right.df || right.token.length - left.token.length)
+      .slice(0, LORE_DYNAMIC_ANCHOR_MAX)
+      .map(item => item.token);
+  };
+
+  const loreDynamicProtection = (entry = {}) => {
+    const lore = entry?.lore || entry || {};
+    const components = entry?.components || lore?.stageReranker?.components || {};
+    const permanent = loreRerankerProtectedActivation(lore);
+    const sharedCoreCandidate = lore?.sharedPoolRerank?.candidateProtected === true
+      || lore?.stageReranker?.candidateProtected === true
+      || lore?.stageReranker?.coverageCritical === true;
+    const sharedCoreInjection = lore?.sharedPoolRerank?.injectionProtected === true
+      || lore?.stageReranker?.injectionProtected === true
+      || lore?.stageReranker?.coverageCritical === true;
+    const hostSelected = lore.hostSelected === true
+      || Number(components.hostSelected || 0) > 0
+      || /^risu_request_selected/.test(text(lore.activationRoute || ''));
+    const keyStrength = Math.max(
+      Number(lore.keyStrength || 0),
+      Number(components.keyStrength || 0),
+      loreActivationKeyStrength(lore)
+    );
+    const exactIdentity = (entry.exactIdentity === true || Number(components.exactIdentity || 0) > 0)
+      && !(entry.identityConflict === true || Number(components.identityConflict || 0) > 0);
+    const candidateProtected = permanent || sharedCoreCandidate || hostSelected || keyStrength >= 0.92 || exactIdentity;
+    const injectionProtected = permanent || sharedCoreInjection || hostSelected || keyStrength >= 0.99 || exactIdentity;
+    const reasons = [];
+    if (permanent) reasons.push('forced_or_always');
+    if (sharedCoreCandidate) reasons.push('shared_core');
+    if (hostSelected) reasons.push('risu_host_selected');
+    if (keyStrength >= 0.99) reasons.push('current_exact_key');
+    else if (keyStrength >= 0.92) reasons.push('terminal_exact_key');
+    if (exactIdentity) reasons.push('exact_identity');
+    return { permanent, hostSelected, keyStrength, exactIdentity, candidateProtected, injectionProtected, reasons };
+  };
+
+  const loreDynamicCoverageSet = (entry = {}, anchors = [], evidence = null) => {
+    const normalizedAnchors = (Array.isArray(anchors) ? anchors : []).map(loreJaccardNormalizeKey).filter(Boolean);
+    if (!normalizedAnchors.length) return new Set();
+    const evidenceCovered = new Set((Array.isArray(evidence?.coveredAnchors) ? evidence.coveredAnchors : [])
+      .map(loreJaccardNormalizeKey).filter(Boolean));
+    if (evidence && evidenceCovered.size) return new Set(normalizedAnchors.filter(token => evidenceCovered.has(token)));
+    const lore = entry?.lore || entry || {};
+    const record = loreFullTextIndexRecord(lore);
+    return new Set(normalizedAnchors.filter(token => (
+      record.fields?.identity?.counts?.has(token)
+      || record.fields?.heading?.counts?.has(token)
+      || record.fields?.body?.counts?.has(token)
+    )));
+  };
+
+  const loreDynamicFeature = (entry = {}, evidence = null) => {
+    const lore = entry?.lore || entry || {};
+    const identity = loreFullTextIndexIdentityText(lore);
+    if (evidence?.text) {
+      return loreMmrPrepareFeature({
+        identity,
+        body: evidence.text,
+        identityTokens: new Set(loreBm25Tokens(identity, 180)),
+        bodyTokens: new Set(loreBm25Tokens(evidence.text, 640)),
+        identityHash: referenceContentHash(identity),
+        bodyHash: referenceContentHash(evidence.text)
+      });
+    }
+    const record = loreFullTextIndexRecord(lore);
+    return loreMmrPrepareFeature({
+      identity,
+      identityTokens: new Set(record.fields?.identity?.counts?.keys?.() || []),
+      bodyTokens: new Set(record.fields?.body?.counts?.keys?.() || []),
+      identityHash: record.identityHash,
+      bodyHash: record.contentHash
+    });
+  };
+
+  const loreAdaptiveSelect = (rankedEntries = [], options = {}) => {
+    const ranked = Array.isArray(rankedEntries) ? rankedEntries : [];
+    const startK = clampInt(options.startK, 1, LORE_DYNAMIC_STAGE_MAX, DEFAULT_STAGE_LORE_RERANK_TOP_K);
+    const configuredMax = clampInt(
+      options.maxK ?? (options.candidatePoolMode ? LORE_DYNAMIC_SHARED_MAX : LORE_DYNAMIC_STAGE_MAX),
+      startK,
+      options.candidatePoolMode ? LORE_DYNAMIC_SHARED_MAX : LORE_DYNAMIC_STAGE_MAX,
+      options.candidatePoolMode ? LORE_DYNAMIC_SHARED_MAX : LORE_DYNAMIC_STAGE_MAX
+    );
+    const budgetChars = Number.isFinite(Number(options.budgetChars))
+      ? Math.max(0, Number(options.budgetChars))
+      : Number.POSITIVE_INFINITY;
+    const lambda = clampNumber(Number(options.lambda ?? (options.candidatePoolMode ? LORE_MMR_SHARED_POOL_LAMBDA : LORE_MMR_STAGE_LAMBDA)), 0.5, 1, LORE_MMR_STAGE_LAMBDA);
+    const fastFrontier = options.fastFrontier === true;
+    const requiredAnchors = Array.from(new Set((Array.isArray(options.requiredAnchors) ? options.requiredAnchors : [])
+      .map(loreJaccardNormalizeKey).filter(Boolean))).slice(0, LORE_DYNAMIC_ANCHOR_MAX);
+    const evidenceOf = typeof options.evidenceOf === 'function' ? options.evidenceOf : (() => null);
+    const coverageOf = typeof options.coverageOf === 'function'
+      ? options.coverageOf
+      : ((entry, evidence) => loreDynamicCoverageSet(entry, requiredAnchors, evidence));
+    const featureOf = typeof options.featureOf === 'function'
+      ? options.featureOf
+      : ((entry, evidence) => loreDynamicFeature(entry, evidence));
+    const relevanceOf = typeof options.relevanceOf === 'function'
+      ? options.relevanceOf
+      : entry => clampNumber(Number(entry.score || 0) * 0.72 + Number(entry.confidenceScore || 0) * 0.28, 0, 1.5, 0);
+    const confidenceOf = typeof options.confidenceOf === 'function'
+      ? options.confidenceOf
+      : entry => Number(entry?.confidenceScore ?? entry?.score ?? 0);
+    const clusterConfidenceFloor = clampNumber(
+      Number(options.clusterConfidenceFloor ?? (options.candidatePoolMode ? 0.08 : 0.05)),
+      0,
+      1.5,
+      options.candidatePoolMode ? 0.08 : 0.05
+    );
+    const clusterConfidenceRatio = clampNumber(
+      Number(options.clusterConfidenceRatio ?? (options.candidatePoolMode ? 0.25 : 0.22)),
+      0,
+      1,
+      options.candidatePoolMode ? 0.25 : 0.22
+    );
+    const fillStartRegardless = options.fillStartRegardless === true;
+    const startConfidenceFloor = clampNumber(
+      Number(options.startConfidenceFloor ?? (options.candidatePoolMode ? 0.055 : 0.05)),
+      0,
+      1.5,
+      options.candidatePoolMode ? 0.055 : 0.05
+    );
+    const startConfidenceRatio = clampNumber(
+      Number(options.startConfidenceRatio ?? 0.18),
+      0,
+      1,
+      0.18
+    );
+    const prepared = ranked.map((entry, order) => {
+      const protection = loreDynamicProtection(entry);
+      const evidence = evidenceOf(entry, protection) || null;
+      const coverage = coverageOf(entry, evidence);
+      const feature = fastFrontier ? null : featureOf(entry, evidence);
+      const estimatedEvidenceChars = evidence?.evidenceChars
+        ? Number(evidence.evidenceChars)
+        : Math.min(
+            text(entry?.lore?.retrievedContent || entry?.lore?.content || '').length,
+            protection.injectionProtected ? LORE_PASSAGE_PROTECTED_EVIDENCE_CHARS : LORE_PASSAGE_DEFAULT_EVIDENCE_CHARS
+          );
+      const cost = options.candidatePoolMode
+        ? 1
+        : Math.max(120, estimatedEvidenceChars + 80);
+      return {
+        entry,
+        order,
+        key: loreContinuityIdentity(entry?.lore || entry) || `adaptive:${order}`,
+        protection,
+        evidence,
+        coverage,
+        feature,
+        relevance: clampNumber(Number(relevanceOf(entry, order) || 0), 0, 1.5, 0),
+        confidence: clampNumber(Number(confidenceOf(entry, order) || 0), 0, 1.5, 0),
+        cost
+      };
+    });
+    const selected = [];
+    const selectedFeatures = [];
+    const covered = new Set();
+    const expansionReasons = new Set();
+    let usedChars = 0;
+    let ordinarySelected = 0;
+    const bestRelevance = Math.max(0, ...prepared.map(item => item.relevance));
+    const bestConfidence = Math.max(0, ...prepared.map(item => item.confidence));
+    const effectiveStartConfidenceFloor = Math.max(startConfidenceFloor, bestConfidence * startConfidenceRatio);
+    let lastSelectedRelevance = bestRelevance;
+
+    const accept = (item, meta = {}) => {
+      selected.push({
+        ...item,
+        adaptive: {
+          engine: LORE_DYNAMIC_SELECTION_VERSION,
+          rank: selected.length + 1,
+          mandatory: item.protection.candidateProtected === true,
+          candidateProtected: item.protection.candidateProtected === true,
+          injectionProtected: item.protection.injectionProtected === true,
+          protectionReasons: item.protection.reasons.slice(),
+          anchorGain: Number(meta.anchorGain || 0),
+          maxSimilarity: Number(Number(meta.maxSimilarity || 0).toFixed(6)),
+          utility: Number(Number(meta.utility || item.relevance || 0).toFixed(6)),
+          costChars: item.cost,
+          evidenceChars: Number(item.evidence?.evidenceChars || 0)
+        }
+      });
+      selectedFeatures.push({ key: item.key, feature: item.feature });
+      item.coverage.forEach(token => covered.add(token));
+      usedChars += item.cost;
+      if (!item.protection.candidateProtected) ordinarySelected += 1;
+      lastSelectedRelevance = item.relevance;
+    };
+
+    const remaining = prepared.slice();
+    // Candidate-protected evidence is never subject to the configured starting count.
+    for (let index = 0; index < remaining.length;) {
+      const item = remaining[index];
+      if (!item.protection.candidateProtected) {
+        index += 1;
+        continue;
+      }
+      remaining.splice(index, 1);
+      accept(item, { anchorGain: Array.from(item.coverage).filter(token => !covered.has(token)).length, utility: item.relevance + 1 });
+    }
+    if (selected.length > startK) expansionReasons.add('mandatory_candidates');
+
+    if (fastFrontier) {
+      // Universe/frontier selection is already sorted by fused relevance. Walk it once in
+      // rank order instead of running pairwise MMR across N×K candidates. Passage-level
+      // coverage-aware MMR still runs later on each stage's much smaller working set.
+      for (const item of remaining) {
+        if (ordinarySelected >= configuredMax && requiredAnchors.every(token => covered.has(token))) break;
+        const gainTokens = Array.from(item.coverage).filter(token => !covered.has(token));
+        const ratio = bestRelevance > 0 ? item.relevance / bestRelevance : 0;
+        const gap = Math.max(0, lastSelectedRelevance - item.relevance);
+        const confidenceSupportsCluster = item.confidence >= Math.max(
+          clusterConfidenceFloor,
+          bestConfidence * clusterConfidenceRatio
+        );
+        const clusterContinues = confidenceSupportsCluster
+          && ratio >= LORE_DYNAMIC_SCORE_CLUSTER_MIN_RATIO
+          && gap <= Math.max(LORE_DYNAMIC_SCORE_CLUSTER_GAP, lastSelectedRelevance * 0.18);
+        const anchorGain = gainTokens.length;
+        const mustFillStart = ordinarySelected < startK
+          && (fillStartRegardless || item.confidence >= effectiveStartConfidenceFloor);
+        if (!mustFillStart && anchorGain <= 0 && !clusterContinues) continue;
+        if (ordinarySelected >= configuredMax && anchorGain <= 0) continue;
+        const budgetFits = usedChars + item.cost <= budgetChars;
+        if (!budgetFits && anchorGain <= 0) continue;
+        const utility = item.relevance + Math.min(0.46, anchorGain * 0.12);
+        accept(item, { anchorGain, maxSimilarity: 0, utility });
+        if (anchorGain > 0 && ordinarySelected > startK) expansionReasons.add('uncovered_anchor');
+        if (clusterContinues && ordinarySelected > startK) expansionReasons.add('flat_relevance_cluster');
+        if (usedChars > budgetChars && anchorGain > 0) expansionReasons.add('required_coverage_budget_overflow');
+      }
+    } else {
+      while (remaining.length) {
+        if (ordinarySelected >= configuredMax && !remaining.some(item => item.protection.candidateProtected)) break;
+        let bestIndex = -1;
+        let best = null;
+        const uncoveredBefore = requiredAnchors.filter(token => !covered.has(token));
+        for (let index = 0; index < remaining.length; index += 1) {
+          const item = remaining[index];
+          const gainTokens = Array.from(item.coverage).filter(token => !covered.has(token));
+          let maxSimilarity = 0;
+          for (const prior of selectedFeatures) maxSimilarity = Math.max(maxSimilarity, loreMmrFeatureSimilarity(item.feature, prior.feature));
+          const ratio = bestRelevance > 0 ? item.relevance / bestRelevance : 0;
+          const gap = Math.max(0, lastSelectedRelevance - item.relevance);
+          const confidenceSupportsCluster = item.confidence >= Math.max(
+            clusterConfidenceFloor,
+            bestConfidence * clusterConfidenceRatio
+          );
+          const clusterContinues = confidenceSupportsCluster
+            && ratio >= LORE_DYNAMIC_SCORE_CLUSTER_MIN_RATIO
+            && gap <= Math.max(LORE_DYNAMIC_SCORE_CLUSTER_GAP, lastSelectedRelevance * 0.18);
+          const anchorGain = gainTokens.length;
+          const mustSelect = item.protection.candidateProtected || anchorGain > 0;
+          const mustFillStart = ordinarySelected < startK
+            && (fillStartRegardless || item.confidence >= effectiveStartConfidenceFloor);
+          const budgetFits = usedChars + item.cost <= budgetChars;
+          const selectable = mustSelect || budgetFits;
+          if (!selectable) continue;
+          if (!mustFillStart && !mustSelect && !clusterContinues) continue;
+          const utility = lambda * item.relevance
+            - (1 - lambda) * maxSimilarity
+            + Math.min(0.46, anchorGain * 0.12)
+            + (item.protection.candidateProtected ? 1 : 0);
+          const evaluated = { item, utility, maxSimilarity, anchorGain, gainTokens, clusterContinues, budgetFits };
+          if (
+            !best
+            || utility > best.utility + 1e-12
+            || (Math.abs(utility - best.utility) <= 1e-12 && anchorGain > best.anchorGain)
+            || (Math.abs(utility - best.utility) <= 1e-12 && anchorGain === best.anchorGain && item.relevance > best.item.relevance + 1e-12)
+            || (Math.abs(utility - best.utility) <= 1e-12 && anchorGain === best.anchorGain && Math.abs(item.relevance - best.item.relevance) <= 1e-12 && item.order < best.item.order)
+          ) {
+            best = evaluated;
+            bestIndex = index;
+          }
+        }
+        if (bestIndex < 0 || !best) break;
+        remaining.splice(bestIndex, 1);
+        accept(best.item, best);
+        if (best.anchorGain > 0 && ordinarySelected > startK) expansionReasons.add('uncovered_anchor');
+        if (best.clusterContinues && ordinarySelected > startK) expansionReasons.add('flat_relevance_cluster');
+        if (usedChars > budgetChars && best.item.protection.injectionProtected) expansionReasons.add('mandatory_budget_overflow');
+        else if (usedChars > budgetChars && best.anchorGain > 0) expansionReasons.add('required_coverage_budget_overflow');
+        if (ordinarySelected >= configuredMax && requiredAnchors.every(token => covered.has(token))) break;
+        const uncoveredAfter = requiredAnchors.filter(token => !covered.has(token));
+        if (ordinarySelected >= startK && !uncoveredAfter.length && uncoveredBefore.length === 0 && !best.clusterContinues) break;
+      }
+    }
+    const selectedKeys = new Set(selected.map(item => item.key));
+    const uncoveredAnchors = requiredAnchors.filter(token => !covered.has(token));
+    if (uncoveredAnchors.length) expansionReasons.add('uncovered_anchor_unresolved');
+    const selectedEntries = selected
+      .sort((left, right) => left.order - right.order)
+      .map(item => ({ ...item.entry, __adaptiveLore: item }));
+    return {
+      engine: LORE_DYNAMIC_SELECTION_VERSION,
+      startK,
+      maxK: configuredMax,
+      finalK: selectedEntries.length,
+      ordinarySelectedCount: ordinarySelected,
+      mandatorySelectedCount: selected.length - ordinarySelected,
+      budgetChars: Number.isFinite(budgetChars) ? budgetChars : 0,
+      usedChars,
+      clusterConfidenceFloor,
+      clusterConfidenceRatio,
+      startConfidenceFloor: effectiveStartConfidenceFloor,
+      fillStartRegardless,
+      fastFrontier,
+      bestConfidence,
+      requiredAnchors,
+      coveredAnchors: Array.from(covered),
+      uncoveredAnchors,
+      expansionReasons: Array.from(expansionReasons),
+      selected: selectedEntries,
+      dropped: prepared.filter(item => !selectedKeys.has(item.key)).map(item => ({
+        key: item.key,
+        reason: usedChars + item.cost > budgetChars && !item.protection.candidateProtected
+          ? 'budget_after_passage_compaction'
+          : ordinarySelected >= configuredMax
+            ? 'dynamic_safety_cap'
+            : 'score_cluster_tail',
+        relevance: Number(item.relevance.toFixed(6)),
+        costChars: item.cost,
+        candidateProtected: item.protection.candidateProtected === true
+      }))
+    };
+  };
+
   const loreMmrSetStats = (leftSet, rightSet) => {
     const left = leftSet instanceof Set ? leftSet : new Set(leftSet || []);
     const right = rightSet instanceof Set ? rightSet : new Set(rightSet || []);
@@ -13734,15 +15361,19 @@ function mergeAgentCbsWarnings(...warningLists) {
   const loreMmrPrepareFeature = (feature = {}) => {
     const identity = text(typeof feature === 'string' ? '' : feature?.identity || '').trim();
     const body = text(typeof feature === 'string' ? feature : feature?.body || '').trim();
-    const identityTokens = new Set(loreBm25Tokens(identity, 180));
-    const bodyTokens = new Set(loreBm25Tokens(body, 560));
+    const identityTokens = feature?.identityTokens instanceof Set
+      ? feature.identityTokens
+      : new Set(loreBm25Tokens(identity, 180));
+    const bodyTokens = feature?.bodyTokens instanceof Set
+      ? feature.bodyTokens
+      : new Set(loreBm25Tokens(body, 560));
     return {
       identity,
       body,
       identityTokens,
       bodyTokens,
-      identityHash: identity ? referenceContentHash(normalizeForLoreMatch(identity)) : '',
-      bodyHash: body ? referenceContentHash(normalizeForLoreMatch(body)) : ''
+      identityHash: text(feature?.identityHash || '') || (identity ? referenceContentHash(normalizeForLoreMatch(identity)) : ''),
+      bodyHash: text(feature?.bodyHash || '') || (body ? referenceContentHash(normalizeForLoreMatch(body)) : '')
     };
   };
 
@@ -13870,17 +15501,29 @@ function mergeAgentCbsWarnings(...warningLists) {
     90
   );
 
-  const loreExactEntityAnchorScore = (query, identityText) => {
-    const queryTokens = loreDistinctiveAnchorTokens(query);
-    const identityTokens = loreDistinctiveAnchorTokens(identityText);
+  const loreExactEntityAnchorScorePrepared = (queryTokens = [], identityTokens = []) => {
+    const queries = Array.isArray(queryTokens) ? queryTokens : [];
+    const identities = Array.isArray(identityTokens) ? identityTokens : [];
+    if (!queries.length || !identities.length) return 0;
+    const normalizedIdentity = new Set(identities.map(loreJaccardNormalizeKey).filter(Boolean));
     let best = 0;
-    queryTokens.forEach((queryToken) => {
-      identityTokens.forEach((identityToken) => {
+    for (const queryToken of queries) {
+      const normalizedQuery = loreJaccardNormalizeKey(queryToken);
+      if (normalizedQuery && normalizedIdentity.has(normalizedQuery)) return 1;
+      for (const identityToken of identities) {
         best = Math.max(best, loreJaccardTokenSimilarity(queryToken, identityToken));
-      });
-    });
+        if (best >= 0.999) return 1;
+      }
+    }
     return best;
   };
+
+  const loreExactEntityAnchorScore = (query, identityText) => (
+    loreExactEntityAnchorScorePrepared(
+      loreDistinctiveAnchorTokens(query),
+      loreDistinctiveAnchorTokens(identityText)
+    )
+  );
 
   const loreExactChunkCoverageScore = (query = '', chunkText = '') => {
     const queryTokens = loreDistinctiveAnchorTokens(query)
@@ -14180,7 +15823,12 @@ function mergeAgentCbsWarnings(...warningLists) {
     if (candidate.activationMin && chatLength < candidate.activationMin) return false;
     if (candidate.activationEvery && chatLength % candidate.activationEvery !== 0) return false;
     const scanDepth = clampInt(candidate.scanDepth || options.defaultScanDepth || DEFAULT_RECENT_TURNS, 1, 128, DEFAULT_RECENT_TURNS);
-    const supportMessages = loreSemanticSearchSupportMessages(currentQuery, terminalQuery, options.recentMessages || [], scanDepth);
+    const supportCache = options.supportMessageCache instanceof Map ? options.supportMessageCache : null;
+    let supportMessages = supportCache?.get(scanDepth) || null;
+    if (!supportMessages) {
+      supportMessages = loreSemanticSearchSupportMessages(currentQuery, terminalQuery, options.recentMessages || [], scanDepth);
+      if (supportCache) supportCache.set(scanDepth, supportMessages);
+    }
     const matchesKeys = (keys, all = false) => loreKeyMatchesSearchMessages(keys, supportMessages, {
       useRegex: candidate.useRegex,
       fullWordMatching: candidate.fullWordMatching === true,
@@ -14613,81 +16261,18 @@ function mergeAgentCbsWarnings(...warningLists) {
     return { exactIdentity: true, conflict: reasons.length > 0, penalty, reasons };
   };
 
-  const loreRerankerRelevantBody = (rawContent = '', query = '', maxChars = 6200) => {
-    const source = text(rawContent || '').trim();
-    const budget = clampInt(maxChars, 1200, 8000, 6200);
-    if (!source || source.length <= budget) return source;
-    const queryText = text(query || '').trim();
-    if (!queryText) return compactMiddle(source, budget);
-    const cacheKey = `stage-lore-relevant-body-v3:${referenceContentHash(source)}:${referenceContentHash(queryText)}:${budget}`;
-    const cached = StageLoreRerankerFeatureCache.get(cacheKey);
-    if (typeof cached === 'string') return cached;
-    const excerptBudget = Math.max(900, Math.min(5600, budget - 700));
-    const excerpt = retrieveLoreExcerptWithJaccard(source, queryText, excerptBudget);
-    const tailGuard = compactMiddle(source, Math.min(1200, Math.max(600, budget - text(excerpt?.text || '').length - 40)));
-    const combined = [text(excerpt?.text || '').trim(), tailGuard].filter(Boolean).join('\n\n');
-    const result = compact(combined || compactMiddle(source, budget), budget);
-    setStageLoreRerankerCache(cacheKey, result);
-    return result;
-  };
-
   const loreBm25fLoreCorpusScores = (lores = [], query = '', maxBodyChars = 6200) => {
     const source = Array.isArray(lores) ? lores : [];
     const queryText = text(query || '').trim();
-    if (!queryText || !source.length) {
-      return {
-        engine: LORE_BM25F_ENGINE_VERSION,
-        k1: LORE_BM25F_K1,
-        queryTokenCount: 0,
-        queryTokens: [],
-        documentCount: source.length,
-        averageFieldLengths: {},
-        scores: source.map((lore, index) => ({
-          id: loreContinuityIdentity(lore) || `lore-${index + 1}`,
-          score: 0,
-          rawScore: 0,
-          matchedTerms: [],
-          fieldRaw: {}
-        }))
-      };
-    }
-    const corpusHasher = createTextHasher();
-    source.forEach((lore) => {
-      corpusHasher.update(loreContinuityIdentity(lore));
-      corpusHasher.update(referenceContentHash(text(lore?.content || lore?.retrievedContent || '')));
-    });
-    const cacheKey = `stage-lore-bm25f-corpus-v2:${corpusHasher.digest()}:${referenceContentHash(queryText)}:${maxBodyChars}`;
+    const corpus = loreFullTextIndexCorpus(source);
+    const cacheKey = `stage-lore-bm25f-corpus-v4-fullindex:${corpus.signature}:${referenceContentHash(queryText)}:${maxBodyChars}`;
     const cached = StageLoreRerankerFeatureCache.get(cacheKey);
-    if (cached?.engine === LORE_BM25F_ENGINE_VERSION && Array.isArray(cached?.scores)) return cached;
-    const documents = source.map((lore, index) => {
-      const rawContent = text(lore?.content || lore?.retrievedContent || '').trim();
-      const identity = [
-        lore?.label,
-        lore?.key,
-        ...(Array.isArray(lore?.keys) ? lore.keys : []),
-        ...(Array.isArray(lore?.secondaryKeys) ? lore.secondaryKeys : []),
-        lore?.source,
-        lore?.moduleName,
-        lore?.moduleNamespace
-      ].filter(Boolean).join(' ');
-      const headings = loreJaccardSplitSections(rawContent)
-        .map(section => section.path?.join(' > ') || section.heading || '')
-        .filter(Boolean)
-        .slice(0, 96)
-        .join('\n');
-      const body = queryText
-        ? loreRerankerRelevantBody(rawContent, queryText, maxBodyChars)
-        : compactMiddle(rawContent, Math.min(maxBodyChars, 6200));
-      return {
-        id: loreContinuityIdentity(lore) || `lore-${index + 1}`,
-        fields: { identity, heading: headings, body }
-      };
-    });
-    const result = loreBm25fScoreDocuments(
+    if (cached?.engine === LORE_BM25F_ENGINE_VERSION && cached?.fullIndexEngine === LORE_FULL_TEXT_INDEX_VERSION && Array.isArray(cached?.scores)) return cached;
+    const result = loreFullTextBm25fCorpusScores(
+      source,
       queryText,
-      documents,
       LORE_BM25F_LORE_FIELD_DEFS,
-      { queryLimit: 240, uniqueQueryLimit: 160, scoreScale: 1.65 }
+      { queryLimit: 240, uniqueQueryLimit: 160, scoreScale: 1.65, corpus }
     );
     setStageLoreRerankerCache(cacheKey, result);
     return result;
@@ -14696,22 +16281,17 @@ function mergeAgentCbsWarnings(...warningLists) {
   const scoreLoreForStageReranker = (lore = {}, stageName = 'shadow_act', primaryQuery = '', terminalQuery = '', bm25fScores = {}) => {
     const rerankerStage = loreRerankerStageName(stageName) || 'shadow_act';
     const def = STAGE_LORE_RERANKER_DEFS[rerankerStage] || STAGE_LORE_RERANKER_DEFS.shadow_act;
-    const identity = [
-      lore.label, lore.key, ...(Array.isArray(lore.keys) ? lore.keys : []),
-      lore.source, lore.moduleName, lore.moduleNamespace
-    ].filter(Boolean).join(' ');
-    const rawContent = lore.content || lore.retrievedContent || '';
-    const staticHash = createTextHasher().update(identity).update(rawContent).digest();
+    const identity = loreFullTextIndexIdentityText(lore);
+    const fullIndex = loreFullTextIndexRecord(lore);
+    const staticHash = `${fullIndex.identityHash}:${fullIndex.contentHash}`;
     const queryHash = createTextHasher().update(primaryQuery).update(terminalQuery).digest();
-    const baseCacheKey = `stage-lore-base-v2:${staticHash}:${queryHash}`;
+    const baseCacheKey = `stage-lore-base-v4-fullindex:${staticHash}:${queryHash}`;
     let base = StageLoreRerankerFeatureCache.get(baseCacheKey);
     if (!base) {
-      const currentBody = loreRerankerRelevantBody(rawContent, primaryQuery || terminalQuery, 6200);
-      const terminalBody = loreRerankerRelevantBody(rawContent, terminalQuery || primaryQuery, 4200);
       const disambiguation = loreRerankerIdentityConflict(lore, primaryQuery, terminalQuery);
       base = {
-        current: primaryQuery ? loreJaccardScoreText(primaryQuery, `${identity}\n${currentBody}`, identity).score : 0,
-        terminal: terminalQuery ? loreJaccardScoreText(terminalQuery, `${identity}\n${terminalBody}`, identity).score : 0,
+        current: primaryQuery ? loreFullTextLexicalScore(fullIndex, primaryQuery).score : 0,
+        terminal: terminalQuery ? loreFullTextLexicalScore(fullIndex, terminalQuery).score : 0,
         identity: (primaryQuery || terminalQuery)
           ? loreExactEntityAnchorScore(`${primaryQuery}\n${terminalQuery}`, identity)
           : 0,
@@ -14719,7 +16299,7 @@ function mergeAgentCbsWarnings(...warningLists) {
         identityConflict: disambiguation.conflict === true,
         identityPenalty: Number(disambiguation.penalty || 0),
         identityConflictReasons: disambiguation.reasons || [],
-        sectioned: text(rawContent || '').length > 6200,
+        sectioned: Number(fullIndex.chars || 0) > 6200,
         existing: clampNumber(
           Math.max(Number(lore.retrieval?.score || 0), Number(lore.jaccardPromotion?.score || 0)),
           0, 1.2, 0
@@ -14727,11 +16307,10 @@ function mergeAgentCbsWarnings(...warningLists) {
       };
       setStageLoreRerankerCache(baseCacheKey, base);
     }
-    const domainCacheKey = `stage-lore-domain-v2:${rerankerStage}:${staticHash}`;
+    const domainCacheKey = `stage-lore-domain-v4-fullindex:${rerankerStage}:${staticHash}`;
     let domain = StageLoreRerankerFeatureCache.get(domainCacheKey);
     if (domain == null) {
-      const domainBody = loreRerankerRelevantBody(rawContent, def.domainQuery || primaryQuery || terminalQuery, 6200);
-      domain = def.domainQuery ? loreJaccardScoreText(def.domainQuery, `${identity}\n${domainBody}`, identity).score : 0;
+      domain = def.domainQuery ? loreFullTextLexicalScore(fullIndex, def.domainQuery).score : 0;
       setStageLoreRerankerCache(domainCacheKey, domain);
     }
     const currentJaccard = Number(base.current || 0);
@@ -14746,9 +16325,6 @@ function mergeAgentCbsWarnings(...warningLists) {
     const terminal = terminalQuery
       ? clampNumber(terminalBm25f * 0.56 + terminalJaccard * 0.44, 0, 1.2, 0)
       : 0;
-    // Domain routing is a static classifier rather than a retrieval query.
-    // Keep the cheaper cached Jaccard domain signal here; BM25F is reserved for
-    // the live current/terminal evidence where corpus IDF has real retrieval value.
     const domainCombined = def.domainQuery ? domainJaccard : 0;
     const identityScore = Number(base.identity || 0);
     const existing = Number(base.existing || 0);
@@ -14785,6 +16361,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       identityConflict: base.identityConflict === true,
       identityConflictReasons: Array.isArray(base.identityConflictReasons) ? base.identityConflictReasons : [],
       components: {
+        fullIndex: 1,
         current,
         currentJaccard,
         currentBm25f,
@@ -14818,7 +16395,205 @@ function mergeAgentCbsWarnings(...warningLists) {
     };
   };
 
+  const loreSharedPrefilterCandidates = (semanticLore = [], keyActiveLore = [], hostSelectedLore = [], currentQuery = '', terminalQuery = '', options = {}) => {
+    const startedAt = Date.now();
+    const merged = mergeLoreCandidateSignals(semanticLore, keyActiveLore, hostSelectedLore);
+    const startK = clampInt(options.topK ?? DEFAULT_SHARED_LORE_PREFILTER_TOP_K, 8, 96, DEFAULT_SHARED_LORE_PREFILTER_TOP_K);
+    const primaryQuery = compact(currentQuery || '', 2400);
+    const supportQuery = compact(terminalQuery || '', INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS);
+    const identityQuery = [primaryQuery, supportQuery].filter(Boolean).join('\n');
+    const currentLexicalProfile = loreFullTextLexicalQueryProfile(primaryQuery);
+    const terminalLexicalProfile = loreFullTextLexicalQueryProfile(supportQuery);
+    const identityQueryTokens = loreDistinctiveAnchorTokens(identityQuery);
+    const corpus = loreFullTextIndexCorpus(merged, { slot: 'universe' });
+    const fuzzyIdentityProfile = loreIdentityFuzzyQueryProfile(identityQuery);
+    const fuzzyIdentityScores = loreFullTextFuzzyIdentityScores(corpus, fuzzyIdentityProfile);
+    const fieldDefs = {
+      identity: { weight: 4.8, b: 0.10 },
+      heading: { weight: 2.6, b: 0.24 },
+      body: { weight: 1.0, b: 0.72 }
+    };
+    const currentBm25f = loreFullTextBm25fCorpusScores(merged, primaryQuery, fieldDefs, { queryLimit: 140, uniqueQueryLimit: 96, scoreScale: 1.45, corpus });
+    const terminalBm25f = loreFullTextBm25fCorpusScores(merged, supportQuery, fieldDefs, { queryLimit: 100, uniqueQueryLimit: 72, scoreScale: 1.55, corpus });
+    const scored = merged.map((lore, order) => {
+      const record = corpus.records[order] || loreFullTextIndexRecord(lore);
+      const currentDetail = currentBm25f.scores[order] || { score: 0, matchedTerms: [] };
+      const terminalDetail = terminalBm25f.scores[order] || { score: 0, matchedTerms: [] };
+      const currentLexical = currentLexicalProfile.size ? loreFullTextLexicalScorePrepared(record, currentLexicalProfile).score : 0;
+      const terminalLexical = terminalLexicalProfile.size ? loreFullTextLexicalScorePrepared(record, terminalLexicalProfile).score : 0;
+      const identityText = record.identityText || loreFullTextIndexIdentityText(lore);
+      // The universe pass uses exact indexed identity/heading evidence only. Fuzzy
+      // identity disambiguation remains in the precision stage reranker on the much
+      // smaller adaptive pool, avoiding all-lore token-pair n-gram comparisons.
+      const exactIdentityAnchor = identityQueryTokens.length
+        ? loreFullTextExactAnchorScorePrepared(record, identityQueryTokens)
+        : 0;
+      const identity = identityQueryTokens.length
+        ? Math.max(exactIdentityAnchor, Number(fuzzyIdentityScores.get(order) || 0))
+        : 0;
+      // Fuzzy identity is a recall/ranking aid, not proof that a lore is the exact current
+      // entity. Candidate-protection requires an exact hit in the indexed identity field;
+      // heading-only/fuzzy similarity may improve rank but cannot make a whole similar-name
+      // family mandatory. This stays O(query tokens), with no per-lore alias re-tokenization.
+      const literalIdentity = exactIdentityAnchor >= 1;
+      const protectedActivation = loreRerankerProtectedActivation(lore);
+      const hostSelected = lore.hostSelected === true || /^risu_request_selected/.test(text(lore.activationRoute || ''));
+      const keyStrength = Math.max(Number(lore.keyStrength || 0), loreActivationKeyStrength(lore));
+      const priority = clampNumber(Math.max(0, Number(lore.priority || 0)) / 1000, 0, 1, 0);
+      const currentScore = Number(currentDetail.score || 0) * 0.60 + currentLexical * 0.40;
+      const terminalScore = Number(terminalDetail.score || 0) * 0.58 + terminalLexical * 0.42;
+      const confidenceScore = clampNumber(
+        currentScore * 0.58
+        + terminalScore * 0.18
+        + identity * 0.14
+        + (hostSelected ? 0.07 : 0)
+        + keyStrength * 0.03,
+        0,
+        1.2,
+        0
+      );
+      const matchedTokens = Array.from(new Set([
+        ...(currentDetail.matchedTerms || []).map(item => loreJaccardNormalizeKey(item?.token)),
+        ...(terminalDetail.matchedTerms || []).map(item => loreJaccardNormalizeKey(item?.token))
+      ].filter(Boolean)));
+      return {
+        lore, order, protectedActivation, hostSelected, keyStrength, identity, identityText, priority,
+        matchedTokens,
+        currentBm25f: Number(currentDetail.score || 0),
+        terminalBm25f: Number(terminalDetail.score || 0),
+        currentLexical, terminalLexical,
+        confidenceScore,
+        exactIdentity: literalIdentity === true,
+        identityConflict: false,
+        components: {
+          currentBm25f: Number(currentDetail.score || 0),
+          currentJaccard: currentLexical,
+          terminalBm25f: Number(terminalDetail.score || 0),
+          terminalJaccard: terminalLexical,
+          identityApplied: identity,
+          exactIdentity: literalIdentity === true ? 1 : 0,
+          hostSelected: hostSelected ? 1 : 0,
+          keyStrength
+        }
+      };
+    });
+    const rrf = loreRrfFuse(scored, [
+      { name: 'current_bm25f_full', weight: 1.00, minScore: 0, score: entry => entry.currentBm25f },
+      { name: 'current_jaccard_full', weight: 0.76, minScore: 0, score: entry => entry.currentLexical },
+      { name: 'terminal_bm25f_full', weight: 0.46, minScore: 0, score: entry => entry.terminalBm25f },
+      { name: 'terminal_jaccard_full', weight: 0.34, minScore: 0, score: entry => entry.terminalLexical },
+      { name: 'identity', weight: 0.72, minScore: 0.30, score: entry => entry.identity },
+      { name: 'risu_host_selected', weight: 0.68, minScore: 0.5, score: entry => entry.hostSelected ? 1 : 0 },
+      { name: 'activation_key', weight: 0.62, minScore: 0.15, score: entry => entry.keyStrength },
+      { name: 'priority', weight: 0.12, minScore: 0.02, score: entry => entry.priority }
+    ], { keyOf: entry => `prefilter:${entry.order}` });
+    const ranked = scored.map((entry, index) => {
+      const fusion = rrf.scores[index] || { score: 0, ranks: {}, contributions: {} };
+      return {
+        ...entry,
+        score: Number(fusion.score || 0),
+        rrfScore: Number(fusion.score || 0),
+        rrfRanks: fusion.ranks || {},
+        rrfContributions: fusion.contributions || {}
+      };
+    }).sort((left, right) => (
+      Number(right.protectedActivation) - Number(left.protectedActivation)
+      || right.score - left.score
+      || right.confidenceScore - left.confidenceScore
+      || Number(right.hostSelected) - Number(left.hostSelected)
+      || right.keyStrength - left.keyStrength
+      || right.identity - left.identity
+      || right.priority - left.priority
+      || left.order - right.order
+    ));
+    const requiredAnchors = loreDynamicRequiredAnchors(ranked, primaryQuery, supportQuery, { corpus });
+    const adaptive = loreAdaptiveSelect(ranked, {
+      startK,
+      maxK: Math.min(LORE_DYNAMIC_SHARED_MAX, Math.max(startK, clampInt(options.maxK ?? LORE_DYNAMIC_SHARED_MAX, startK, LORE_DYNAMIC_SHARED_MAX, LORE_DYNAMIC_SHARED_MAX))),
+      candidatePoolMode: true,
+      fillStartRegardless: true,
+      fastFrontier: true,
+      requiredAnchors,
+      lambda: LORE_MMR_SHARED_POOL_LAMBDA,
+      relevanceOf: entry => clampNumber(Number(entry.score || 0) * 0.68 + Number(entry.confidenceScore || 0) * 0.32, 0, 1.5, 0),
+      // The universe frontier compares only evidence that matched this request. Building
+      // a full-body token Set for every lore would duplicate the inverted index and turn
+      // MMR into the dominant warm-path cost. Stage selection later performs passage-level
+      // MMR on the small shared pool, so this first frontier needs only query evidence.
+      coverageOf: entry => {
+        const matched = new Set((entry.matchedTokens || []).map(loreJaccardNormalizeKey).filter(Boolean));
+        return new Set(requiredAnchors.filter(token => matched.has(token)));
+      },
+      featureOf: entry => loreMmrPrepareFeature({
+        identity: entry.identityText || loreFullTextIndexIdentityText(entry.lore),
+        identityTokens: new Set(loreBm25Tokens(entry.identityText || loreFullTextIndexIdentityText(entry.lore), 120)),
+        bodyTokens: new Set(entry.matchedTokens || []),
+        identityHash: referenceContentHash(entry.identityText || loreFullTextIndexIdentityText(entry.lore)),
+        bodyHash: referenceContentHash((entry.matchedTokens || []).slice().sort().join('|'))
+      })
+    });
+    const selectedEntries = adaptive.selected.map((entry, index) => {
+      const adaptiveMeta = entry.__adaptiveLore?.adaptive || {};
+      return {
+        ...entry.lore,
+        sharedPrefilter: {
+          engine: LORE_SHARED_PREFILTER_ENGINE_VERSION,
+          fullIndexEngine: LORE_FULL_TEXT_INDEX_VERSION,
+          dynamicEngine: LORE_DYNAMIC_SELECTION_VERSION,
+          fullContentSearched: true,
+          rank: index + 1,
+          score: Number(entry.score.toFixed(4)),
+          confidenceScore: Number(entry.confidenceScore.toFixed(4)),
+          rrfRanks: entry.rrfRanks || {},
+          hostSelected: entry.hostSelected === true,
+          keyStrength: Number(entry.keyStrength.toFixed(4)),
+          identity: Number(entry.identity.toFixed(4)),
+          protectedActivation: entry.protectedActivation === true,
+          candidateProtected: adaptiveMeta.candidateProtected === true,
+          injectionProtected: adaptiveMeta.injectionProtected === true,
+          protectionReasons: adaptiveMeta.protectionReasons || [],
+          anchorGain: Number(adaptiveMeta.anchorGain || 0),
+          utility: Number(adaptiveMeta.utility || 0)
+        }
+      };
+    });
+    const selectedIds = new Set(selectedEntries.map(loreContinuityIdentity));
+    return {
+      engine: LORE_SHARED_PREFILTER_ENGINE_VERSION,
+      fullIndexEngine: LORE_FULL_TEXT_INDEX_VERSION,
+      dynamicEngine: LORE_DYNAMIC_SELECTION_VERSION,
+      fullContentSearched: true,
+      selected: selectedEntries,
+      inputCount: merged.length,
+      evaluatedCount: merged.length,
+      sampledOutCount: 0,
+      indexedLoreCount: corpus.documentCount,
+      indexedChars: corpus.indexedChars,
+      indexReusedCount: corpus.reusedCount,
+      indexRebuiltCount: corpus.rebuiltCount,
+      selectedCount: selectedEntries.length,
+      protectedSelectedCount: adaptive.mandatorySelectedCount,
+      topK: startK,
+      startK,
+      finalK: adaptive.finalK,
+      maxK: adaptive.maxK,
+      requiredAnchors: adaptive.requiredAnchors,
+      coveredAnchors: adaptive.coveredAnchors,
+      uncoveredAnchors: adaptive.uncoveredAnchors,
+      expansionReasons: adaptive.expansionReasons,
+      elapsedMs: Math.max(0, Date.now() - startedAt),
+      rrf: { activeRankers: rrf.activeRankers || [], activeWeight: Number(Number(rrf.activeWeight || 0).toFixed(4)) },
+      dropped: merged.filter(lore => !selectedIds.has(loreContinuityIdentity(lore))).slice(0, 128).map(lore => ({
+        id: loreContinuityIdentity(lore),
+        label: lore.label || '',
+        reason: adaptive.dropped.find(item => item.key === loreContinuityIdentity(lore))?.reason || 'score_cluster_tail'
+      }))
+    };
+  };
+
   const rerankLoreForStage = (activeLore = [], stageName = 'shadow_act', options = {}) => {
+    const rerankStartedAt = Date.now();
+    const deadlineAt = Number(options.deadlineAt || 0);
     const rerankerStage = loreRerankerStageName(stageName);
     const rawSource = Array.isArray(activeLore) ? activeLore : [];
     const source = rawSource.filter(lore => (
@@ -14854,6 +16629,9 @@ function mergeAgentCbsWarnings(...warningLists) {
     const terminalQuery = compact(options.terminalQuery || '', INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS);
     const bm25fCurrentCorpus = loreBm25fLoreCorpusScores(source, primaryQuery, 6200);
     const bm25fTerminalCorpus = loreBm25fLoreCorpusScores(source, terminalQuery, 4200);
+    // v0.25.77: once the full-text index has searched every permitted lore, precision
+    // reranking also scores every candidate in its bounded result pool. Do not use a
+    // wall-clock cutoff that can silently leave later lore unscored.
     const scoredEntries = source.map((lore, order) => {
       const scored = scoreLoreForStageReranker(
         lore,
@@ -14868,6 +16646,8 @@ function mergeAgentCbsWarnings(...warningLists) {
       );
       return { lore, order, ...scored };
     });
+    const timedOut = false;
+    const timeoutDropped = [];
     const rrf = loreRrfFuse(scoredEntries, [
       {
         name: 'current_bm25f', weight: 1.00, minScore: 0,
@@ -14938,6 +16718,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     const effectiveFloor = Math.max(effectiveAbsoluteFloor, bestConfidenceScore * effectiveRelativeFloor);
     const eligible = ranked.filter(entry => (
       entry.protectedActivation
+      || loreDynamicProtection(entry).candidateProtected
       || entry.confidenceScore >= effectiveFloor
       || (candidatePoolMode && (Number(entry.components?.hostSelected || 0) > 0 || Number(entry.components?.keyStrength || 0) > 0) && entry.rrfScore > 0)
       || (
@@ -14947,76 +16728,174 @@ function mergeAgentCbsWarnings(...warningLists) {
       )
     ));
 
-    // Top-K is a relevance slot budget, not permission to evict force/always-active lore.
-    // Protected entries survive unconditionally. Ordinary slots are diversified with MMR
-    // after RRF, so near-duplicate lore cannot monopolize a limited stage view.
-    const protectedEntries = eligible.filter(entry => entry.protectedActivation);
-    const ordinaryEligible = eligible.filter(entry => !entry.protectedActivation);
+    // v0.25.78: the configured value is a starting frontier, not a hard cut. The
+    // selector expands for candidate-protected evidence, uncovered query anchors and
+    // flat relevance clusters, then constrains optional evidence by the actual lore
+    // budget. Long lore contributes query-ranked passages built from its complete source.
+    const requiredAnchors = loreDynamicRequiredAnchors(eligible, primaryQuery, terminalQuery);
+    const budgetChars = candidatePoolMode
+      ? Number.POSITIVE_INFINITY
+      : clampInt(options.budgetChars ?? 32000, 1000, 160000, 32000);
+    const dynamicMaxK = candidatePoolMode
+      ? Math.min(LORE_DYNAMIC_SHARED_MAX, Math.max(topK, clampInt(options.maxK ?? LORE_DYNAMIC_SHARED_MAX, topK, LORE_DYNAMIC_SHARED_MAX, LORE_DYNAMIC_SHARED_MAX)))
+      : Math.min(
+          LORE_DYNAMIC_STAGE_MAX,
+          Math.max(topK, clampInt(options.maxK ?? Math.max(topK, Math.floor(budgetChars / 650)), topK, LORE_DYNAMIC_STAGE_MAX, LORE_DYNAMIC_STAGE_MAX))
+        );
+    const evidenceQuery = [primaryQuery, terminalQuery, def.domainQuery || ''].filter(Boolean).join('\n');
     const mmrLambda = candidatePoolMode ? LORE_MMR_SHARED_POOL_LAMBDA : LORE_MMR_STAGE_LAMBDA;
-    const protectedSeeds = protectedEntries.filter(entry => (
-      Number(entry.confidenceScore || 0) >= effectiveFloor
-      || (entry.exactIdentity && !entry.identityConflict)
-    ));
-    const mmrSelection = loreMmrSelect(ordinaryEligible, {
-      limit: topK,
+    const evidencePrecomputeLimit = candidatePoolMode
+      ? 0
+      : Math.min(eligible.length, Math.max(24, topK * 3, Math.min(dynamicMaxK, 64)));
+    const evidencePrecomputeIds = new Set(eligible.slice(0, evidencePrecomputeLimit).map(entry => loreContinuityIdentity(entry.lore)));
+    const buildStageEvidence = (entry, protection) => {
+      const sourceChars = text(entry?.lore?.content || entry?.lore?.retrievedContent || '').length;
+      const documentAnchorCount = loreDynamicCoverageSet(entry, requiredAnchors, null).size;
+      const baseChars = protection.injectionProtected
+        ? LORE_PASSAGE_PROTECTED_EVIDENCE_CHARS
+        : LORE_PASSAGE_DEFAULT_EVIDENCE_CHARS;
+      const anchorScaled = baseChars + Math.max(0, documentAnchorCount - 2) * (protection.injectionProtected ? 900 : 700);
+      const expectedEvidenceUnits = Math.max(
+        1,
+        topK,
+        Math.min(dynamicMaxK, requiredAnchors.length || topK)
+      );
+      const fairEvidenceShare = budgetChars / expectedEvidenceUnits;
+      const budgetShareCap = Math.max(
+        600,
+        Math.floor(fairEvidenceShare * (protection.injectionProtected ? 1.80 : 1.10))
+      );
+      const dynamicEvidenceChars = Math.min(
+        12000,
+        sourceChars || 12000,
+        Math.max(600, Math.min(anchorScaled, budgetShareCap))
+      );
+      return loreBuildPassageEvidence(entry.lore, evidenceQuery, {
+        protected: protection.injectionProtected,
+        stage: rerankerStage,
+        requiredAnchors,
+        maxChars: dynamicEvidenceChars,
+        maxItems: LORE_PASSAGE_MAX_EVIDENCE_ITEMS
+      });
+    };
+    const adaptiveSelection = loreAdaptiveSelect(eligible, {
+      startK: topK,
+      maxK: dynamicMaxK,
+      candidatePoolMode,
+      budgetChars,
+      requiredAnchors,
       lambda: mmrLambda,
-      seedEntries: protectedSeeds,
-      relevanceOf: entry => clampNumber(Number(entry.score || 0) * 0.72 + Number(entry.confidenceScore || 0) * 0.28, 0, 1.2, 0),
-      featureOf: entry => {
-        const lore = entry.lore || {};
-        const identity = [lore.label, lore.key, ...(Array.isArray(lore.keys) ? lore.keys : []), lore.moduleName, lore.source].filter(Boolean).join(' ');
-        const rawContent = lore.retrievedContent || lore.content || '';
-        // MMR only needs a stable redundancy fingerprint; do not rerun the expensive
-        // section retriever here because BM25F/RRF already established relevance.
-        return {
-          identity,
-          body: compactMiddle(rawContent, candidatePoolMode ? 3000 : 2400)
-        };
-      },
-      keyOf: entry => loreContinuityIdentity(entry.lore) || `lore:${entry.order}`
+      relevanceOf: entry => clampNumber(Number(entry.score || 0) * 0.72 + Number(entry.confidenceScore || 0) * 0.28, 0, 1.5, 0),
+      evidenceOf: candidatePoolMode
+        ? (() => null)
+        : ((entry, protection) => {
+            const coversRequiredAnchor = requiredAnchors.length > 0
+              && loreDynamicCoverageSet(entry, requiredAnchors, null).size > 0;
+            return protection.candidateProtected
+              || coversRequiredAnchor
+              || evidencePrecomputeIds.has(loreContinuityIdentity(entry.lore))
+              ? buildStageEvidence(entry, protection)
+              : null;
+          }),
+      coverageOf: (entry, evidence) => loreDynamicCoverageSet(entry, requiredAnchors, evidence),
+      featureOf: (entry, evidence) => loreDynamicFeature(entry, evidence)
     });
-    const normalEntries = mmrSelection.selected;
-    const mmrByOrder = new Map(normalEntries.map(entry => [entry.order, entry.mmr || null]));
-    const selectedOrderSet = new Set([...protectedEntries, ...normalEntries].map(entry => entry.order));
-    const selectedEntries = ranked.filter(entry => selectedOrderSet.has(entry.order));
+    const selectedEntries = adaptiveSelection.selected;
     const selectedOrders = new Set(selectedEntries.map(entry => entry.order));
     const eligibleOrders = new Set(eligible.map(entry => entry.order));
+    const adaptiveDropByKey = new Map((adaptiveSelection.dropped || []).map(item => [item.key, item]));
     const selected = selectedEntries.map((entry, index) => {
-      const mmrMeta = mmrByOrder.get(entry.order) || null;
-      return ({
-      ...entry.lore,
-      stageReranker: {
-        engine: STAGE_LORE_RERANKER_VERSION,
-        bm25fEngine: LORE_BM25F_ENGINE_VERSION,
-        rrfEngine: LORE_RRF_ENGINE_VERSION,
-        rrfK: LORE_RRF_K,
-        stage: rerankerStage,
-        rank: index + 1,
-        score: Number(entry.score.toFixed(4)),
-        confidenceScore: Number(entry.confidenceScore.toFixed(4)),
-        rrfScore: Number(entry.rrfScore.toFixed(4)),
-        rrfRanks: entry.rrfRanks || {},
-        effectiveFloor: Number(effectiveFloor.toFixed(4)),
-        protectedActivation: entry.protectedActivation === true,
-        exactIdentity: entry.exactIdentity === true,
-        identityConflict: entry.identityConflict === true,
-        identityConflictReasons: entry.identityConflictReasons || [],
-        mmrEngine: LORE_MMR_ENGINE_VERSION,
-        mmrSelected: mmrMeta != null,
-        mmrRank: Number(mmrMeta?.rank || 0),
-        mmrScore: Number(mmrMeta?.score || 0),
-        mmrRelevance: Number(mmrMeta?.relevance || 0),
-        mmrMaxSimilarity: Number(mmrMeta?.maxSimilarity || 0),
-        mmrSimilarTo: mmrMeta?.similarTo || '',
-        components: Object.fromEntries(Object.entries(entry.components).map(([key, value]) => [key, Number(Number(value || 0).toFixed(4))]))
-      }
-    });
+      const adaptive = entry.__adaptiveLore || {};
+      const adaptiveMeta = adaptive.adaptive || {};
+      const protection = loreDynamicProtection(entry);
+      const evidence = candidatePoolMode
+        ? null
+        : (adaptive.evidence || buildStageEvidence(entry, protection));
+      const retrievedContent = candidatePoolMode
+        ? text(entry.lore.retrievedContent || entry.lore.content || '')
+        : text(evidence?.text || entry.lore.retrievedContent || entry.lore.content || '');
+      return {
+        ...entry.lore,
+        retrievedContent,
+        passageEvidence: evidence ? {
+          engine: evidence.engine || LORE_PASSAGE_INDEX_VERSION,
+          whole: evidence.whole === true,
+          sourceChars: Number(evidence.sourceChars || text(entry.lore.content || '').length),
+          evidenceChars: Number(evidence.evidenceChars || retrievedContent.length),
+          requestedAnchors: evidence.requestedAnchors || [],
+          coveredAnchors: evidence.coveredAnchors || [],
+          uncoveredAnchors: evidence.uncoveredAnchors || [],
+          passages: (evidence.passages || []).map(item => ({
+            id: item.id,
+            order: item.order,
+            start: item.start,
+            end: item.end,
+            heading: item.heading || '',
+            chars: item.chars,
+            confidenceScore: item.confidenceScore,
+            bm25f: item.bm25f,
+            coverage: item.coverage,
+            exact: item.exact,
+            coveredAnchors: item.coveredAnchors || [],
+            maxSimilarity: item.maxSimilarity,
+            utility: item.utility,
+            block: item.block || ''
+          }))
+        } : null,
+        stageReranker: {
+          engine: STAGE_LORE_RERANKER_VERSION,
+          bm25fEngine: LORE_BM25F_ENGINE_VERSION,
+          fullIndexEngine: LORE_FULL_TEXT_INDEX_VERSION,
+          passageIndexEngine: LORE_PASSAGE_INDEX_VERSION,
+          dynamicEngine: LORE_DYNAMIC_SELECTION_VERSION,
+          rrfEngine: LORE_RRF_ENGINE_VERSION,
+          rrfK: LORE_RRF_K,
+          stage: rerankerStage,
+          rank: index + 1,
+          score: Number(entry.score.toFixed(4)),
+          confidenceScore: Number(entry.confidenceScore.toFixed(4)),
+          rrfScore: Number(entry.rrfScore.toFixed(4)),
+          rrfRanks: entry.rrfRanks || {},
+          effectiveFloor: Number(effectiveFloor.toFixed(4)),
+          protectedActivation: entry.protectedActivation === true,
+          candidateProtected: adaptiveMeta.candidateProtected === true,
+          injectionProtected: adaptiveMeta.injectionProtected === true,
+          protectionReasons: adaptiveMeta.protectionReasons || [],
+          coverageCritical: Number(adaptiveMeta.anchorGain || 0) > 0,
+          anchorGain: Number(adaptiveMeta.anchorGain || 0),
+          evidenceChars: Number(adaptiveMeta.evidenceChars || evidence?.evidenceChars || 0),
+          exactIdentity: entry.exactIdentity === true,
+          identityConflict: entry.identityConflict === true,
+          identityConflictReasons: entry.identityConflictReasons || [],
+          mmrEngine: LORE_MMR_ENGINE_VERSION,
+          mmrSelected: true,
+          mmrRank: index + 1,
+          mmrScore: Number(adaptiveMeta.utility || 0),
+          mmrRelevance: Number(adaptive.relevance || 0),
+          mmrMaxSimilarity: Number(adaptiveMeta.maxSimilarity || 0),
+          mmrSimilarTo: '',
+          dynamic: {
+            startK: adaptiveSelection.startK,
+            finalK: adaptiveSelection.finalK,
+            maxK: adaptiveSelection.maxK,
+            expansionReasons: adaptiveSelection.expansionReasons,
+            requiredAnchorCount: adaptiveSelection.requiredAnchors.length,
+            coveredAnchorCount: adaptiveSelection.coveredAnchors.length,
+            uncoveredAnchors: adaptiveSelection.uncoveredAnchors,
+            budgetChars: adaptiveSelection.budgetChars,
+            usedChars: adaptiveSelection.usedChars
+          },
+          components: Object.fromEntries(Object.entries(entry.components).map(([key, value]) => [key, Number(Number(value || 0).toFixed(4))]))
+        }
+      };
     });
     const rankedDropped = ranked.filter(entry => !selectedOrders.has(entry.order)).map(entry => {
       const identityBypass = entry.exactIdentity
         && !entry.identityConflict
         && Number(entry.components.identity || 0) >= Number(def.identityBypass || 1);
       const passedFloor = entry.protectedActivation || entry.confidenceScore >= effectiveFloor || identityBypass;
+      const key = loreContinuityIdentity(entry.lore) || `adaptive:${entry.order}`;
+      const adaptiveDrop = adaptiveDropByKey.get(key);
       return {
         id: loreContinuityIdentity(entry.lore),
         label: entry.lore.label,
@@ -15029,20 +16908,25 @@ function mergeAgentCbsWarnings(...warningLists) {
         rank: ranked.indexOf(entry) + 1,
         reason: entry.identityConflict && !passedFloor
           ? 'identity_conflict_low_relevance'
-          : eligibleOrders.has(entry.order) && !selectedOrders.has(entry.order)
-            ? 'mmr_diversity'
-            : passedFloor ? 'top_k' : 'low_relevance',
+          : eligibleOrders.has(entry.order)
+            ? (adaptiveDrop?.reason || 'score_cluster_tail')
+            : 'low_relevance',
         protectedActivation: entry.protectedActivation === true,
         exactIdentity: entry.exactIdentity === true,
         identityConflict: entry.identityConflict === true,
         identityConflictReasons: entry.identityConflictReasons || []
       };
     });
-    const dropped = [...emptyDropped, ...rankedDropped];
+    const dropped = [...emptyDropped, ...timeoutDropped, ...rankedDropped];
+    const candidateProtectedCount = selected.filter(lore => lore.stageReranker?.candidateProtected === true).length;
+    const injectionProtectedCount = selected.filter(lore => lore.stageReranker?.injectionProtected === true).length;
     return {
       enabled: true,
       engine: STAGE_LORE_RERANKER_VERSION,
       bm25fEngine: LORE_BM25F_ENGINE_VERSION,
+      fullIndexEngine: LORE_FULL_TEXT_INDEX_VERSION,
+      passageIndexEngine: LORE_PASSAGE_INDEX_VERSION,
+      dynamicEngine: LORE_DYNAMIC_SELECTION_VERSION,
       rrfEngine: LORE_RRF_ENGINE_VERSION,
       rrf: {
         k: LORE_RRF_K,
@@ -15052,10 +16936,28 @@ function mergeAgentCbsWarnings(...warningLists) {
       mmrEngine: LORE_MMR_ENGINE_VERSION,
       mmr: {
         lambda: Number(mmrLambda.toFixed(4)),
-        ordinaryEligibleCount: ordinaryEligible.length,
-        protectedSeedCount: protectedSeeds.length,
-        selectedOrdinaryCount: normalEntries.length,
-        diversifiedDropCount: Math.max(0, ordinaryEligible.length - normalEntries.length)
+        ordinaryEligibleCount: eligible.filter(entry => !loreDynamicProtection(entry).candidateProtected).length,
+        protectedSeedCount: candidateProtectedCount,
+        selectedOrdinaryCount: Math.max(0, selected.length - candidateProtectedCount),
+        diversifiedDropCount: dropped.filter(item => item.reason === 'score_cluster_tail').length,
+        coverageAware: true,
+        passageLevel: !candidatePoolMode
+      },
+      dynamic: {
+        engine: LORE_DYNAMIC_SELECTION_VERSION,
+        startK: adaptiveSelection.startK,
+        finalK: adaptiveSelection.finalK,
+        maxK: adaptiveSelection.maxK,
+        ordinarySelectedCount: adaptiveSelection.ordinarySelectedCount,
+        mandatorySelectedCount: adaptiveSelection.mandatorySelectedCount,
+        candidateProtectedCount,
+        injectionProtectedCount,
+        budgetChars: adaptiveSelection.budgetChars,
+        usedChars: adaptiveSelection.usedChars,
+        requiredAnchors: adaptiveSelection.requiredAnchors,
+        coveredAnchors: adaptiveSelection.coveredAnchors,
+        uncoveredAnchors: adaptiveSelection.uncoveredAnchors,
+        expansionReasons: adaptiveSelection.expansionReasons
       },
       bm25fCorpus: {
         currentQueryTokens: Number(bm25fCurrentCorpus.queryTokenCount || 0),
@@ -15068,6 +16970,13 @@ function mergeAgentCbsWarnings(...warningLists) {
       profileStage: rerankerStage,
       candidatePoolMode,
       topK,
+      startK: adaptiveSelection.startK,
+      finalK: adaptiveSelection.finalK,
+      maxK: adaptiveSelection.maxK,
+      timedOut,
+      unscoredCount: timeoutDropped.length,
+      elapsedMs: Math.max(0, Date.now() - rerankStartedAt),
+      deadlineBudgetMs: 0,
       absoluteFloor: effectiveAbsoluteFloor,
       relativeFloor: effectiveRelativeFloor,
       effectiveFloor: Number(effectiveFloor.toFixed(4)),
@@ -15076,7 +16985,7 @@ function mergeAgentCbsWarnings(...warningLists) {
       inputCount: rawSource.length,
       candidateCount: source.length,
       selectedCount: selected.length,
-      protectedSelectedCount: protectedEntries.length,
+      protectedSelectedCount: candidateProtectedCount,
       protectedOverflowCount: Math.max(0, selected.length - topK),
       droppedCount: dropped.length,
       selected,
@@ -15292,6 +17201,16 @@ function mergeAgentCbsWarnings(...warningLists) {
     profileStage: result.profileStage || '',
     candidatePoolMode: result.candidatePoolMode === true,
     topK: Number(result.topK || 0),
+    startK: Number(result.startK ?? result.dynamic?.startK ?? result.topK ?? 0),
+    finalK: Number(result.finalK ?? result.dynamic?.finalK ?? result.selectedCount ?? 0),
+    maxK: Number(result.maxK ?? result.dynamic?.maxK ?? 0),
+    dynamicEngine: result.dynamicEngine || result.dynamic?.engine || LORE_DYNAMIC_SELECTION_VERSION,
+    passageIndexEngine: result.passageIndexEngine || LORE_PASSAGE_INDEX_VERSION,
+    dynamic: result.dynamic || null,
+    timedOut: result.timedOut === true,
+    unscoredCount: Number(result.unscoredCount || 0),
+    elapsedMs: Number(result.elapsedMs || 0),
+    deadlineBudgetMs: Number(result.deadlineBudgetMs || 0),
     inputCount: Number(result.inputCount ?? result.candidateCount ?? 0),
     candidateCount: Number(result.candidateCount || 0),
     selectedCount: Number(result.selectedCount || 0),
@@ -15300,7 +17219,10 @@ function mergeAgentCbsWarnings(...warningLists) {
     droppedCount: Number(result.droppedCount || 0),
     emptyDroppedCount: (result.dropped || []).filter(item => item.reason === 'empty_content').length,
     identityConflictDroppedCount: (result.dropped || []).filter(item => item.reason === 'identity_conflict_low_relevance').length,
-    mmrDiversityDroppedCount: (result.dropped || []).filter(item => item.reason === 'mmr_diversity').length,
+    mmrDiversityDroppedCount: (result.dropped || []).filter(item => ['mmr_diversity', 'score_cluster_tail'].includes(item.reason)).length,
+    scoreClusterTailDroppedCount: (result.dropped || []).filter(item => item.reason === 'score_cluster_tail').length,
+    budgetDroppedCount: (result.dropped || []).filter(item => item.reason === 'budget_after_passage_compaction').length,
+    dynamicSafetyCapDroppedCount: (result.dropped || []).filter(item => item.reason === 'dynamic_safety_cap').length,
     absoluteFloor: Number(result.absoluteFloor || 0),
     relativeFloor: Number(result.relativeFloor || 0),
     effectiveFloor: Number(result.effectiveFloor || 0),
@@ -15322,6 +17244,14 @@ function mergeAgentCbsWarnings(...warningLists) {
       mmrMaxSimilarity: Number(lore.stageReranker?.mmrMaxSimilarity || 0),
       mmrSimilarTo: lore.stageReranker?.mmrSimilarTo || '',
       protectedActivation: lore.stageReranker?.protectedActivation === true,
+      candidateProtected: lore.stageReranker?.candidateProtected === true,
+      injectionProtected: lore.stageReranker?.injectionProtected === true,
+      coverageCritical: lore.stageReranker?.coverageCritical === true,
+      anchorGain: Number(lore.stageReranker?.anchorGain || 0),
+      evidenceChars: Number(lore.stageReranker?.evidenceChars || lore.passageEvidence?.evidenceChars || 0),
+      passageCount: Array.isArray(lore.passageEvidence?.passages) ? lore.passageEvidence.passages.length : 0,
+      coveredAnchors: lore.passageEvidence?.coveredAnchors || [],
+      uncoveredAnchors: lore.passageEvidence?.uncoveredAnchors || [],
       exactIdentity: lore.stageReranker?.exactIdentity === true,
       identityConflict: lore.stageReranker?.identityConflict === true,
       identityConflictReasons: lore.stageReranker?.identityConflictReasons || [],
@@ -15338,9 +17268,9 @@ function mergeAgentCbsWarnings(...warningLists) {
     .map(segment => segment.trim())
     .filter(segment => segment.length >= 4 && segment.length <= 700 && GRADIA_RELATIONSHIP_CANON_RE.test(segment));
 
-  const buildRelationshipCanonLock = (lorePool = [], currentInput = '', terminalScene = '', snapshot = null) => {
-    const catalog = buildContinuityEntityCatalog(snapshot || {});
-    if (!catalog.length) return { version: RELATIONSHIP_CANON_LOCK_VERSION, facts: [], block: '' };
+  const buildRelationshipCanonLock = (lorePool = [], currentInput = '', terminalScene = '', snapshot = null, entityIndex = null) => {
+    const catalog = entityIndex || buildContinuityEntityIndex(snapshot || {});
+    if (!(catalog?.entries || []).length) return { version: RELATIONSHIP_CANON_LOCK_VERSION, facts: [], block: '' };
     const liveText = `${text(currentInput || '')}\n${text(terminalScene || '')}`.trim();
     const liveEntities = new Set(continuityEntitiesInText(liveText, catalog));
     if (!liveEntities.size) return { version: RELATIONSHIP_CANON_LOCK_VERSION, facts: [], block: '' };
@@ -15355,7 +17285,9 @@ function mergeAgentCbsWarnings(...warningLists) {
         lore?.key,
         ...(Array.isArray(lore?.keys) ? lore.keys : [])
       ].filter(Boolean).join(' '), catalog);
+      const ownerTouchesLive = ownerEntities.some((entity) => liveEntities.has(entity));
       for (const segment of relationshipCanonSegments(content)) {
+        if (!ownerTouchesLive && !continuityTextMentionsAny(segment, catalog, liveEntities)) continue;
         const segmentEntities = continuityEntitiesInText(segment, catalog);
         const entities = uniqueContinuityStrings([...ownerEntities, ...segmentEntities]).slice(0, 6);
         if (entities.length < 2 || !entities.some(entity => liveEntities.has(entity))) continue;
@@ -15473,49 +17405,305 @@ function mergeAgentCbsWarnings(...warningLists) {
     return compact(sections.filter(item => item !== null && item !== undefined).join('\n'), contextBudget);
   };
 
-  const buildGradiaSharedLoreCandidatePool = (selectedCandidates = [], baseActiveLore = [], hostSelectedLore = [], messages = [], cbsContext = null, currentQuery = '', terminalQuery = '', chatLength = 1, options = {}) => {
-    const semanticCandidates = (selectedCandidates || [])
-      .filter(candidate => loreSemanticCandidateEligible(candidate, currentQuery, terminalQuery, chatLength, {
-        recentMessages: options.recentMessages || [],
-        defaultScanDepth: options.defaultScanDepth || DEFAULT_RECENT_TURNS
-      }))
-      .map(candidate => ({ ...candidate, activationRoute: 'semantic_candidate', semanticCandidate: true }));
-    const renderedUniverse = renderIndependentActiveLorebooks(semanticCandidates, messages, cbsContext);
-    const mergedUniverse = mergeLoreCandidateSignals(
-      renderedUniverse.activeLore,
-      baseActiveLore,
-      hostSelectedLore
-    );
-    const sharedRerank = rerankLoreForStage(mergedUniverse, 'shadow_act', {
-      primaryQuery: currentQuery,
-      terminalQuery,
-      topK: DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K,
-      candidatePoolMode: true
-    });
-    const selected = (sharedRerank.selected || []).map(lore => ({
-      ...lore,
-      sharedPoolRerank: {
-        engine: sharedRerank.engine || STAGE_LORE_RERANKER_VERSION,
-        rank: Number(lore.stageReranker?.rank || 0),
-        score: Number(lore.stageReranker?.score || 0),
-        confidenceScore: Number(lore.stageReranker?.confidenceScore || 0),
-        rrfScore: Number(lore.stageReranker?.rrfScore || 0),
-        rrfRanks: lore.stageReranker?.rrfRanks || {},
-        mmrScore: Number(lore.stageReranker?.mmrScore || 0),
-        mmrMaxSimilarity: Number(lore.stageReranker?.mmrMaxSimilarity || 0),
-        mmrSimilarTo: lore.stageReranker?.mmrSimilarTo || ''
-      }
-    }));
+  const loreSelectionBudgetForStage = ({ settings = {}, stageName = 'shadow_act', refs = {}, source = {}, hypaContinuity = null, authorNote = null, capacityOptions = null, capacity: suppliedCapacity = null } = {}) => {
+    const options = capacityOptions || { stageNames: [stageName] };
+    const capacity = suppliedCapacity || resolveReferenceCapacity(settings, options);
+    let nonLoreChars = 1800; // transport headings and continuity metadata
+    if (refs.authorNote && authorNote?.content) nonLoreChars += text(authorNote.content).length + 120;
+    if (refs.persona && source?.persona) nonLoreChars += text(firstFilled(source.persona.personaPrompt, source.persona.persona, source.persona.description, source.persona.desc, source.persona.prompt, source.persona.content, source.persona.text)).length + 180;
+    if (refs.characterDescription && source?.character) {
+      const character = source.character;
+      nonLoreChars += [
+        character.description ?? character.desc,
+        character.personality,
+        character.scenario,
+        character.systemPrompt ?? character.system_prompt,
+        character.char_persona,
+        character.exampleDialogue ?? character.mes_example,
+        character.firstMessage ?? character.first_message
+      ].map(value => text(value || '').length).reduce((sum, value) => sum + value, 0) + 240;
+    }
+    if (hypaContinuity?.records?.length) {
+      nonLoreChars += Math.min(HYPA_CONTINUITY_MAX_CHARS, hypaContinuity.records.reduce((sum, record) => sum + text(record?.body || '').length + 80, 0));
+    }
+    const effective = Math.max(1000, Number(capacity.effectiveBudgetChars || REFERENCE_PROFILE_CAPS.balanced));
+    const minimumLoreBudget = Math.min(effective, 2400);
+    const reservableNonLore = Math.max(0, effective - minimumLoreBudget);
+    const reservedNonLore = Math.min(reservableNonLore, Math.max(0, nonLoreChars));
+    const loreBudgetChars = Math.max(minimumLoreBudget, Math.min(effective, effective - reservedNonLore));
     return {
-      engine: LORE_SHARED_CANDIDATE_POOL_VERSION,
-      selected,
-      rerank: sharedRerank,
-      universeCount: mergedUniverse.length,
-      semanticCandidateCount: renderedUniverse.activeLore.length,
-      droppedByCbs: renderedUniverse.dropped || []
+      capacity,
+      loreBudgetChars,
+      nonLoreChars,
+      effectiveBudgetChars: effective
     };
   };
 
+  const buildGradiaSharedLoreCandidatePool = (selectedCandidates = [], baseActiveLore = [], hostSelectedLore = [], messages = [], cbsContext = null, currentQuery = '', terminalQuery = '', chatLength = 1, options = {}) => {
+    const startedAt = Date.now();
+    const supportMessageCache = new Map();
+    const semanticCandidates = (selectedCandidates || [])
+      .filter(candidate => loreSemanticCandidateEligible(candidate, currentQuery, terminalQuery, chatLength, {
+        recentMessages: options.recentMessages || [],
+        defaultScanDepth: options.defaultScanDepth || DEFAULT_RECENT_TURNS,
+        supportMessageCache
+      }))
+      .map(candidate => ({ ...candidate, activationRoute: 'semantic_candidate', semanticCandidate: true }));
+    const mergedUniverse = mergeLoreCandidateSignals(semanticCandidates, baseActiveLore, hostSelectedLore);
+    const requestedStages = Array.isArray(options.stageNames) ? options.stageNames : [];
+    const discoveryStages = Array.from(new Set((requestedStages.length ? requestedStages : [
+      'shadow_act', 'aide_character', 'aide_world', 'aide_plot'
+    ]).map(loreRerankerStageName).filter(Boolean)));
+    if (!discoveryStages.includes('shadow_act')) discoveryStages.unshift('shadow_act');
+    const rawStageReferences = options.stageReferences && typeof options.stageReferences === 'object'
+      ? options.stageReferences
+      : {};
+    const stageReferences = Object.fromEntries(discoveryStages.map(stageName => [
+      stageName,
+      normalizeRisuReferences(rawStageReferences[stageName] || {}, defaultRisuReferencesForStage(stageName))
+    ]));
+    const stagesAllowedForLore = (lore, stageIds = discoveryStages) => stageIds.filter(stageName => (
+      loreAllowedByRisuReferences(lore, stageReferences[stageName] || defaultRisuReferencesForStage(stageName))
+    ));
+
+    // One full-universe retrieval pass supplies the common candidate frontier. This is the
+    // expensive all-lore pass and remains exactly once per request. The optional common
+    // frontier uses a sub-linear safety ceiling so a flat 5k-lore cluster cannot become the
+    // working set for every later stage. Mandatory/host/key/coverage evidence can overflow it,
+    // while AIDE-specific rescue lanes below still search the complete universe independently.
+    const autoCommonSafetyMax = Math.min(
+      LORE_DYNAMIC_SHARED_MAX,
+      Math.max(128, Math.ceil(Math.sqrt(Math.max(1, mergedUniverse.length)) * 3))
+    );
+    const commonCandidateSafetyMax = Math.min(
+      Math.max(1, mergedUniverse.length || 1),
+      clampInt(options.commonMaxK ?? autoCommonSafetyMax, DEFAULT_SHARED_LORE_PREFILTER_TOP_K, LORE_DYNAMIC_SHARED_MAX, autoCommonSafetyMax)
+    );
+    const prefilter = loreSharedPrefilterCandidates(
+      semanticCandidates,
+      baseActiveLore,
+      hostSelectedLore,
+      currentQuery,
+      terminalQuery,
+      {
+        topK: options.prefilterTopK || DEFAULT_SHARED_LORE_PREFILTER_TOP_K,
+        maxK: commonCandidateSafetyMax
+      }
+    );
+    const universeCorpus = loreFullTextIndexCorpus(mergedUniverse, { slot: 'universe' });
+    const rescueQuery = [compact(currentQuery || '', 2400), compact(terminalQuery || '', INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS)].filter(Boolean).join('\n');
+    const rescueCurrentBm25f = loreFullTextBm25fCorpusScores(
+      mergedUniverse,
+      rescueQuery,
+      LORE_BM25F_LORE_FIELD_DEFS,
+      { queryLimit: 180, uniqueQueryLimit: 120, scoreScale: 1.55, corpus: universeCorpus }
+    );
+
+    // Common frontier candidates are visible to every enabled draft stage. Stage-specific
+    // rescue lanes below can add candidates that the common frontier did not retain.
+    const unionById = new Map();
+    const addCandidate = (lore, stageIds = discoveryStages, meta = {}) => {
+      const id = loreContinuityIdentity(lore);
+      if (!id) return;
+      const previous = unionById.get(id) || null;
+      const previousDiscovery = previous?.sharedStageDiscovery || {};
+      const stages = { ...(previousDiscovery.stages || {}) };
+      for (const stageName of stageIds) {
+        const existingStage = stages[stageName] || null;
+        const incoming = {
+          stage: stageName,
+          route: meta.route || 'common_full_index',
+          rank: Number(meta.rank || lore.sharedPrefilter?.rank || 0),
+          score: Number(meta.score ?? lore.sharedPrefilter?.score ?? 0),
+          confidenceScore: Number(meta.confidenceScore ?? lore.sharedPrefilter?.confidenceScore ?? 0),
+          candidateProtected: meta.candidateProtected === true || lore.sharedPrefilter?.candidateProtected === true,
+          injectionProtected: meta.injectionProtected === true || lore.sharedPrefilter?.injectionProtected === true,
+          coverageCritical: meta.coverageCritical === true,
+          anchorGain: Number(meta.anchorGain || lore.sharedPrefilter?.anchorGain || 0),
+          protectionReasons: Array.from(new Set([
+            ...(Array.isArray(meta.protectionReasons) ? meta.protectionReasons : []),
+            ...(Array.isArray(lore.sharedPrefilter?.protectionReasons) ? lore.sharedPrefilter.protectionReasons : [])
+          ]))
+        };
+        if (!existingStage || incoming.score > Number(existingStage.score || 0) || incoming.confidenceScore > Number(existingStage.confidenceScore || 0)) {
+          stages[stageName] = incoming;
+        }
+      }
+      const stageEntries = Object.values(stages);
+      const best = stageEntries.slice().sort((left, right) => (
+        right.score - left.score || right.confidenceScore - left.confidenceScore || left.rank - right.rank
+      ))[0] || {};
+      const merged = previous ? { ...previous, ...lore } : { ...lore };
+      delete merged.stageReranker;
+      merged.sharedStageDiscovery = {
+        engine: LORE_SHARED_MULTI_STAGE_DISCOVERY_VERSION,
+        stageIds: Object.keys(stages),
+        stages,
+        bestStage: best.stage || '',
+        bestRank: Number(best.rank || 0),
+        bestScore: Number(best.score || 0),
+        bestConfidenceScore: Number(best.confidenceScore || 0),
+        candidateProtected: stageEntries.some(item => item.candidateProtected === true),
+        injectionProtected: stageEntries.some(item => item.injectionProtected === true),
+        coverageCritical: stageEntries.some(item => item.coverageCritical === true),
+        protectionReasons: Array.from(new Set(stageEntries.flatMap(item => item.protectionReasons || [])))
+      };
+      unionById.set(id, merged);
+    };
+
+    for (const lore of prefilter.selected || []) {
+      const allowedStages = stagesAllowedForLore(lore);
+      if (allowedStages.length) addCandidate(lore, allowedStages, { route: 'common_full_index' });
+    }
+
+    const stageFrontiers = {};
+    const commonIds = new Set((prefilter.selected || []).map(loreContinuityIdentity).filter(Boolean));
+    const commonIdsByStage = Object.fromEntries(discoveryStages.map(stageName => [
+      stageName,
+      new Set((prefilter.selected || [])
+        .filter(lore => loreAllowedByRisuReferences(lore, stageReferences[stageName]))
+        .map(loreContinuityIdentity)
+        .filter(Boolean))
+    ]));
+    for (const stageName of discoveryStages) {
+      const def = STAGE_LORE_RERANKER_DEFS[stageName] || STAGE_LORE_RERANKER_DEFS.shadow_act;
+      const rescueIds = [];
+      if (stageName !== 'shadow_act' && text(def.domainQuery || '').trim()) {
+        // Domain rescue is cheap: it uses the already-built inverted index and does not run
+        // passage extraction, CBS rendering, or a second all-lore precision reranker.
+        const domainBm25f = loreFullTextBm25fCorpusScores(
+          mergedUniverse,
+          def.domainQuery,
+          LORE_BM25F_LORE_FIELD_DEFS,
+          { queryLimit: 180, uniqueQueryLimit: 120, scoreScale: 1.45, corpus: universeCorpus }
+        );
+        const rescueLimit = Math.min(64, Math.max(16, Math.ceil(Math.sqrt(Math.max(1, mergedUniverse.length)) / 3)));
+        const rescueRows = mergedUniverse.map((lore, index) => {
+          if (!loreAllowedByRisuReferences(lore, stageReferences[stageName])) return null;
+          const currentScore = Number(rescueCurrentBm25f.scores?.[index]?.score || 0);
+          const domainScore = Number(domainBm25f.scores?.[index]?.score || 0);
+          const sourceAffinity = loreRerankerSourceAffinity(stageName, lore);
+          const protection = loreDynamicProtection(lore);
+          const keyStrength = Math.max(Number(lore.keyStrength || 0), loreActivationKeyStrength(lore));
+          const liveEvidence = currentScore > 0.012
+            || protection.candidateProtected
+            || lore.hostSelected === true
+            || keyStrength >= 0.62;
+          const rescueScore = domainScore * 0.58 + currentScore * 0.32 + sourceAffinity * 0.10;
+          return { lore, index, currentScore, domainScore, sourceAffinity, protection, keyStrength, liveEvidence, rescueScore };
+        }).filter(row => row && row.liveEvidence && row.domainScore > 0.035)
+          .sort((left, right) => right.rescueScore - left.rescueScore || right.currentScore - left.currentScore || left.index - right.index)
+          .slice(0, rescueLimit);
+        for (let rescueRank = 0; rescueRank < rescueRows.length; rescueRank += 1) {
+          const row = rescueRows[rescueRank];
+          const id = loreContinuityIdentity(row.lore);
+          if (!id) continue;
+          rescueIds.push(id);
+          addCandidate(row.lore, [stageName], {
+            route: 'stage_domain_rescue',
+            rank: rescueRank + 1,
+            score: row.rescueScore,
+            confidenceScore: Math.max(row.currentScore, row.domainScore),
+            candidateProtected: row.protection.candidateProtected,
+            injectionProtected: row.protection.injectionProtected,
+            protectionReasons: ['stage_domain_rescue', ...row.protection.reasons]
+          });
+        }
+      }
+      const stageCommonIds = commonIdsByStage[stageName] || new Set();
+      const stageCandidateIds = new Set([...stageCommonIds, ...rescueIds]);
+      const uniqueIds = rescueIds.filter(id => !stageCommonIds.has(id));
+      stageFrontiers[stageName] = {
+        engine: LORE_SHARED_MULTI_STAGE_DISCOVERY_VERSION,
+        references: stageReferences[stageName],
+        commonCandidateCount: stageCommonIds.size,
+        domainRescueCount: rescueIds.length,
+        candidateCount: stageCandidateIds.size,
+        uniqueContributionCount: uniqueIds.length,
+        uniqueContributionIds: uniqueIds.slice(0, 64),
+        domainRescueIds: rescueIds.slice(0, 64)
+      };
+    }
+
+    const discoveryUnion = Array.from(unionById.values()).sort((left, right) => {
+      const lm = left.sharedStageDiscovery || {};
+      const rm = right.sharedStageDiscovery || {};
+      return Number(rm.injectionProtected === true) - Number(lm.injectionProtected === true)
+        || Number(rm.candidateProtected === true) - Number(lm.candidateProtected === true)
+        || Number((rm.stageIds || []).length) - Number((lm.stageIds || []).length)
+        || Number(rm.bestScore || 0) - Number(lm.bestScore || 0)
+        || Number(rm.bestConfidenceScore || 0) - Number(lm.bestConfidenceScore || 0)
+        || Number(lm.bestRank || Number.MAX_SAFE_INTEGER) - Number(rm.bestRank || Number.MAX_SAFE_INTEGER);
+    });
+
+    // Render CBS/global conditions once for the union. Actual SHADOW/AIDE selection is still
+    // performed later by rerankLoreForStage() using each stage's own profile and lore budget.
+    const renderedUniverse = renderIndependentActiveLorebooks(discoveryUnion, messages, cbsContext);
+    const discoveryById = new Map(discoveryUnion.map(lore => [loreContinuityIdentity(lore), lore.sharedStageDiscovery || null]));
+    const selected = (renderedUniverse.activeLore || []).map((lore, index) => {
+      const id = loreContinuityIdentity(lore);
+      const stageDiscovery = discoveryById.get(id) || lore.sharedStageDiscovery || { stages: {}, stageIds: [] };
+      const bestStage = stageDiscovery.bestStage || 'shadow_act';
+      const bestMeta = stageDiscovery.stages?.[bestStage] || {};
+      return {
+        ...lore,
+        sharedStageDiscovery: stageDiscovery,
+        sharedPoolRerank: {
+          engine: LORE_SHARED_CANDIDATE_POOL_VERSION,
+          discoveryEngine: LORE_SHARED_MULTI_STAGE_DISCOVERY_VERSION,
+          rank: index + 1,
+          score: Number(stageDiscovery.bestScore || bestMeta.score || 0),
+          confidenceScore: Number(stageDiscovery.bestConfidenceScore || bestMeta.confidenceScore || 0),
+          rrfScore: 0,
+          rrfRanks: {},
+          candidateProtected: stageDiscovery.candidateProtected === true,
+          injectionProtected: stageDiscovery.injectionProtected === true,
+          coverageCritical: stageDiscovery.coverageCritical === true,
+          anchorGain: Math.max(0, ...Object.values(stageDiscovery.stages || {}).map(item => Number(item.anchorGain || 0))),
+          protectionReasons: stageDiscovery.protectionReasons || [],
+          discoveredByStages: stageDiscovery.stageIds || [],
+          bestStage
+        }
+      };
+    });
+    const nonShadowOnlyIds = selected.filter(lore => {
+      const stages = lore.sharedStageDiscovery?.stageIds || [];
+      return stages.length > 0 && !stages.includes('shadow_act');
+    }).map(loreContinuityIdentity).filter(Boolean);
+
+    return {
+      engine: LORE_SHARED_CANDIDATE_POOL_VERSION,
+      discoveryEngine: LORE_SHARED_MULTI_STAGE_DISCOVERY_VERSION,
+      selected,
+      rerank: null,
+      stageReranks: {},
+      prefilter: {
+        ...prefilter,
+        engine: LORE_SHARED_MULTI_STAGE_DISCOVERY_VERSION,
+        stageFrontiers,
+        selectedCount: discoveryUnion.length,
+        renderedSelectedCount: selected.length,
+        startK: Number(prefilter.startK ?? DEFAULT_SHARED_LORE_PREFILTER_TOP_K),
+        finalK: discoveryUnion.length,
+        maxK: commonCandidateSafetyMax,
+        commonCandidateSafetyMax,
+        droppedByCbsCount: Number((renderedUniverse.dropped || []).length),
+        nonShadowOnlyCount: nonShadowOnlyIds.length,
+        nonShadowOnlyIds: nonShadowOnlyIds.slice(0, 128),
+        elapsedMs: Math.max(Number(prefilter.elapsedMs || 0), Date.now() - startedAt)
+      },
+      stageFrontiers,
+      stageReferences,
+      universeCount: semanticCandidates.length,
+      mergedSignalCount: mergedUniverse.length,
+      prefilterCandidateCount: discoveryUnion.length,
+      commonCandidateSafetyMax,
+      semanticCandidateCount: semanticCandidates.length,
+      nonShadowOnlyCount: nonShadowOnlyIds.length,
+      nonShadowOnlyIds: nonShadowOnlyIds.slice(0, 128),
+      droppedByCbs: renderedUniverse.dropped || []
+    };
+  };
   const buildShadowRisuContext = async (messages, recent, settings, snapshot = null, references = null) => {
     const refs = normalizeRisuReferences(references || settings?.activeStageOptions?.risuRefs, settings?.enableShadowRisuContext !== false ? defaultRisuReferencesForStage(settings?.activeStageName || 'shadow_act') : { authorNote: false, persona: false, characterDescription: false, characterLorebook: false, moduleLorebook: false });
     const referenceEnabled = !!(refs.authorNote || refs.persona || refs.characterDescription || refs.characterLorebook || refs.moduleLorebook);
@@ -15556,6 +17744,8 @@ function mergeAgentCbsWarnings(...warningLists) {
       ? { ...recent, latestUser: authoritativeCurrentInput }
       : recent;
     const source = snapshot || await loadRisuContextSnapshot(settings, messages, retrievalRecent);
+    let requestContinuityEntityIndex = null;
+    const getRequestContinuityEntityIndex = () => requestContinuityEntityIndex || (requestContinuityEntityIndex = buildContinuityEntityIndex(source));
     const authorNote = source.authorNote || resolveCurrentChatAuthorNote(source?.chatInfo?.chat, source?.cbsContext);
     const authorNoteEnabled = refs.authorNote !== false;
     const authorNoteAppliesHere = authorNoteEnabled && (settings?.activeStageName || 'shadow_act') === 'shadow_act';
@@ -15596,7 +17786,7 @@ function mergeAgentCbsWarnings(...warningLists) {
           previousOnlyCast: [],
           previousEvent: null
         }
-      : buildRequestContinuityLedger(authoritativeCurrentInput, recent, source);
+      : buildRequestContinuityLedger(authoritativeCurrentInput, recent, source, getRequestContinuityEntityIndex());
     recent.continuityLedger = continuityLedger;
     recent.continuityLedgerBlock = inputAssistTerminalPath ? '' : formatRequestContinuityLedger(continuityLedger);
     const selectedCandidates = (candidates || []).filter(candidate => candidate.sourceType === 'module' ? refs.moduleLorebook : (candidate.sourceType === 'character' || candidate.sourceType === 'chat') ? refs.characterLorebook : false);
@@ -15621,6 +17811,24 @@ function mergeAgentCbsWarnings(...warningLists) {
       activeLore: (rawHostSelectionForSearch.activeLore || []).filter(lore => lore.forceState !== 'deactivate' && selectedIds.has(loreContinuityIdentity(lore))),
       selectedCount: (rawHostSelectionForSearch.activeLore || []).filter(lore => lore.forceState !== 'deactivate' && selectedIds.has(loreContinuityIdentity(lore))).length
     };
+    const sharedDiscoveryStageNames = inputAssistTerminalPath
+      ? ['shadow_act']
+      : ['shadow_act', ...normalizeAideStageOrder(settings?.aideStageOrder)].filter((stageName, index, list) => (
+          list.indexOf(stageName) === index
+          && (stageName === 'shadow_act'
+            || (stageName === 'aide_character' && settings?.enableCharacterAide !== false && settings?.mode !== 'lite')
+            || (stageName === 'aide_world' && settings?.enableWorldAide !== false && settings?.mode !== 'lite')
+            || (stageName === 'aide_plot' && settings?.enablePlotAide !== false))
+        ));
+    const sharedDiscoveryStageReferences = inputAssistTerminalPath
+      ? { shadow_act: refs }
+      : Object.fromEntries(sharedDiscoveryStageNames.map(stageName => [
+          stageName,
+          normalizeRisuReferences(
+            stageExecutionOptions(settings, stageName).risuRefs,
+            defaultRisuReferencesForStage(stageName)
+          )
+        ]));
     const sharedCandidatePool = buildGradiaSharedLoreCandidatePool(
       selectedCandidates,
       baseActiveLore,
@@ -15632,7 +17840,9 @@ function mergeAgentCbsWarnings(...warningLists) {
       chatLength,
       {
         recentMessages: recent?.loreSearchMessages || [],
-        defaultScanDepth: source?.loreSettings?.scanDepth ?? source?.loreSettings?.scan_depth ?? settings?.turnWindow ?? DEFAULT_RECENT_TURNS
+        defaultScanDepth: source?.loreSettings?.scanDepth ?? source?.loreSettings?.scan_depth ?? settings?.turnWindow ?? DEFAULT_RECENT_TURNS,
+        stageNames: sharedDiscoveryStageNames,
+        stageReferences: sharedDiscoveryStageReferences
       }
     );
     const activeLore = sharedCandidatePool.selected;
@@ -15699,9 +17909,16 @@ function mergeAgentCbsWarnings(...warningLists) {
       previousCast: continuityLedger.previousCast,
       carriedCast: continuityLedger.carriedCast,
       introducedCast: continuityLedger.introducedCast,
-      previousOnlyCast: continuityLedger.previousOnlyCast
+      previousOnlyCast: continuityLedger.previousOnlyCast,
+      entityIndex: requestContinuityEntityIndex ? {
+        version: requestContinuityEntityIndex.version,
+        candidateCount: Number(requestContinuityEntityIndex.candidateCount || 0),
+        entityCount: Number(requestContinuityEntityIndex.entityCount || 0),
+        buildMs: Number(requestContinuityEntityIndex.buildMs || 0)
+      } : null
     };
     meta.route = source.route;
+    meta.staticSnapshotCache = source.staticCache ? { ...source.staticCache } : null;
     meta.authorNote = {
       schema: authorNote.schema || AUTHOR_NOTE_AUTHORITY_SCHEMA,
       available: authorNote.available === true,
@@ -15742,10 +17959,35 @@ function mergeAgentCbsWarnings(...warningLists) {
     meta.activeLore = activeLore.length;
     meta.sharedCandidatePool = sharedCandidatePool ? {
       engine: sharedCandidatePool.engine || LORE_SHARED_CANDIDATE_POOL_VERSION,
+      discoveryEngine: sharedCandidatePool.discoveryEngine || sharedCandidatePool.prefilter?.engine || '',
+      discoveryStages: Object.keys(sharedCandidatePool.stageFrontiers || sharedCandidatePool.prefilter?.stageFrontiers || {}),
+      stageFrontiers: sharedCandidatePool.stageFrontiers || sharedCandidatePool.prefilter?.stageFrontiers || {},
+      stageReferences: sharedCandidatePool.stageReferences || sharedDiscoveryStageReferences,
+      nonShadowOnlyCount: Number(sharedCandidatePool.nonShadowOnlyCount || 0),
+      nonShadowOnlyIds: Array.isArray(sharedCandidatePool.nonShadowOnlyIds) ? sharedCandidatePool.nonShadowOnlyIds.slice() : [],
+      prefilterIndexVersion: LORE_FULL_TEXT_INDEX_VERSION,
+      prefilterFullContentSearched: sharedCandidatePool.prefilter?.fullContentSearched === true,
       universeCount: sharedCandidatePool.universeCount,
       semanticCandidateCount: sharedCandidatePool.semanticCandidateCount,
+      prefilterCandidateCount: Number(sharedCandidatePool.prefilterCandidateCount || 0),
+      prefilterEvaluatedCount: Number(sharedCandidatePool.prefilter?.evaluatedCount || 0),
+      prefilterSampledOutCount: Number(sharedCandidatePool.prefilter?.sampledOutCount || 0),
+      prefilterIndexedLoreCount: Number(sharedCandidatePool.prefilter?.indexedLoreCount || 0),
+      prefilterIndexedChars: Number(sharedCandidatePool.prefilter?.indexedChars || 0),
+      prefilterIndexReusedCount: Number(sharedCandidatePool.prefilter?.indexReusedCount || 0),
+      prefilterIndexRebuiltCount: Number(sharedCandidatePool.prefilter?.indexRebuiltCount || 0),
+      prefilterElapsedMs: Number(sharedCandidatePool.prefilter?.elapsedMs || 0),
+      deepRerankElapsedMs: Number(sharedCandidatePool.rerank?.elapsedMs || 0),
+      deepRerankTimedOut: sharedCandidatePool.rerank?.timedOut === true,
       selectedCount: activeLore.length,
       topK: DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K,
+      startK: Number(sharedCandidatePool.rerank?.startK ?? sharedCandidatePool.prefilter?.startK ?? DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K),
+      finalK: Number(sharedCandidatePool.rerank?.finalK ?? sharedCandidatePool.prefilter?.finalK ?? activeLore.length),
+      maxK: Number(sharedCandidatePool.rerank?.maxK ?? sharedCandidatePool.prefilter?.maxK ?? LORE_DYNAMIC_SHARED_MAX),
+      requiredAnchors: sharedCandidatePool.rerank?.dynamic?.requiredAnchors || sharedCandidatePool.prefilter?.requiredAnchors || [],
+      coveredAnchors: sharedCandidatePool.rerank?.dynamic?.coveredAnchors || sharedCandidatePool.prefilter?.coveredAnchors || [],
+      uncoveredAnchors: sharedCandidatePool.rerank?.dynamic?.uncoveredAnchors || sharedCandidatePool.prefilter?.uncoveredAnchors || [],
+      expansionReasons: sharedCandidatePool.rerank?.dynamic?.expansionReasons || sharedCandidatePool.prefilter?.expansionReasons || [],
       hostSelectedCount: Number(hostSelectionForSearch.selectedCount || 0),
       rrfActiveRankers: sharedCandidatePool.rerank?.rrf?.activeRankers || []
     } : null;
@@ -15759,6 +18001,8 @@ function mergeAgentCbsWarnings(...warningLists) {
           confidenceScore: Number(lore.sharedPoolRerank?.confidenceScore || 0),
           rrfScore: Number(lore.sharedPoolRerank?.rrfScore || 0),
           rrfRanks: lore.sharedPoolRerank?.rrfRanks || {},
+          discoveredByStages: lore.sharedPoolRerank?.discoveredByStages || lore.sharedStageDiscovery?.stageIds || [],
+          bestDiscoveryStage: lore.sharedPoolRerank?.bestStage || lore.sharedStageDiscovery?.bestStage || '',
           hostSelected: lore.hostSelected === true,
           keyActivated: lore.keyActivated === true,
           keyStrength: Number(lore.keyStrength || loreActivationKeyStrength(lore) || 0)
@@ -15811,7 +18055,8 @@ function mergeAgentCbsWarnings(...warningLists) {
       retrievedLorePool,
       lorePrimaryQuery,
       loreTerminalQuery,
-      source
+      source,
+      getRequestContinuityEntityIndex()
     );
     recent.relationshipCanonLock = relationshipCanonLock;
     recent.relationshipCanonLockBlock = relationshipCanonLock.block || '';
@@ -15820,11 +18065,28 @@ function mergeAgentCbsWarnings(...warningLists) {
       factCount: relationshipCanonLock.facts.length,
       chars: relationshipCanonLock.block.length
     };
+    const referenceCapacityOptions = inputAssistTerminalPath
+      ? {
+          profileId: 'custom',
+          profileCapChars: INPUT_ASSIST_LORE_CONTEXT_MAX_CHARS,
+          stageNames: [INPUT_ASSIST_STAGE_ID]
+        }
+      : { stageNames: [settings?.activeStageName || 'shadow_act'] };
+    const loreBudgetPlan = loreSelectionBudgetForStage({
+      settings,
+      stageName: settings?.activeStageName || 'shadow_act',
+      refs,
+      source,
+      hypaContinuity,
+      authorNote,
+      capacityOptions: referenceCapacityOptions
+    });
     const stageLoreRerank = isDraftPipelineStage(settings?.activeStageName)
       ? rerankLoreForStage(retrievedLorePool, settings.activeStageName, {
           primaryQuery: lorePrimaryQuery,
           terminalQuery: loreTerminalQuery,
-          topK: settings?.loreRerankerTopK || DEFAULT_STAGE_LORE_RERANK_TOP_K
+          topK: settings?.loreRerankerTopK || DEFAULT_STAGE_LORE_RERANK_TOP_K,
+          budgetChars: loreBudgetPlan.loreBudgetChars
         })
       : null;
     const retrievedActiveLore = stageLoreRerank?.enabled
@@ -15891,18 +18153,11 @@ function mergeAgentCbsWarnings(...warningLists) {
       retrieval: lore.retrieval
     }));
     let referencePacket = null;
-    let referenceCapacity = null;
+    let referenceCapacity = loreBudgetPlan.capacity;
     let referencePacketBlock = '';
     let referencePacketHash = '';
     let referencePacketFallback = false;
     let legacyLorePack = null;
-    const referenceCapacityOptions = inputAssistTerminalPath
-      ? {
-          profileId: 'custom',
-          profileCapChars: INPUT_ASSIST_LORE_CONTEXT_MAX_CHARS,
-          stageNames: [INPUT_ASSIST_STAGE_ID]
-        }
-      : undefined;
     try {
       const builtReferencePacket = buildCanonicalReferencePacketV2({
         settings,
@@ -15914,6 +18169,7 @@ function mergeAgentCbsWarnings(...warningLists) {
         hypaContinuity,
         authorNote,
         continuityLedger,
+        capacity: referenceCapacity,
         capacityOptions: referenceCapacityOptions
       });
       referenceCapacity = builtReferencePacket.capacity;
@@ -16129,7 +18385,7 @@ function mergeAgentCbsWarnings(...warningLists) {
   const loreAllowedByRisuReferences = (lore, refs) => (
     lore?.sourceType === 'module'
       ? refs.moduleLorebook === true
-      : lore?.sourceType === 'character'
+      : ['character', 'chat'].includes(lore?.sourceType)
         ? refs.characterLorebook === true
         : false
   );
@@ -16156,10 +18412,16 @@ function mergeAgentCbsWarnings(...warningLists) {
   // are still performed once. Only the already-collected lore pool is reranked locally
   // for SHADOW/Character/World/Plot, so stage specialization adds no provider call.
   const materializeSharedRisuContext = (shared, recent, settings, references = null) => {
-    const refs = normalizeRisuReferences(
+    const stageName = settings?.activeStageName || 'shadow_act';
+    const sourceScanRefs = normalizeRisuReferences(
       shared?.meta?.references,
       { authorNote: false, persona: false, characterDescription: false, characterLorebook: false, moduleLorebook: false }
     );
+    const refs = normalizeRisuReferences(
+      references || settings?.activeStageOptions?.risuRefs || sourceScanRefs,
+      defaultRisuReferencesForStage(stageName)
+    );
+    const refsMatchSourceScan = sameRisuReferences(refs, sourceScanRefs);
     const source = shared?.snapshot || null;
     if (!shared || !source) {
       return {
@@ -16188,7 +18450,6 @@ function mergeAgentCbsWarnings(...warningLists) {
     recent.continuityLedger = shared.continuityLedger || recent.continuityLedger || null;
     recent.continuityLedgerBlock = shared.continuityLedgerBlock || recent.continuityLedgerBlock || '';
 
-    const stageName = settings?.activeStageName || 'shadow_act';
     const rerankerStage = loreRerankerStageName(stageName);
     const sharedAuthorNote = shared.authorNote || source.authorNote || resolveCurrentChatAuthorNote(source?.chatInfo?.chat, source?.cbsContext);
     const authorNoteEnabled = refs.authorNote !== false;
@@ -16203,36 +18464,56 @@ function mergeAgentCbsWarnings(...warningLists) {
       inheritedByAidesThroughDraft: true
     };
 
-    const lorePool = Array.isArray(shared.loreRerankPool)
+    const sharedLorePool = Array.isArray(shared.loreRerankPool)
       ? shared.loreRerankPool
       : Array.isArray(shared.retrievedActiveLore)
         ? shared.retrievedActiveLore
         : [];
+    const lorePool = sharedLorePool.filter(lore => loreAllowedByRisuReferences(lore, refs));
     const primaryQuery = compact(shared.authoritativeCurrentInput || recent?.latestUser || '', 3000);
     const terminalQuery = compact(recent?.terminalVisibleScene || '', INPUT_ASSIST_TERMINAL_TAIL_MAX_CHARS);
-    const relationshipCanonLock = shared.relationshipCanonLock || buildRelationshipCanonLock(
-      lorePool,
-      primaryQuery,
-      terminalQuery,
-      source
-    );
+    const relationshipCanonLock = refsMatchSourceScan && shared.relationshipCanonLock
+      ? shared.relationshipCanonLock
+      : buildRelationshipCanonLock(
+          lorePool,
+          primaryQuery,
+          terminalQuery,
+          source
+        );
     recent.relationshipCanonLock = relationshipCanonLock;
     recent.relationshipCanonLockBlock = relationshipCanonLock?.block || shared.relationshipCanonLockBlock || '';
+    const stageLoreBudgetPlan = loreSelectionBudgetForStage({
+      settings,
+      stageName,
+      refs,
+      source,
+      hypaContinuity: shared.hypaContinuity || null,
+      authorNote: sharedAuthorNote,
+      capacityOptions: { stageNames: [stageName] }
+    });
+    const sharedCapacityChars = Number(shared.referenceCapacity?.effectiveBudgetChars || 0);
+    const stageCapacityChars = Number(stageLoreBudgetPlan.capacity?.effectiveBudgetChars || 0);
+    const capacityMatchesShared = !sharedCapacityChars || !stageCapacityChars || sharedCapacityChars === stageCapacityChars;
+    const canReuseSharedShadowRerank = stageName === 'shadow_act'
+      && refsMatchSourceScan
+      && capacityMatchesShared
+      && shared.loreRerank?.enabled === true;
     const stageLoreRerank = rerankerStage
-      ? (stageName === 'shadow_act' && shared.loreRerank?.enabled
+      ? (canReuseSharedShadowRerank
           ? shared.loreRerank
           : rerankLoreForStage(lorePool, rerankerStage, {
               primaryQuery,
               terminalQuery,
-              topK: settings?.loreRerankerTopK || DEFAULT_STAGE_LORE_RERANK_TOP_K
+              topK: settings?.loreRerankerTopK || DEFAULT_STAGE_LORE_RERANK_TOP_K,
+              budgetChars: stageLoreBudgetPlan.loreBudgetChars
             }))
       : null;
     const retrievedActiveLore = stageLoreRerank?.enabled
       ? stageLoreRerank.selected
-      : Array.isArray(shared.retrievedActiveLore) ? shared.retrievedActiveLore : lorePool;
+      : lorePool;
     const activeLore = retrievedActiveLore;
     const selectedCandidates = Array.isArray(shared.selectedCandidates)
-      ? shared.selectedCandidates
+      ? shared.selectedCandidates.filter(candidate => loreAllowedByRisuReferences(candidate, refs))
       : [];
 
     let referencePacket = shared.referencePacket || null;
@@ -16240,14 +18521,14 @@ function mergeAgentCbsWarnings(...warningLists) {
     let referencePacketHash = shared.referencePacketHash
       || referencePacket?.viewHash
       || referenceContentHash(referencePacketBlock);
-    const referenceCapacity = shared.referenceCapacity || null;
+    const referenceCapacity = stageLoreBudgetPlan.capacity || shared.referenceCapacity || null;
     let stageReferenceRematerialized = false;
     let stageReferenceFallback = false;
 
-    // SHADOW already owns the first stage view built with this exact reranker.
-    // Every later draft stage receives a new packet only by swapping the lore
-    // selection from the shared pool; no database/API/model retrieval is repeated.
-    if (rerankerStage && stageName !== 'shadow_act') {
+    // The request-scoped source snapshot may be the union of several stages' reference
+    // categories. Rebuild only the local packet whenever this stage's category view differs
+    // (or for later AIDEs). No database/API/model retrieval is repeated.
+    if (rerankerStage && (stageName !== 'shadow_act' || !refsMatchSourceScan || !capacityMatchesShared)) {
       try {
         const built = buildCanonicalReferencePacketV2({
           settings,
@@ -16283,6 +18564,12 @@ function mergeAgentCbsWarnings(...warningLists) {
       } catch (error) {
         stageReferenceFallback = true;
         warn('stage_reference_rerank_packet_fallback', `${stageName}: ${compact(error?.message || error, 260)}`);
+        // Never fall back to the source-scan union packet: it may contain a category this
+        // stage explicitly disabled. Fail closed on references while allowing the draft
+        // stage itself to continue fail-soft.
+        referencePacket = null;
+        referencePacketBlock = '';
+        referencePacketHash = '';
       }
     }
 
@@ -16295,6 +18582,13 @@ function mergeAgentCbsWarnings(...warningLists) {
       ...(shared.meta || {}),
       enabled: referenceEnabled || fixedDraftStage,
       references: refs,
+      sourceScanReferences: sourceScanRefs,
+      stageReferences: refs,
+      stageReferenceCategoriesIndependent: true,
+      sourceScanReferenceUnion: !refsMatchSourceScan,
+      stageReferenceCapacityIndependent: true,
+      sharedReferenceBudgetChars: sharedCapacityChars,
+      stageReferenceBudgetChars: stageCapacityChars,
       loreCandidates: selectedCandidates.length,
       activeLoreBeforeRerank: lorePool.length,
       activeLore: activeLore.length,
@@ -16624,6 +18918,7 @@ function mergeAgentCbsWarnings(...warningLists) {
   const GRADIA_NATIVE_CHAT_COPY_SCHEMA = 'gradia.native_chat_copy.v1';
   const GRADIA_NATIVE_CHAT_COPY_POSITIVE_TTL_MS = 5 * 60 * 1000;
   const GRADIA_NATIVE_CHAT_COPY_NEGATIVE_TTL_MS = 15 * 1000;
+  const GRADIA_NATIVE_CHAT_COPY_SCOPE_CACHE_MAX = 32;
   const GRADIA_NATIVE_CHAT_COPY_TRANSCRIPT_MIN_TURNS = ARC_DIRECTOR_UPDATE_INTERVAL;
 
   const nativeChatCopyClone = value => JSON.parse(JSON.stringify(value ?? null));
@@ -17232,15 +19527,29 @@ function mergeAgentCbsWarnings(...warningLists) {
 
   const ensureNativeChatCopyAdopted = async (options = {}) => {
     if (Runtime.inFlight && options.allowDuringPipeline !== true) return { ok: false, skipped: true, reason: 'target_in_flight' };
+    const now = Date.now();
+    let lightweightScopeIdentity = '';
+    if (!options.context && options.force !== true) {
+      try { lightweightScopeIdentity = await loadCurrentChatIdentity(false); } catch (_) {}
+      if (lightweightScopeIdentity) {
+        const scopeCached = NativeChatCopyScopeCache.get(lightweightScopeIdentity);
+        if (scopeCached && Number(scopeCached.expiresAt || 0) > now) return nativeChatCopyClone(scopeCached.result);
+        if (scopeCached) NativeChatCopyScopeCache.delete(lightweightScopeIdentity);
+      }
+    }
+
     const context = options.context || await resolveNativeChatCopyContext();
     if (!context?.ok || !context.character || !context.chat) {
       recordNativeChatCopyCheck({ phase: 'ensure', reason: context?.reason || 'context_unavailable', refreshError: context?.refreshError || '' });
       return { ok: false, skipped: true, reason: context?.reason || 'context_unavailable' };
     }
     const registryIdentity = nativeChatCopyRegistryIdentity(context.character, context.chat);
-    const now = Date.now();
+    const scopeIdentity = text(context.identity || lightweightScopeIdentity || '').trim();
     const cached = NativeChatCopyCheckCache.get(registryIdentity);
-    if (options.force !== true && cached && Number(cached.expiresAt || 0) > now) return nativeChatCopyClone(cached.result);
+    if (options.force !== true && cached && Number(cached.expiresAt || 0) > now) {
+      if (scopeIdentity) NativeChatCopyScopeCache.set(scopeIdentity, cached);
+      return nativeChatCopyClone(cached.result);
+    }
     if (NativeChatCopyInFlight.has(registryIdentity)) return await NativeChatCopyInFlight.get(registryIdentity);
 
     const task = (async () => {
@@ -17276,10 +19585,20 @@ function mergeAgentCbsWarnings(...warningLists) {
         result: nativeChatCopyClone(result)
       });
       const positive = result?.ok === true || ['native_copy_already_adopted', 'target_already_initialized', 'session_handoff_target'].includes(result?.reason);
-      NativeChatCopyCheckCache.set(registryIdentity, {
+      const cacheEntry = {
         expiresAt: Date.now() + (positive ? GRADIA_NATIVE_CHAT_COPY_POSITIVE_TTL_MS : GRADIA_NATIVE_CHAT_COPY_NEGATIVE_TTL_MS),
         result: nativeChatCopyClone(result)
-      });
+      };
+      NativeChatCopyCheckCache.set(registryIdentity, cacheEntry);
+      if (scopeIdentity) {
+        NativeChatCopyScopeCache.delete(scopeIdentity);
+        NativeChatCopyScopeCache.set(scopeIdentity, cacheEntry);
+        while (NativeChatCopyScopeCache.size > GRADIA_NATIVE_CHAT_COPY_SCOPE_CACHE_MAX) {
+          const oldest = NativeChatCopyScopeCache.keys().next().value;
+          if (oldest === undefined) break;
+          NativeChatCopyScopeCache.delete(oldest);
+        }
+      }
       return result;
     }).finally(() => {
       NativeChatCopyInFlight.delete(registryIdentity);
@@ -18294,6 +20613,7 @@ function mergeAgentCbsWarnings(...warningLists) {
     persona: 1.45,
     lore_direct: 1.48,
     lore_host_selected: 1.50,
+    lore_semantic: 1.20,
     lore_recent: 1.18,
     lore_recursive: 0.92,
     lore_jaccard_current: 1.34,
@@ -18338,6 +20658,12 @@ function mergeAgentCbsWarnings(...warningLists) {
       messageIndex: Number.isFinite(Number(value.messageIndex)) ? Number(value.messageIndex) : null,
       selectionGroups: Array.from(new Set((Array.isArray(value.selectionGroups) ? value.selectionGroups : []).map(item => text(item).trim()).filter(Boolean))),
       longTermAuthority: text(value.longTermAuthority || '').trim(),
+      evidencePassages: Array.isArray(value.evidencePassages) ? value.evidencePassages.map(item => ({ ...item })) : [],
+      coverageAnchors: Array.from(new Set((Array.isArray(value.coverageAnchors) ? value.coverageAnchors : []).map(item => text(item).trim()).filter(Boolean))),
+      dynamicSelection: value.dynamicSelection && typeof value.dynamicSelection === 'object' ? { ...value.dynamicSelection } : null,
+      candidateProtected: value.candidateProtected === true,
+      injectionProtected: value.injectionProtected === true,
+      coverageCritical: value.coverageCritical === true,
       oversizeTruncated: value.oversizeTruncated === true
     };
     item.authorityWeight = referenceAuthorityWeight(authorityClass);
@@ -18453,6 +20779,9 @@ function mergeAgentCbsWarnings(...warningLists) {
     }[item.activationRoute] || 0;
     return item.authorityWeight * 100
       + (item.protected ? 70 : 0)
+      + (item.injectionProtected ? 48 : 0)
+      + (item.coverageCritical ? 34 : 0)
+      + (item.candidateProtected ? 18 : 0)
       + routeBoost
       + hypaBoost
       + Math.max(-20, Math.min(30, item.relevanceScore * 20));
@@ -18462,6 +20791,68 @@ function mergeAgentCbsWarnings(...warningLists) {
     const header = serializeCanonicalReferenceItem({ ...item, content: '' }).trim();
     const bodyBudget = Math.max(0, maxSerializedChars - header.length - 2);
     if (bodyBudget < 120) return null;
+    const fitEvidenceBlock = (blockValue, limit) => {
+      const block = text(blockValue || '').trim();
+      if (!block || block.length <= limit) return block;
+      const newline = block.indexOf('\n');
+      const passageHeader = newline >= 0 ? block.slice(0, newline).trim() : '';
+      const body = newline >= 0 ? block.slice(newline + 1).trim() : block;
+      const available = Math.max(40, limit - (passageHeader ? passageHeader.length + 1 : 0));
+      const terms = Array.from(new Set([
+        ...(Array.isArray(item.coverageAnchors) ? item.coverageAnchors : []),
+        ...(Array.isArray(item.evidencePassages) ? item.evidencePassages.flatMap(passage => passage?.coveredAnchors || []) : [])
+      ].map(value => text(value || '').trim()).filter(value => value.length >= 2))).slice(0, 48);
+      const lower = body.normalize('NFKC').toLocaleLowerCase();
+      const starts = [0, Math.max(0, body.length - available)];
+      for (const termValue of terms) {
+        const term = termValue.normalize('NFKC').toLocaleLowerCase();
+        if (!term) continue;
+        const hit = lower.indexOf(term);
+        if (hit >= 0) starts.push(Math.max(0, Math.min(body.length - available, hit - Math.floor(available * 0.34))));
+      }
+      let best = { text: body.slice(0, available).trim(), score: -1 };
+      for (const start of starts) {
+        const slice = body.slice(start, Math.min(body.length, start + available)).trim();
+        const normalized = loreJaccardNormalizeKey(slice);
+        const hitCount = terms.reduce((count, term) => normalized.includes(loreJaccardNormalizeKey(term)) ? count + 1 : count, 0);
+        if (hitCount > best.score) best = { text: slice, score: hitCount };
+      }
+      return [passageHeader, best.text].filter(Boolean).join('\n').slice(0, limit).trim();
+    };
+    if (item.sourceType === 'lore' && Array.isArray(item.evidencePassages) && item.evidencePassages.length) {
+      const rankedPassages = item.evidencePassages.slice().sort((left, right) => (
+        Number(right.utility || 0) - Number(left.utility || 0)
+        || Number(right.confidenceScore || 0) - Number(left.confidenceScore || 0)
+        || Number(left.order || 0) - Number(right.order || 0)
+      ));
+      const evidenceBlocks = [];
+      let evidenceUsed = 0;
+      for (const passage of rankedPassages) {
+        const block = text(passage?.block || '').trim();
+        if (!block) continue;
+        const addition = (evidenceBlocks.length ? 2 : 0) + block.length;
+        if (evidenceUsed + addition > bodyBudget) continue;
+        evidenceBlocks.push(block);
+        evidenceUsed += addition;
+      }
+      if (!evidenceBlocks.length) {
+        const topBlock = text(rankedPassages[0]?.block || item.content || '').trim();
+        const fittedTopBlock = fitEvidenceBlock(topBlock, bodyBudget);
+        if (fittedTopBlock) evidenceBlocks.push(fittedTopBlock);
+      }
+      const evidenceContent = evidenceBlocks.filter(Boolean).join('\n\n').trim();
+      if (evidenceContent) {
+        const evidencePacked = normalizeCanonicalReferenceItem({
+          ...item,
+          content: evidenceContent,
+          id: item.id,
+          normalizedHash: referenceContentHash(evidenceContent),
+          evidencePassages: rankedPassages.filter(passage => evidenceContent.includes(text(passage?.block || '').trim())),
+          oversizeTruncated: true
+        }, item.sourceOrder);
+        if (referenceSerializedChars(evidencePacked) <= maxSerializedChars) return evidencePacked;
+      }
+    }
     const paragraphs = text(item.content || '').split(/\n{2,}/g);
     const selected = [];
     let used = 0;
@@ -18804,16 +21195,20 @@ function mergeAgentCbsWarnings(...warningLists) {
     if (route === 'jaccard_current_input') return 'lore_jaccard_current';
     if (route === 'terminal_entity') return 'lore_jaccard_terminal';
     if (route === 'recursive') return 'lore_recursive';
-    if (route === 'recent_context') return 'lore_recent';
-    return 'lore_direct';
+    if (route === 'recent_context' || route === 'terminal_scene' || route === 'continuity') return 'lore_recent';
+    if (['forced', 'always', 'chat_local_always', 'current_input'].includes(route)) return 'lore_direct';
+    return 'lore_semantic';
   };
 
   const canonicalLoreReferenceItems = (activeLore = [], loreMode = DEFAULT_LORE_ACTIVATION_MODE) => (activeLore || []).map((lore, sourceOrder) => {
     const unifiedMode = normalizeLoreActivationMode(loreMode) === UNIFIED_LORE_ACTIVATION_MODE;
     const content = text(unifiedMode ? (lore.retrievedContent || lore.content) : lore.content).trim();
     const authorityClass = loreAuthorityClass(lore);
+    const dynamicProtection = lore?.stageReranker || {};
     const protectedLore = authorityClass === 'lore_host_selected'
-      || authorityClass === 'lore_direct';
+      || authorityClass === 'lore_direct'
+      || dynamicProtection.injectionProtected === true
+      || dynamicProtection.coverageCritical === true;
     const sourceNamespace = lore.sourceType === 'module'
       ? `module:${lore.moduleKey || lore.moduleId || lore.moduleName || 'unknown'}`
       : `character:${lore.source || 'current'}`;
@@ -18838,7 +21233,13 @@ function mergeAgentCbsWarnings(...warningLists) {
       moduleId: lore.moduleId || lore.moduleKey || '',
       hostSelected: lore.hostSelected === true,
       recursiveDepth: lore.activationRoute === 'recursive' ? 1 : 0,
-      activationEvidence: lore.activationEvidence || lore.jaccardPromotion?.evidence || null
+      activationEvidence: lore.activationEvidence || lore.jaccardPromotion?.evidence || null,
+      evidencePassages: Array.isArray(lore?.passageEvidence?.passages) ? lore.passageEvidence.passages : [],
+      coverageAnchors: Array.isArray(lore?.passageEvidence?.coveredAnchors) ? lore.passageEvidence.coveredAnchors : [],
+      dynamicSelection: lore?.stageReranker?.dynamic || null,
+      candidateProtected: lore?.stageReranker?.candidateProtected === true,
+      injectionProtected: lore?.stageReranker?.injectionProtected === true,
+      coverageCritical: lore?.stageReranker?.coverageCritical === true
     };
   }).filter(item => item.content);
 
@@ -19146,7 +21547,8 @@ function mergeAgentCbsWarnings(...warningLists) {
         capacitySource: capacity.capacitySource,
         profileCapChars: capacity.profileCapChars,
         safeAvailableChars: capacity.safeAvailableChars,
-        effectiveBudgetChars: capacity.effectiveBudgetChars,
+        requestedEffectiveBudgetChars: Number(capacity.effectiveBudgetChars || 0),
+        effectiveBudgetChars: allocated.budget.capacityChars,
         demandChars: allocated.budget.demandChars,
         usedChars: allocated.budget.usedChars,
         omittedChars: allocated.budget.omittedChars,
@@ -31153,13 +33555,19 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       enabled: entry.calls > 1,
       reason: entry.calls > 1 ? 'same_stage_exact_prefix_reused' : 'awaiting_exact_shared_prefix_projection'
     }]));
-    // SHADOW ACT still decides which reference categories are allowed for this run.
-    // The expensive source scan/activation pass is built once, then each draft stage
-    // reranks only that shared lore candidate pool into its own Top-K view.
-    const sharedRisuRefs = normalizeRisuReferences(
-      stageExecutionOptions(settings, 'shadow_act').risuRefs,
-      defaultRisuReferencesForStage('shadow_act')
-    );
+    // Source acquisition uses the OR-union of every enabled stage's allowed reference
+    // categories. This keeps API/database/module scanning and CBS rendering request-scoped,
+    // while each real stage later filters that snapshot back to its own risuRefs before
+    // relationship locking, reranking, and packet materialization. SHADOW is therefore
+    // neither the lore-candidate gate nor the reference-category gate for later AIDEs.
+    const stageRisuRefsByStage = Object.fromEntries(enabledContextStages.map(stageName => [
+      stageName,
+      normalizeRisuReferences(
+        stageExecutionOptions(settings, stageName).risuRefs,
+        defaultRisuReferencesForStage(stageName)
+      )
+    ]));
+    const sharedRisuRefs = unionRisuReferences(Object.values(stageRisuRefsByStage));
     const hasSharedContextConsumer = settings.enableShadowAct === true;
 
     Runtime.pipelineTimings = {
@@ -31174,6 +33582,8 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
         elapsedMs: 0,
         reusedByStages: [],
         references: { ...sharedRisuRefs },
+        sourceScanReferences: { ...sharedRisuRefs },
+        stageReferences: cloneJson(stageRisuRefsByStage),
         transport: null,
         promptCachePlan
       },
@@ -31238,7 +33648,8 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
         const previewRecent = attachInputAssistContinuityState(buildRecentChat(messages, previewSettings), settings);
         previewRecent.runLineage = runLineage;
         try {
-          const previewView = materializeSharedRisuContext(sharedRisuContext, previewRecent, previewSettings, sharedRisuRefs);
+          const previewRefs = stageRisuRefsByStage[entry.stageName] || sharedRisuRefs;
+          const previewView = materializeSharedRisuContext(sharedRisuContext, previewRecent, previewSettings, previewRefs);
           cacheViewProjections.push({
             ...entry,
             sharedPrefixHash: previewView.referencePacketHash || '',
@@ -31319,7 +33730,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       const recent = attachInputAssistContinuityState(buildRecentChat(messages, scopedSettings), settings);
       recent.runLineage = runLineage;
       recent.arcDirector = arcControl;
-      const refs = sharedRisuRefs;
+      const refs = stageRisuRefsByStage[stageName] || sharedRisuRefs;
       if (sharedRisuContext) {
         const contextStartedAt = Date.now();
         const risuContext = materializeSharedRisuContext(sharedRisuContext, recent, scopedSettings, refs);
@@ -31415,7 +33826,7 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
     };
 
     const prepareRisuEngineRecent = async (seedRecent, presetSourceStage) => {
-      const refs = defaultRisuReferencesForStage('shadow_act');
+      const refs = stageRisuRefsByStage[presetSourceStage] || sharedRisuRefs || defaultRisuReferencesForStage('shadow_act');
       const scopedSettings = {
         ...settings,
         sharedReferencePromptCacheEnabled: promptCachePlan[RISU_ENGINE_STAGE]?.enabled === true,
@@ -38225,8 +40636,8 @@ html,body{width:100%;height:100%;overflow:hidden}
             note: 'SHADOW ACT의 초안, 세 AIDE의 자연어 분석값과 수정문, 최종 장면 본문에 적용합니다. 참고 원문과 고유명사·태그·JSON 키는 번역하지 않습니다.'
           }),
           runtimeField('내장 작성 방식', 'builtInStylePreset', { choices: [['unified_stylepack','GRADIA 통합 작성 방식']] }),
-          fieldNode('로어 검색 엔진', guiEl('div', { class: 'sga-provider-note-box' }, [guiEl('span', { text: '자동 · GRADIA 통합 검색' })]), 'RisuAI 실제 선택·활성화 키·BM25F/Jaccard/Entity를 RRF로 합치고 Confidence Gate와 MMR을 적용합니다.'),
-          runtimeField('단계별 일반 로어 최대', 'loreRerankerTopK', { number: true, min: 1, max: 32, note: '기본 8. 강제/항상 활성 로어는 이 수와 별도로 보호되며 관련도가 낮으면 슬롯을 억지로 채우지 않습니다.' }),
+          fieldNode('로어 검색 엔진', guiEl('div', { class: 'sga-provider-note-box' }, [guiEl('span', { text: '자동 · 전체 passage 통합 검색' })]), '모든 허용 로어의 전체 본문을 passage 인덱스로 검색한 뒤 RRF·관련도·Coverage MMR·문맥 예산을 이용해 필요한 만큼 자동 확장합니다.'),
+          runtimeField('단계별 로어 시작값', 'loreRerankerTopK', { number: true, min: 1, max: 32, note: '기본 8. 고정 최대치가 아닙니다. 필요한 인물·관계·규칙·사건 근거가 덜 덮였거나 관련도 점수군이 이어지면 문맥 예산 안에서 자동으로 늘어납니다.' }),
           runtimeField('오류가 났을 때', 'failureMode', { choices: [['soft','다음 단계 계속 · 추천'],['degraded','직전 정상 초안 사용'],['hard','전체 실행 중단']] })
         ]),
         guiEl('div', { class: 'sga-card' }, [
@@ -38766,7 +41177,7 @@ html,body{width:100%;height:100%;overflow:hidden}
                     `모델 안전량 ${formatChars(canonicalReferenceBudget.safeAvailableChars)}`,
                     `실제 사용 ${formatChars(canonicalReferenceBudget.usedChars)}`,
                     `제외 ${formatChars(canonicalReferenceBudget.omittedChars)}`,
-                    '공통 후보 1회 수집 · 일반 로어 Top 8 + 필수 로어 보호'
+                    '경량 후보 압축 → 공용 후보 24 · 일반 로어 Top 8 + 필수 로어 보호'
                   ].join(' · ')
                 }),
                 guiEl('div', { class: 'sga-code', text: JSON.stringify(canonicalReferenceBudget, null, 2) })
@@ -40191,7 +42602,7 @@ const buildNarrativeArchiveViewerPage = () => {
           active: true,
           title: '로어 검색',
           description: '자동',
-          meta: `단계별 일반 로어 최대 ${clampInt(runtime.loreRerankerTopK, 1, 32, DEFAULT_STAGE_LORE_RERANK_TOP_K)}개`,
+          meta: `자동 · 시작 ${clampInt(runtime.loreRerankerTopK, 1, 32, DEFAULT_STAGE_LORE_RERANK_TOP_K)}개 · 필요 시 확장`,
           badge: '고급',
           onClick: () => navigateGui('flow', '#sga-flow-runtime', 'runtime')
         })
@@ -42011,23 +44422,77 @@ const buildNarrativeArchiveViewerPage = () => {
     debugBm25fLoreCorpus(activeLore = [], query = '') {
       return JSON.parse(JSON.stringify(loreBm25fLoreCorpusScores(activeLore, query, 6200)));
     },
+    debugFullTextLoreIndex(activeLore = [], query = '') {
+      const corpus = loreFullTextIndexCorpus(activeLore);
+      const scores = loreFullTextBm25fCorpusScores(activeLore, query, LORE_BM25F_LORE_FIELD_DEFS, { corpus });
+      return JSON.parse(JSON.stringify({
+        engine: LORE_FULL_TEXT_INDEX_VERSION,
+        documentCount: corpus.documentCount,
+        indexedChars: corpus.indexedChars,
+        reusedCount: corpus.reusedCount,
+        rebuiltCount: corpus.rebuiltCount,
+        signature: corpus.signature,
+        fullContentSearched: true,
+        postingCount: Number(corpus.postingCount || 0),
+        identityGramCount: Number(corpus.identityGramCount || 0),
+        postingsUpdateMode: corpus.postingsUpdateMode || '',
+        passageIndexEngine: LORE_PASSAGE_INDEX_VERSION,
+        passageCount: corpus.records.reduce((sum, record) => sum + Number(record.passageCount || 0), 0),
+        passageCoveredChars: corpus.records.reduce((sum, record) => sum + Number(record.passageCoveredChars || 0), 0),
+        scores: scores.scores.map((score, index) => ({
+          id: loreContinuityIdentity(activeLore[index]) || score.id,
+          label: activeLore[index]?.label || '',
+          score: score.score,
+          rawScore: score.rawScore,
+          matchedTerms: score.matchedTerms,
+          passageCount: Number(corpus.records[index]?.passageCount || 0),
+          sourceChars: Number(corpus.records[index]?.chars || 0)
+        }))
+      }));
+    },
+    debugLorePassageEvidence(lore = {}, query = '', stageName = 'shadow_act', maxChars = LORE_PASSAGE_DEFAULT_EVIDENCE_CHARS) {
+      const anchors = loreDynamicRequiredAnchors([{ lore }], query, '');
+      return JSON.parse(JSON.stringify(loreBuildPassageEvidence(lore, query, {
+        stage: stageName,
+        maxChars,
+        requiredAnchors: anchors,
+        protected: false
+      })));
+    },
+    debugLorePassageScores(lore = {}, query = '') {
+      const record = loreFullTextIndexRecord(lore);
+      const index = loreEnsurePassageIndex(record);
+      return JSON.parse(JSON.stringify({
+        engine: LORE_PASSAGE_INDEX_VERSION,
+        sourceChars: index.sourceChars,
+        passageCount: index.passageCount,
+        queryTokens: loreJaccardUnique(loreBm25Tokens(query, 220), 160),
+        scores: lorePassageScoreRecord(record, query)
+      }));
+    },
     debugSemanticLoreCandidateEligible(candidate = {}, currentQuery = '', terminalQuery = '', recentMessages = [], chatLength = 1, defaultScanDepth = DEFAULT_RECENT_TURNS) {
       return loreSemanticCandidateEligible(candidate, currentQuery, terminalQuery, chatLength, { recentMessages, defaultScanDepth });
     },
-    debugBuildSharedLoreCandidatePool(semanticLore = [], keyActiveLore = [], hostSelectedLore = [], currentQuery = '', terminalQuery = '', topK = DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K) {
-      const merged = mergeLoreCandidateSignals(semanticLore, keyActiveLore, hostSelectedLore);
-      const rerank = rerankLoreForStage(merged, 'shadow_act', {
-        primaryQuery: currentQuery,
+    debugBuildSharedLoreCandidatePool(semanticLore = [], keyActiveLore = [], hostSelectedLore = [], currentQuery = '', terminalQuery = '', topK = DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K, stageNames = ['shadow_act', 'aide_character', 'aide_world', 'aide_plot'], stageReferences = {}) {
+      const built = buildGradiaSharedLoreCandidatePool(
+        semanticLore,
+        keyActiveLore,
+        hostSelectedLore,
+        [],
+        null,
+        currentQuery,
         terminalQuery,
-        topK: clampInt(topK, 1, 64, DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K),
-        candidatePoolMode: true
-      });
-      return JSON.parse(JSON.stringify({
-        engine: LORE_SHARED_CANDIDATE_POOL_VERSION,
-        universeCount: merged.length,
-        selected: rerank.selected || [],
-        rerank
-      }));
+        1,
+        {
+          prefilterTopK: Math.max(DEFAULT_SHARED_LORE_PREFILTER_TOP_K, clampInt(topK, 1, 64, DEFAULT_SHARED_LORE_CANDIDATE_POOL_TOP_K) * 2),
+          stageNames,
+          stageReferences
+        }
+      );
+      return JSON.parse(JSON.stringify(built));
+    },
+    debugPrefilterSharedLoreCandidates(semanticLore = [], keyActiveLore = [], hostSelectedLore = [], currentQuery = '', terminalQuery = '', topK = DEFAULT_SHARED_LORE_PREFILTER_TOP_K) {
+      return JSON.parse(JSON.stringify(loreSharedPrefilterCandidates(semanticLore, keyActiveLore, hostSelectedLore, currentQuery, terminalQuery, { topK })));
     },
     debugRerankLoreForStage(activeLore = [], stageName = 'shadow_act', primaryQuery = '', terminalQuery = '', topK = DEFAULT_STAGE_LORE_RERANK_TOP_K) {
       return JSON.parse(JSON.stringify(rerankLoreForStage(
@@ -43050,6 +45515,34 @@ const buildNarrativeArchiveViewerPage = () => {
     debugCompareStageReferenceViews(run = {}) {
       return cloneJson(compareStageReferenceViews(run?.views || run?.stageViews || run || {}));
     },
+    debugRisuReferenceUnion(values = []) {
+      const source = Array.isArray(values) ? values : [values];
+      return cloneJson(unionRisuReferences(source));
+    },
+    debugStageLoreReferenceFilter(lores = [], stageName = 'shadow_act', references = null) {
+      const refs = normalizeRisuReferences(references || {}, defaultRisuReferencesForStage(stageName));
+      const selected = (Array.isArray(lores) ? lores : []).filter(lore => loreAllowedByRisuReferences(lore, refs));
+      return cloneJson({
+        stage: stageName,
+        references: refs,
+        selected: selected.map(lore => ({ id: loreContinuityIdentity(lore), label: lore?.label || '', sourceType: lore?.sourceType || '' }))
+      });
+    },
+    debugMaterializeSharedRisuContext(shared = {}, recent = {}, settings = {}, references = null) {
+      const stageName = text(settings?.activeStageName || 'shadow_act');
+      const safeSettings = {
+        mode: 'normal',
+        quickProfile: 'balanced',
+        loreRerankerTopK: DEFAULT_STAGE_LORE_RERANK_TOP_K,
+        aideStageOrder: DEFAULT_AIDE_STAGE_ORDER,
+        stageOptions: {},
+        providerPresets: {},
+        defaultPresetName: '',
+        ...settings,
+        activeStageName: stageName
+      };
+      return cloneJson(materializeSharedRisuContext(shared || {}, { ...(recent || {}) }, safeSettings, references));
+    },
     debugBuildFinalSynthesisContract(settings = {}, draft = '', analyses = []) {
       const explicitDensity = typeof settings === 'string'
         ? settings
@@ -43495,11 +45988,18 @@ const buildNarrativeArchiveViewerPage = () => {
       clearRequestReuseCache();
       clearArgumentCache();
       NativeChatCopyCheckCache.clear();
+      NativeChatCopyScopeCache.clear();
       NativeChatCopyInFlight.clear();
+      RisuStaticSnapshotInFlight.clear();
+      CurrentChatIdentityCache = { value: '', expiresAt: 0 };
       Runtime.lastNativeChatCopy = null;
       Runtime.lastNativeChatCopyCheck = null;
       LoreJaccardTokenSimilarityCache.clear();
       StageLoreRerankerFeatureCache.clear();
+      LoreFullTextIndexCache.clear();
+      LorePassageEvidenceCache.clear();
+      LoreFullTextLastCorpus = null;
+      LoreFullTextUniverseCorpus = null;
       SkillRouterScoreCache.clear();
       Runtime.skillRoutes = {};
       try {
