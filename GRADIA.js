@@ -1,7 +1,7 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.79
+//@display-name GRADIA v0.25.80
 //@api 3.0
-//@version 0.25.79
+//@version 0.25.80
 
 /* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
 //@allowed-ipc flashback_hayaku_bridge
@@ -848,6 +848,7 @@
  * v0.25.77 removes the bounded-fingerprint and candidate-sampling shortcuts from unified lore retrieval. Every permitted lore body is token-indexed in full, unchanged entries reuse an in-memory full-text index while changed entries alone are rebuilt, all permitted lore participate in first-pass BM25F/lexical ranking, stage BM25F/Jaccard and MMR consume the same full-body index, and time-budget early exits no longer leave candidate lore unscored. Cross-request Risu static snapshot TTL reuse is also removed so lore changed immediately before a request is re-read. Context-window packing remains a separate final-delivery budget and does not change search coverage.
  * v0.25.78 replaces fixed 48→24→8 lore cuts with an adaptive evidence frontier. Every permitted lore remains fully indexed; the shared pool and each stage expand beyond the configured starting count when exact host/key/entity evidence, uncovered query anchors, or a flat relevance cluster requires more material. Long lore is injected through query-ranked, offset-preserving passages built from the complete source rather than a leading truncation. Passage-level coverage-aware MMR, budget-aware selection, candidate/injection protection, and shared-core diagnostics prevent required lore from disappearing while keeping simple scenes compact.
  * v0.25.79 removes SHADOW-gated shared-lore discovery without multiplying the all-lore precision cost. One complete full-index frontier is built once, then each enabled AIDE runs a cheap stage-domain rescue lane over the same inverted index so Character/World/Plot-only candidates can join the union before CBS rendering. The source snapshot now uses the OR-union of enabled stages' reference categories, while each stage filters that snapshot back to its own character/module/reference toggles before Canon Lock, reranking, and packet materialization, so SHADOW cannot suppress a category that a later AIDE explicitly enables. The common frontier uses a linear fast path and a sub-linear optional safety ceiling, while forced/always/host/key/coverage evidence may overflow it; fuzzy identity can improve rank but only exact indexed identity may create mandatory protection. No extra database/API/model call is added; diagnostics expose stage rescue contributions, per-stage reference categories, and lore discovered only outside SHADOW.
+ * v0.25.80 records the exact per-stage material-use manifest for the latest turn and shows it in Execution Results. The manifest lists the references actually packed for that stage (lore, persona, character definition, Hypa, auxiliary material), direct SHADOW Author Note, Story Arc continuity, current/terminal/recent chat context, previous-stage draft, user creative guidance, and applied Skills. Lore entries expose rank, activation route, protection reasons, and query-focused passage offsets without duplicating full source text into trace memory. This is diagnostics-only: retrieval, prompts, budgets, and model-call counts are unchanged.
  * v0.25.60 adds explicit Story Arc cold-start maintenance shared by the Story Arc and Narrative Archive pages. “최근 완료 5턴으로 기준 생성” analyzes the latest complete canonical five-turn window even off-boundary, while the full cold start processes only missing canonical windows in chronological order, saves every successful window immediately to Narrative Archive, keeps the newest result as the active Story Arc, resumes after failure without repeating stored windows, and confirms the estimated Arc Director/document-embedding calls before execution.
  * v0.25.51 fixes copy/manual-send clipboard delivery in iframe/WebView runtimes. The copy action now runs inside the originating button click before any modal restore/hide await can consume transient user activation; it tries synchronous selection/execCommand first, then navigator.clipboard, records the method for diagnostics, and keeps the dialog open with the generated text selected when browser policy blocks automated copying.
  *
@@ -937,7 +938,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.79';
+  const PLUGIN_VERSION = '0.25.80';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -24669,6 +24670,16 @@ ${passage.text || ''}`, 420));
                 stage: stageName,
                 ...fitted.referenceRepack
               };
+              Runtime.lastRisuContext.stages[stageName].materialsUsed = reconcileStageMaterialUsageWithPacket(
+                Runtime.lastRisuContext.stages[stageName].materialsUsed,
+                fitted.referencePacket
+              );
+            }
+            if (stageName === INPUT_ASSIST_STAGE_ID && Runtime.lastInputAssistMaterialUsage) {
+              Runtime.lastInputAssistMaterialUsage = reconcileStageMaterialUsageWithPacket(
+                Runtime.lastInputAssistMaterialUsage,
+                fitted.referencePacket
+              );
             }
             if (stageName === 'shadow_act' && Runtime.lastRisuContext?.shared) {
               Runtime.lastRisuContext.shared.referencePacket = fitted.referencePacket;
@@ -25356,6 +25367,7 @@ ${passage.text || ''}`, 420));
   };
 
   const runInputAssistForContent = async (content, settings, options = {}) => {
+    Runtime.lastInputAssistMaterialUsage = null;
     // A static snapshot belongs to exactly one delivery cycle. Regeneration may
     // replace it inside the same cycle, while a newly submitted input must never
     // inherit a candidate or armed handoff from an earlier request.
@@ -25488,6 +25500,13 @@ ${passage.text || ''}`, 420));
     if (stageHasRisuReferences(settings, INPUT_ASSIST_STAGE_ID)) {
       const context = await buildShadowRisuContext(messages, recent, scoped, inputAssistContextSnapshot, refs);
       recent.risuContext = context.block || '';
+      recent.referencePacketBlock = context.referencePacketBlock || context.block || '';
+      recent.referencePacket = context.referencePacket || null;
+      recent.referencePacketHash = context.referencePacketHash || '';
+      recent.referenceCapacity = context.referenceCapacity || null;
+      recent.risuContextMeta = context.meta || risuContextMeta;
+      recent.risuActiveLore = context.activeLore || [];
+      recent.risuSelectedLoreCandidates = context.selectedCandidates || [];
       scoped.ragCbsContext = context.cbsContext || context.snapshot?.cbsContext || null;
       risuContextMeta = context.meta || risuContextMeta;
       inputAssistContextSnapshot = context.snapshot || null;
@@ -25501,6 +25520,10 @@ ${passage.text || ''}`, 420));
       });
       recent.arcDirector = inputArcControl;
     }
+    Runtime.lastInputAssistMaterialUsage = buildStageMaterialUsageSnapshot(
+      INPUT_ASSIST_STAGE_ID, recent, scoped, null, null
+    );
+    recent.materialsUsed = Runtime.lastInputAssistMaterialUsage;
     if (authorDirectedDraft) {
       const startedAt = Date.now();
       // RP author-choice generation reads the COMPLETE CURRENT continuity snapshot directly.
@@ -28283,11 +28306,258 @@ ${passage.text || ''}`, 420));
     return stage;
   };
 
+  const STAGE_MATERIAL_USAGE_SCHEMA = 'gradia_stage_material_usage_v1';
+  const stageMaterialUsageReferenceKind = group => ({
+    persona: 'persona',
+    characterDefinition: 'character_definition',
+    lore: 'lore',
+    hypa: 'hypa',
+    auxiliary: 'auxiliary'
+  }[group] || group || 'reference');
+
+  const buildStageMaterialUsageSnapshot = (stageName, recent = {}, settings = {}, previousStage = null, skillRouter = null) => {
+    const packet = recent?.referencePacket && typeof recent.referencePacket === 'object'
+      ? recent.referencePacket
+      : null;
+    const references = packet?.references && typeof packet.references === 'object'
+      ? packet.references
+      : {};
+    const activeLore = Array.isArray(recent?.risuActiveLore) ? recent.risuActiveLore : [];
+    const loreByReferenceId = new Map();
+    const loreByLabel = new Map();
+    activeLore.forEach(lore => {
+      const identity = loreContinuityIdentity(lore);
+      if (identity) loreByReferenceId.set(`lore:${identity}`, lore);
+      const label = text(lore?.label || lore?.source || '').trim();
+      if (label && !loreByLabel.has(label)) loreByLabel.set(label, lore);
+    });
+
+    const referenceMaterials = [];
+    const pushReference = (group, item, order) => {
+      if (!item || typeof item !== 'object') return;
+      const kind = stageMaterialUsageReferenceKind(group);
+      const label = text(item.label || item.id || `${kind} ${order + 1}`).trim() || `${kind} ${order + 1}`;
+      const lore = kind === 'lore'
+        ? (loreByReferenceId.get(text(item.id || '').trim()) || loreByLabel.get(label) || null)
+        : null;
+      const reranker = lore?.stageReranker || null;
+      const evidence = lore?.passageEvidence || null;
+      const passages = Array.isArray(evidence?.passages)
+        ? evidence.passages.map(passage => ({
+            heading: text(passage?.heading || '').trim(),
+            start: Math.max(0, Number(passage?.start || 0)),
+            end: Math.max(0, Number(passage?.end || 0)),
+            chars: Math.max(0, Number(passage?.chars || 0)),
+            coveredAnchors: Array.isArray(passage?.coveredAnchors) ? passage.coveredAnchors.slice(0, 24) : []
+          }))
+        : [];
+      referenceMaterials.push({
+        id: text(item.id || '').trim(),
+        kind,
+        label,
+        source: text(item.sourceNamespace || lore?.source || '').trim(),
+        sourceType: text(lore?.sourceType || item.sourceType || kind).trim(),
+        moduleName: text(lore?.moduleName || '').trim(),
+        chars: Math.max(0, Number(item.chars || text(item.content || '').length)),
+        activationRoute: text(item.activationRoute || lore?.activationRoute || '').trim(),
+        selectionReason: text(item.selectionReason || '').trim(),
+        authorityClass: text(item.authorityClass || '').trim(),
+        protected: item.protected === true,
+        rank: Math.max(0, Number(reranker?.rank || 0)),
+        score: Number(reranker?.score || item.relevanceScore || 0),
+        confidenceScore: Number(reranker?.confidenceScore || 0),
+        candidateProtected: reranker?.candidateProtected === true,
+        injectionProtected: reranker?.injectionProtected === true,
+        coverageCritical: reranker?.coverageCritical === true,
+        protectionReasons: Array.isArray(reranker?.protectionReasons) ? reranker.protectionReasons.slice(0, 16) : [],
+        evidenceMode: kind === 'lore'
+          ? (evidence?.whole === true ? 'whole_lore' : passages.length ? 'relevant_passages' : 'selected_content')
+          : 'whole_reference',
+        sourceChars: Math.max(0, Number(evidence?.sourceChars || lore?.retrieval?.rawChars || text(lore?.content || '').length || item.chars || 0)),
+        passageCount: passages.length,
+        passages
+      });
+    };
+    ['persona', 'characterDefinition', 'lore', 'hypa', 'auxiliary'].forEach(group => {
+      const list = Array.isArray(references?.[group]) ? references[group] : [];
+      list.forEach((item, order) => pushReference(group, item, order));
+    });
+
+    if (stageName === 'shadow_act' && text(recent?.authorNote || '').trim()) {
+      referenceMaterials.unshift({
+        id: `author-note:${text(recent?.authorNoteMeta?.hash || stableDraftHash(recent.authorNote)).trim()}`,
+        kind: 'author_note',
+        label: 'Current Chat Author Note',
+        source: text(recent?.authorNoteMeta?.source || 'current_chat').trim(),
+        sourceType: 'author_note',
+        moduleName: '',
+        chars: text(recent.authorNote).length,
+        activationRoute: 'direct_shadow_authority',
+        selectionReason: 'direct_shadow_author_note',
+        authorityClass: 'author_note',
+        protected: true,
+        rank: 0,
+        score: 1,
+        confidenceScore: 1,
+        candidateProtected: true,
+        injectionProtected: true,
+        coverageCritical: false,
+        protectionReasons: ['author_note_authority'],
+        evidenceMode: 'whole_reference',
+        sourceChars: Number(recent?.authorNoteMeta?.rawChars || text(recent.authorNote).length),
+        passageCount: 0,
+        passages: []
+      });
+    }
+
+    const contextMaterials = [];
+    const pushContext = (kind, label, value, detail = {}) => {
+      const body = text(value || '').trim();
+      if (!body && !detail.force) return;
+      contextMaterials.push({ kind, label, chars: body.length, ...detail });
+    };
+    pushContext('current_input', '현재 유저 입력', submittedCurrentInput(recent), { authority: 'highest_current_turn' });
+    pushContext(
+      'terminal_scene',
+      '직전 AI 응답 종결부',
+      recent?.terminalVisibleScene || recent?.inputAssistTerminalVisibleScene || recent?.sceneAnchor || '',
+      { authority: 'live_scene_anchor' }
+    );
+    pushContext('recent_chat', `최근 완료 U+A ${Math.max(0, Number(recent?.recentTurnCount || 0))}턴`, recent?.completeTurnsText || recent?.text || '', {
+      turns: Math.max(0, Number(recent?.recentTurnCount || 0))
+    });
+    pushContext('system_context', 'RisuAI 시스템/요청 문맥', recent?.systemContext || '');
+    pushContext('others_info', 'Others Info / 보조 패킷', recent?.othersInfo || '');
+    const inheritedDraft = stageDraft(previousStage);
+    if (stageName !== 'shadow_act' && inheritedDraft) {
+      pushContext('previous_stage_draft', `직전 단계 초안 · ${text(previousStage?.stage || 'previous').trim()}`, inheritedDraft, {
+        stage: text(previousStage?.stage || '').trim()
+      });
+    }
+    const customCreativeInstruction = text(settings?.beforeCustomPrompts?.[stageName] || '').trim();
+    if (customCreativeInstruction) {
+      pushContext('user_creative_instruction', '사용자 창작 지침', customCreativeInstruction, { source: 'stage_ooc_or_custom_prompt' });
+    }
+    const arcControl = recent?.arcDirector || Runtime.arcDirector || null;
+    const arcUsable = arcControl?.enabled === true && arcControl?.stale !== true && !!(arcControl?.arc || arcControl?.currentBrief);
+    if (arcUsable) {
+      contextMaterials.push({
+        kind: 'story_arc',
+        label: 'Story Arc DB',
+        chars: 0,
+        revision: Math.max(0, Number(arcControl?.arc?.revision || 0)),
+        throughTurn: Math.max(0, Number(arcControl?.arc?.basis?.throughTurn || 0)),
+        beatId: text(arcControl?.currentBrief?.beatId || '').trim(),
+        beatType: text(arcControl?.currentBrief?.beatType || '').trim(),
+        status: text(arcControl?.arc?.lastReconciliation?.status || arcControl?.lastReason || '').trim(),
+        source: 'story_arc_runtime'
+      });
+    }
+
+    const route = skillRouter || recent?.skillRouter || Runtime.skillRoutes?.[stageName] || null;
+    const skillMaterials = [];
+    (Array.isArray(route?.baselineIds) ? route.baselineIds : []).forEach(id => skillMaterials.push({
+      kind: 'skill', type: 'base', label: text(id), source: 'builtin', rank: 0, priorityPercent: null
+    }));
+    (Array.isArray(route?.selected) ? route.selected : []).forEach(item => skillMaterials.push({
+      kind: 'skill',
+      type: 'dynamic',
+      label: text(item?.id || ''),
+      source: text(item?.source || 'builtin'),
+      rank: Math.max(0, Number(item?.rank || 0)),
+      priorityPercent: Number.isFinite(Number(item?.priorityPercent)) ? Number(item.priorityPercent) : Math.round(Number(item?.affinity || 0) * 100),
+      score: Number(item?.score || 0),
+      relevance: Number(item?.relevance || 0),
+      reference: text(item?.reference?.id || '')
+    }));
+
+    const countsByKind = {};
+    referenceMaterials.forEach(item => { countsByKind[item.kind] = (countsByKind[item.kind] || 0) + 1; });
+    return {
+      schema: STAGE_MATERIAL_USAGE_SCHEMA,
+      stage: stageName,
+      stageLabel: STAGE_DEF_MAP[stageName]?.label || stageName,
+      recordedAt: Date.now(),
+      referenceMaterials,
+      contextMaterials,
+      skillMaterials,
+      counts: {
+        references: referenceMaterials.length,
+        contexts: contextMaterials.length,
+        skills: skillMaterials.length,
+        byKind: countsByKind,
+        referenceChars: referenceMaterials.reduce((sum, item) => sum + Math.max(0, Number(item.chars || 0)), 0),
+        passageLoreCount: referenceMaterials.filter(item => item.kind === 'lore' && item.evidenceMode === 'relevant_passages').length,
+        wholeLoreCount: referenceMaterials.filter(item => item.kind === 'lore' && item.evidenceMode === 'whole_lore').length
+      },
+      referenceBudget: packet?.budget ? {
+        effectiveBudgetChars: Math.max(0, Number(packet.budget.effectiveBudgetChars || 0)),
+        usedChars: Math.max(0, Number(packet.budget.usedChars || 0)),
+        omittedChars: Math.max(0, Number(packet.budget.omittedChars || 0)),
+        limitingStage: text(packet.budget.limitingStage || '').trim(),
+        omissionCount: Array.isArray(packet.budget.omissions) ? packet.budget.omissions.length : 0
+      } : null
+    };
+  };
+
+  const reconcileStageMaterialUsageWithPacket = (usage, packet) => {
+    if (!usage || !packet?.references) return usage;
+    const selectedById = new Map();
+    ['persona', 'characterDefinition', 'lore', 'hypa', 'auxiliary'].forEach(group => {
+      const items = Array.isArray(packet.references?.[group]) ? packet.references[group] : [];
+      items.forEach(item => {
+        const id = text(item?.id || '').trim();
+        if (id) selectedById.set(id, item);
+      });
+    });
+    const originalRefs = Array.isArray(usage.referenceMaterials) ? usage.referenceMaterials : [];
+    const referenceMaterials = originalRefs.filter(item => item.kind === 'author_note' || (item.id && selectedById.has(item.id))).map(item => {
+      if (item.kind === 'author_note') return item;
+      const packed = selectedById.get(item.id);
+      if (!packed) return item;
+      const packedChars = Math.max(0, Number(packed.chars || text(packed.content || '').length));
+      return {
+        ...item,
+        chars: packedChars,
+        contextRetryTruncated: packed.oversizeTruncated === true,
+        selectionReason: text(packed.selectionReason || item.selectionReason || '').trim(),
+        authorityClass: text(packed.authorityClass || item.authorityClass || '').trim(),
+        protected: packed.protected === true || item.protected === true
+      };
+    });
+    const countsByKind = {};
+    referenceMaterials.forEach(item => { countsByKind[item.kind] = (countsByKind[item.kind] || 0) + 1; });
+    return {
+      ...usage,
+      referenceMaterials,
+      counts: {
+        ...(usage.counts || {}),
+        references: referenceMaterials.length,
+        byKind: countsByKind,
+        referenceChars: referenceMaterials.reduce((sum, item) => sum + Math.max(0, Number(item.chars || 0)), 0),
+        passageLoreCount: referenceMaterials.filter(item => item.kind === 'lore' && item.evidenceMode === 'relevant_passages').length,
+        wholeLoreCount: referenceMaterials.filter(item => item.kind === 'lore' && item.evidenceMode === 'whole_lore').length
+      },
+      referenceBudget: packet?.budget ? {
+        effectiveBudgetChars: Math.max(0, Number(packet.budget.effectiveBudgetChars || 0)),
+        usedChars: Math.max(0, Number(packet.budget.usedChars || 0)),
+        omittedChars: Math.max(0, Number(packet.budget.omittedChars || 0)),
+        limitingStage: text(packet.budget.limitingStage || '').trim(),
+        omissionCount: Array.isArray(packet.budget.omissions) ? packet.budget.omissions.length : 0,
+        contextRetryRepacked: packet.budget.contextRetryRepacked === true
+      } : usage.referenceBudget || null
+    };
+  };
+
   const recordStageTrace = (entry) => {
     Runtime.stageTrace.push({
       at: Date.now(),
       ...entry,
       skillRouter: entry.skillRouter || Runtime.skillRoutes?.[entry.stage] || null,
+      materialsUsed: entry.materialsUsed
+        || (entry.stage === INPUT_ASSIST_STAGE_ID ? Runtime.lastInputAssistMaterialUsage : null)
+        || Runtime.lastRisuContext?.stages?.[entry.stage]?.materialsUsed
+        || null,
       shadowDraftMode: entry.shadowDraftMode || (entry.stage === 'shadow_act' ? normalizeShadowDraftMode(Runtime.settings?.shadowDraftMode) : ''),
       systemPrompt: compactMiddle(entry.systemPrompt || '', 12000),
       userPrompt: compactMiddle(entry.userPrompt || '', 12000),
@@ -33805,7 +34075,11 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
       }
       recent.skillRouter = routeSkillsForStage(stageName, recent, previousStage, scopedSettings);
       Runtime.skillRoutes[stageName] = stageSkillRouterMeta(recent.skillRouter);
-      if (Runtime.lastRisuContext?.stages?.[stageName]) Runtime.lastRisuContext.stages[stageName].skillRouter = Runtime.skillRoutes[stageName];
+      recent.materialsUsed = buildStageMaterialUsageSnapshot(stageName, recent, scopedSettings, previousStage, recent.skillRouter);
+      if (Runtime.lastRisuContext?.stages?.[stageName]) {
+        Runtime.lastRisuContext.stages[stageName].skillRouter = Runtime.skillRoutes[stageName];
+        Runtime.lastRisuContext.stages[stageName].materialsUsed = recent.materialsUsed;
+      }
       stageRecents[stageName] = recent;
       return { recent, settings: scopedSettings };
     };
@@ -37927,7 +38201,7 @@ html,body{width:100%;height:100%;overflow:hidden}
       draft: parsed?.draft || {},
       final_overlay: parsed?.final_overlay || null
     };
-    return JSON.stringify({ status: base, values }, null, 2);
+    return JSON.stringify({ status: base, materials_used: trace?.materialsUsed || null, values }, null, 2);
   };
 
   const lazyPayloadNode = (valueFactory, options = {}) => {
@@ -38067,6 +38341,122 @@ html,body{width:100%;height:100%;overflow:hidden}
       emptyText: options.emptyText || '(기록 없음)'
     })
   ]);
+
+  const stageMaterialKindLabel = kind => ({
+    author_note: 'Author Note',
+    persona: '페르소나',
+    character_definition: '캐릭터 정의',
+    lore: '로어',
+    hypa: 'HypaV3',
+    auxiliary: '보조 자료',
+    current_input: '현재 입력',
+    terminal_scene: '직전 장면',
+    recent_chat: '최근 대화',
+    system_context: '시스템 문맥',
+    others_info: 'Others Info',
+    previous_stage_draft: '직전 단계 초안',
+    user_creative_instruction: '사용자 창작 지침',
+    story_arc: 'Story Arc',
+    skill: 'Skill'
+  }[kind] || kind || '자료');
+
+  const stageMaterialUsageForDisplay = (stageId, trace = null) => (
+    trace?.materialsUsed
+    || (stageId === INPUT_ASSIST_STAGE_ID ? Runtime.lastInputAssistMaterialUsage || Runtime.lastInputAssist?.materialsUsed : null)
+    || Runtime.lastRisuContext?.stages?.[stageId]?.materialsUsed
+    || null
+  );
+
+  const stageMaterialUsageSummaryText = usage => {
+    if (!usage) return '';
+    const refs = Array.isArray(usage.referenceMaterials) ? usage.referenceMaterials : [];
+    const contexts = Array.isArray(usage.contextMaterials) ? usage.contextMaterials : [];
+    const skills = Array.isArray(usage.skillMaterials) ? usage.skillMaterials : [];
+    const counts = usage.counts || {};
+    const kindSummary = Object.entries(counts.byKind || {})
+      .filter(([, count]) => Number(count) > 0)
+      .map(([kind, count]) => `${stageMaterialKindLabel(kind)} ${count}`)
+      .join(' · ');
+    const names = refs.slice(0, 12).map(item => item.label).filter(Boolean);
+    const contextNames = contexts.map(item => item.label).filter(Boolean);
+    return [
+      `직접 참조 자료 ${refs.length}개${kindSummary ? ` · ${kindSummary}` : ''}`,
+      names.length ? `사용 자료: ${names.join(', ')}${refs.length > names.length ? ` 외 ${refs.length - names.length}개` : ''}` : '직접 주입된 참조 자료 없음',
+      contextNames.length ? `함께 사용된 문맥: ${contextNames.join(', ')}` : '',
+      skills.length ? `적용 Skill: ${skills.map(item => item.label).filter(Boolean).join(', ')}` : '',
+      usage.referenceBudget
+        ? `참조 예산: ${Number(usage.referenceBudget.usedChars || 0).toLocaleString()} / ${Number(usage.referenceBudget.effectiveBudgetChars || 0).toLocaleString()}자${Number(usage.referenceBudget.omittedChars || 0) > 0 ? ` · 예산으로 미주입 ${Number(usage.referenceBudget.omittedChars || 0).toLocaleString()}자` : ''}`
+        : ''
+    ].filter(Boolean).join('\n');
+  };
+
+  const stageMaterialUsageFullText = usage => {
+    if (!usage) return '(사용 자료 기록 없음)';
+    const refs = Array.isArray(usage.referenceMaterials) ? usage.referenceMaterials : [];
+    const contexts = Array.isArray(usage.contextMaterials) ? usage.contextMaterials : [];
+    const skills = Array.isArray(usage.skillMaterials) ? usage.skillMaterials : [];
+    const lines = [`[${usage.stageLabel || usage.stage || '단계'} · 이번 턴 사용 자료]`];
+    if (refs.length) {
+      lines.push('', '[직접 참조 자료]');
+      refs.forEach((item, index) => {
+        const detail = [
+          item.source ? `출처=${item.source}` : '',
+          item.moduleName ? `모듈=${item.moduleName}` : '',
+          item.rank ? `rank=${item.rank}` : '',
+          Number.isFinite(Number(item.score)) && Number(item.score) ? `score=${Number(item.score).toFixed(4)}` : '',
+          item.activationRoute ? `route=${item.activationRoute}` : '',
+          item.selectionReason ? `선택=${item.selectionReason}` : '',
+          item.evidenceMode ? `본문=${item.evidenceMode}` : '',
+          item.chars ? `${item.chars}자` : '',
+          item.injectionProtected ? '주입보호' : item.candidateProtected ? '후보보호' : '',
+          item.coverageCritical ? 'coverage-critical' : '',
+          item.contextRetryTruncated ? 'context-retry 축약' : ''
+        ].filter(Boolean).join(' · ');
+        lines.push(`${index + 1}. [${stageMaterialKindLabel(item.kind)}] ${item.label}${detail ? `\n   ${detail}` : ''}`);
+        if (Array.isArray(item.protectionReasons) && item.protectionReasons.length) {
+          lines.push(`   보호 사유: ${item.protectionReasons.join(', ')}`);
+        }
+        if (Array.isArray(item.passages) && item.passages.length) {
+          item.passages.forEach((passage, pIndex) => {
+            const offset = Number(passage.end || 0) > Number(passage.start || 0)
+              ? `원문 ${Number(passage.start || 0) + 1}-${Number(passage.end || 0)}`
+              : '';
+            const anchors = Array.isArray(passage.coveredAnchors) && passage.coveredAnchors.length
+              ? ` · anchors=${passage.coveredAnchors.join(',')}`
+              : '';
+            lines.push(`   - passage ${pIndex + 1}${passage.heading ? ` · ${passage.heading}` : ''}${offset ? ` · ${offset}` : ''}${passage.chars ? ` · ${passage.chars}자` : ''}${anchors}`);
+          });
+        }
+      });
+    } else {
+      lines.push('', '[직접 참조 자료]', '(없음)');
+    }
+    if (contexts.length) {
+      lines.push('', '[대화·서사·제어 문맥]');
+      contexts.forEach((item, index) => {
+        const detail = [
+          item.chars ? `${item.chars}자` : '',
+          item.turns ? `${item.turns}턴` : '',
+          item.revision ? `rev=${item.revision}` : '',
+          item.throughTurn ? `through=T${item.throughTurn}` : '',
+          item.beatId ? `beat=${item.beatId}` : '',
+          item.status ? `status=${item.status}` : ''
+        ].filter(Boolean).join(' · ');
+        lines.push(`${index + 1}. [${stageMaterialKindLabel(item.kind)}] ${item.label}${detail ? ` · ${detail}` : ''}`);
+      });
+    }
+    if (skills.length) {
+      lines.push('', '[적용 Skill]');
+      skills.forEach((item, index) => {
+        const detail = [item.type, item.rank ? `rank=${item.rank}` : '', item.priorityPercent != null ? `P${item.priorityPercent}` : '', item.reference ? `ref=${item.reference}` : ''].filter(Boolean).join(' · ');
+        lines.push(`${index + 1}. ${item.label}${detail ? ` · ${detail}` : ''}`);
+      });
+    }
+    if (usage.referenceBudget) {
+      lines.push('', '[참조 예산]', `사용 ${Number(usage.referenceBudget.usedChars || 0).toLocaleString()} / ${Number(usage.referenceBudget.effectiveBudgetChars || 0).toLocaleString()}자 · 미주입 ${Number(usage.referenceBudget.omittedChars || 0).toLocaleString()}자 · omission ${Number(usage.referenceBudget.omissionCount || 0)}개`);
+    }
+    return lines.join('\n');
+  };
 
   const buildUserIntentOocPanel = () => {
     const ooc = ensureCreativeOocState();
@@ -38407,8 +38797,14 @@ html,body{width:100%;height:100%;overflow:hidden}
     const isLiteSkip = runtime.mode === 'lite' && (selectedDef.id === 'aide_character' || selectedDef.id === 'aide_world');
     const statusInfo = traceStateInfo(trace, { enabled: slot.enabled !== false, isLiteSkip });
     const selectedSkillRoute = trace?.skillRouter || Runtime.skillRoutes?.[selectedDef.id] || null;
+    const materialUsage = stageMaterialUsageForDisplay(selectedDef.id, trace);
     const blocks = [];
     let technicalCallInfo = null;
+
+    if (trace && materialUsage) {
+      blocks.push(resultContentBlock('이번 턴 사용 자료', stageMaterialUsageSummaryText(materialUsage), { wide: true, code: false, copy: true }));
+      blocks.push(lazyResultContentBlock('이번 턴 사용 자료 전체 목록', () => stageMaterialUsageFullText(materialUsage), { wide: true, copy: true, code: true }));
+    }
 
     if (trace && parsed && selectedDef.id === INPUT_ASSIST_STAGE_ID) {
       blocks.push(resultContentBlock('원래 입력', parsed.originalInput || Runtime.lastInputAssist?.original || '(기록 없음)', { wide: true, copy: true }));
@@ -38593,7 +38989,7 @@ html,body{width:100%;height:100%;overflow:hidden}
         guiEl('div', { class: 'sga-agent-head' }, [
           guiEl('div', {}, [
             guiEl('h3', { text: '실행 결과' }),
-            guiEl('div', { class: 'sga-note', text: '설정 화면과 분리된 결과 보기입니다. 각 단계가 실제로 분석한 내용과 생성·수정한 초안을 확인할 수 있습니다.' })
+            guiEl('div', { class: 'sga-note', text: '설정 화면과 분리된 결과 보기입니다. 각 단계가 이번 턴에 실제로 사용한 자료와 분석 내용, 생성·수정한 초안을 확인할 수 있습니다.' })
           ]),
           guiEl('div', { class: 'sga-actions' }, [
             guiEl('button', { class: 'sga-btn ghost', type: 'button', text: '새로고침', onClick: () => renderSettingsGui() })
@@ -45949,6 +46345,7 @@ const buildNarrativeArchiveViewerPage = () => {
       };
       Runtime.lastMainResponse = null;
       Runtime.lastInputAssistTranslation = null;
+      Runtime.lastInputAssistMaterialUsage = null;
       clearInputAssistStaticHandoff('plugin_unloaded');
       Runtime.inputAssistConfirmation = {
         open: false,
