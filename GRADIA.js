@@ -1,8 +1,9 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.82
+//@display-name GRADIA v0.25.83
 //@api 3.0
-//@version 0.25.82
+//@version 0.25.83
 
+/* v0.25.83 completes ordinary RisuAI native chat-copy continuity: heuristic source selection now prioritizes the longest verified U+A transcript prefix over Copy-title proximity, Story Arc/Writer state can repair a shorter legacy copy when the verified source is further advanced, and Narrative Archive state is merged into the target scope without re-embedding while reusing existing vector references/shared archive history. A v2 completeness receipt verifies Story Arc, Writer, and Narrative Archive readback, and legacy v1 receipts are repaired idempotently instead of being frozen as already adopted. RE:TRACE next-session handoff remains separate and source-immutable. */
 /* v0.25.82 makes WebRisu credential persistence update-safe by mirroring every provider-preset secret, Narrative Archive embedding key, and hosting token into verified pluginStorage backups while retaining localPluginStorage; startup reads repair a missing local copy from the synced backup, and the active narrative-embedding/hosting credentials also use host arguments when available without changing provider/model selection. */
 /* v0.25.81 aligns GRADIA with RE:TRACE peer-compatibility v1 and makes all next-session state handoff source-immutable: Narrative Archive preparation no longer empties or rewrites the source scope, source Story Arc/Writer/Narrative fingerprints are proven unchanged across prepare/adopt, and future GRADIA versions are negotiated by stable protocol/features instead of exact version gates. */
 /* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
@@ -941,7 +942,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.82';
+  const PLUGIN_VERSION = '0.25.83';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -19033,7 +19034,9 @@ ${passage.text || ''}`, 420));
     return `writer:${createTextHasher().update(characterId).update(chatId).digest()}`;
   };
 
-  const GRADIA_NATIVE_CHAT_COPY_SCHEMA = 'gradia.native_chat_copy.v1';
+  const GRADIA_NATIVE_CHAT_COPY_SCHEMA = 'gradia.native_chat_copy.v2';
+  const GRADIA_NATIVE_CHAT_COPY_LEGACY_SCHEMAS = new Set(['gradia.native_chat_copy.v1']);
+  const GRADIA_NATIVE_CHAT_COPY_COMPLETENESS_VERSION = 2;
   const GRADIA_NATIVE_CHAT_COPY_POSITIVE_TTL_MS = 5 * 60 * 1000;
   const GRADIA_NATIVE_CHAT_COPY_NEGATIVE_TTL_MS = 15 * 1000;
   const GRADIA_NATIVE_CHAT_COPY_SCOPE_CACHE_MAX = 32;
@@ -19116,6 +19119,22 @@ ${passage.text || ''}`, 420));
     Runtime.lastNativeChatCopyCheck = nativeChatCopyClone(entry);
     return entry;
   };
+
+  const nativeChatCopyReceiptSchemaSupported = receipt => {
+    const schema = text(receipt?.schema || '').trim();
+    return schema === GRADIA_NATIVE_CHAT_COPY_SCHEMA || GRADIA_NATIVE_CHAT_COPY_LEGACY_SCHEMAS.has(schema);
+  };
+
+  const nativeChatCopyReceiptComplete = receipt => Boolean(
+    nativeChatCopyReceiptSchemaSupported(receipt)
+    && Number(receipt?.completenessVersion || 0) >= GRADIA_NATIVE_CHAT_COPY_COMPLETENESS_VERSION
+    && receipt?.complete === true
+    && receipt?.durableVerified === true
+    && receipt?.storyArcVerified === true
+    && receipt?.writerVerified === true
+    && receipt?.narrativeArchiveVerified === true
+    && Number(receipt?.expectedNarrativeArchiveEntries || 0) === Number(receipt?.verifiedNarrativeArchiveEntries || 0)
+  );
 
   const nativeChatCopyExplicitSourceIds = chat => Array.from(new Set([
     chat?.copiedFromChatId, chat?.copyFromChatId, chat?.copySourceChatId,
@@ -19367,7 +19386,10 @@ ${passage.text || ''}`, 420));
     const branchId = nativeChatCopyBranchSourceId(targetChat);
     const targetTitle = nativeChatCopyTitleInfo(firstFilled(targetChat?.name, targetChat?.title, targetChat?.chatName, targetChat?.filename, targetChatId));
     const targetTurns = nativeChatCopyCanonicalTurnsFromChat(targetChat);
-    const allowTranscriptFallback = !explicitIds.length && !branchId && !targetTitle.marked
+    // Copy-title markers are discovery hints only. Keep transcript evidence active
+    // when no authoritative copiedFrom/branch id exists so a short sibling copy
+    // cannot outrank the actual immediate source merely because its title matches.
+    const allowTranscriptFallback = !explicitIds.length && !branchId
       && targetTurns.length >= GRADIA_NATIVE_CHAT_COPY_TRANSCRIPT_MIN_TURNS;
     const arcStore = stores.arcStore || await readStoryArcStore();
     const writerStore = stores.writerStore || await readWriterDesignStore();
@@ -19423,6 +19445,7 @@ ${passage.text || ''}`, 420));
           : titleDetected ? 'risu_native_chat_copy_title'
             : 'risu_native_chat_copy_transcript';
       const priority = explicit ? 1000 : branch ? 900 : immediateTitle ? 650 : titleDetected ? 550 : 400;
+      const authoritativeRank = explicit ? 2 : branch ? 1 : 0;
       const dataWeight = (arcCompatibility.ok ? 12 + Number(sourceArc?.throughTurn || 0) : 0)
         + (writerCompatible ? 5 + Math.min(8, Number(sourceWriter?.revision || 0)) : 0);
       candidates.push({
@@ -19431,6 +19454,7 @@ ${passage.text || ''}`, 420));
         chatIndex: index,
         reason,
         priority,
+        authoritativeRank,
         dataWeight,
         sharedTurns: shared.common,
         sourceArc: arcCompatibility.ok ? sourceArc : null,
@@ -19441,9 +19465,10 @@ ${passage.text || ''}`, 420));
       });
     }
 
-    candidates.sort((a, b) => b.priority - a.priority
+    candidates.sort((a, b) => b.authoritativeRank - a.authoritativeRank
       || b.sharedTurns - a.sharedTurns
       || b.dataWeight - a.dataWeight
+      || b.priority - a.priority
       || b.chatIndex - a.chatIndex);
     const selected = candidates[0] || null;
     recordNativeChatCopyCheck({
@@ -19465,9 +19490,131 @@ ${passage.text || ''}`, 420));
       selectedHasStoryArc: !!selected?.sourceArc,
       selectedHasWriterDesign: !!selected?.sourceWriter,
       targetArcScopeKey,
-      targetWriterScopeKey
+      targetWriterScopeKey,
+      candidates: candidates.slice(0, 6).map(item => ({
+        chatId: item.chatId, reason: item.reason, sharedTurns: item.sharedTurns,
+        dataWeight: item.dataWeight, authoritativeRank: item.authoritativeRank, titlePriority: item.priority,
+        hasStoryArc: !!item.sourceArc, hasWriterDesign: !!item.sourceWriter
+      }))
     });
     return selected;
+  };
+
+  const mergeNativeChatCopyNarrativeArchive = async (sourceScopeKeyValue = '', targetScopeKeyValue = '', targetTurns = []) => {
+    const sourceScopeKey = text(sourceScopeKeyValue || '').trim();
+    const targetScopeKey = text(targetScopeKeyValue || '').trim();
+    if (!sourceScopeKey || !targetScopeKey || sourceScopeKey === targetScopeKey) {
+      return { ok: true, changed: false, reason: 'archive_scope_merge_not_needed', expectedEntries: 0, verifiedEntries: 0, archiveId: '' };
+    }
+    const rawStore = await readNarrativeArchiveStore({ hydrateShared: false });
+    const sourceRaw = normalizeNarrativeArchiveScope(rawStore[sourceScopeKey], sourceScopeKey);
+    const targetRaw = normalizeNarrativeArchiveScope(rawStore[targetScopeKey], targetScopeKey);
+    const hydrated = await readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [sourceScopeKey, targetScopeKey] });
+    const sourceHydrated = normalizeNarrativeArchiveScope(hydrated[sourceScopeKey], sourceScopeKey);
+    const targetHydrated = normalizeNarrativeArchiveScope(hydrated[targetScopeKey], targetScopeKey);
+    const sourceValid = sourceHydrated.entries.filter(entry => narrativeArchiveEntryBranchValid(entry, targetTurns, sourceScopeKey));
+    const sourceIds = new Set(sourceValid.map(narrativeSharedArchiveEntryIdentity));
+    if (!sourceIds.size) {
+      return { ok: true, changed: false, reason: 'archive_source_absent_or_incompatible', expectedEntries: 0, verifiedEntries: 0, archiveId: text(targetRaw.archiveRef?.archiveId || '') };
+    }
+
+    const sourceRef = normalizeNarrativeSharedArchiveRef(sourceRaw.archiveRef);
+    const targetRef = normalizeNarrativeSharedArchiveRef(targetRaw.archiveRef);
+    let selectedRef = targetRef || sourceRef;
+    let createdCombinedArchive = false;
+    // A repaired copy may already have accumulated its own inherited archive. If
+    // both sides point at different immutable histories, build a new target-owned
+    // archive layer from the union instead of discarding either parent.
+    if (sourceRef && targetRef && sourceRef.archiveId !== targetRef.archiveId) {
+      const targetValid = targetHydrated.entries.filter(entry => narrativeArchiveEntryBranchValid(entry, targetTurns, targetScopeKey));
+      const combinedLocal = mergeNarrativeArchiveEntries(
+        targetValid.map(entry => ({ ...entry, scopeKey: targetScopeKey, archiveReferenceOnly: false })),
+        sourceValid.map(entry => ({ ...entry, scopeKey: targetScopeKey, archiveReferenceOnly: false, nativeCopiedFromScopeKey: sourceScopeKey }))
+      );
+      const combined = await ensureGradiaSharedNarrativeArchive({
+        ...targetRaw,
+        scopeKey: targetScopeKey,
+        archiveRef: targetRef,
+        entries: combinedLocal
+      }, targetScopeKey);
+      selectedRef = normalizeNarrativeSharedArchiveRef(combined.archiveRef);
+      createdCombinedArchive = true;
+    }
+
+    const sourceLocal = sourceRaw.entries
+      .filter(entry => narrativeArchiveEntryBranchValid(entry, targetTurns, sourceScopeKey))
+      .map(entry => ({
+        ...entry,
+        scopeKey: targetScopeKey,
+        recoveredFromScopeKey: sourceScopeKey,
+        nativeCopiedFromScopeKey: sourceScopeKey,
+        nativeCopyScopeAlias: true
+      }));
+    const mergedLocal = mergeNarrativeArchiveEntries(targetRaw.entries, sourceLocal);
+    rawStore[targetScopeKey] = {
+      ...targetRaw,
+      scopeKey: targetScopeKey,
+      archiveRef: selectedRef,
+      createdAt: Number(targetRaw.createdAt || sourceRaw.createdAt || Date.now()),
+      updatedAt: Date.now(),
+      entries: mergedLocal
+    };
+    if (!await writeNarrativeArchiveStore(rawStore)) throw new Error('GRADIA Narrative Archive native-copy merge save failed.');
+
+    const verifiedStore = await readNarrativeArchiveStore({ hydrateShared: true, scopeKeys: [targetScopeKey] });
+    const verified = normalizeNarrativeArchiveScope(verifiedStore[targetScopeKey], targetScopeKey);
+    const verifiedIds = new Set(verified.entries
+      .filter(entry => narrativeArchiveEntryBranchValid(entry, targetTurns, targetScopeKey))
+      .map(narrativeSharedArchiveEntryIdentity));
+    const missing = [...sourceIds].filter(id => !verifiedIds.has(id));
+    if (missing.length) throw new Error(`GRADIA Narrative Archive native-copy completeness mismatch: ${missing.length} source entries missing.`);
+    return {
+      ok: true,
+      changed: sourceLocal.length > 0 || createdCombinedArchive || text(targetRef?.archiveId || '') !== text(selectedRef?.archiveId || ''),
+      reason: createdCombinedArchive ? 'archive_native_copy_combined_reference' : 'archive_native_copy_merged_without_reembedding',
+      expectedEntries: sourceIds.size,
+      verifiedEntries: sourceIds.size,
+      targetEntries: verified.entries.length,
+      archiveId: text(selectedRef?.archiveId || ''),
+      sourceArchiveId: text(sourceRef?.archiveId || ''),
+      reusedVectorReferences: true,
+      reembedded: false
+    };
+  };
+
+  const verifyNativeChatCopyState = async ({ source, targetArcScopeKey, targetWriterScopeKey, targetTurns, narrativeResult }) => {
+    const [arcStore, writerStore] = await Promise.all([readStoryArcStore(), readWriterDesignStore()]);
+    let storyArcVerified = true;
+    let writerVerified = true;
+    let verifiedArcThroughTurn = 0;
+    let verifiedWriterTurns = 0;
+    const sourceArc = source?.sourceArc?.arc || null;
+    if (sourceArc) {
+      const targetArc = arcStore[targetArcScopeKey] ? normalizeStoryArcPackage(arcStore[targetArcScopeKey], arcStore[targetArcScopeKey]) : null;
+      const targetCompatibility = targetArc ? nativeChatCopyArcCompatibleWithTarget(targetArc, targetTurns) : { ok: false };
+      const sourceThrough = Math.max(0, Number(sourceArc?.basis?.throughTurn || 0));
+      const targetThrough = Math.max(0, Number(targetArc?.basis?.throughTurn || 0));
+      storyArcVerified = targetCompatibility.ok === true && targetThrough >= sourceThrough;
+      verifiedArcThroughTurn = targetThrough;
+    }
+    const sourceWriter = source?.sourceWriter || null;
+    if (sourceWriter) {
+      const targetWriter = writerStore[targetWriterScopeKey] ? normalizeWriterDesignPackage(writerStore[targetWriterScopeKey], writerStore[targetWriterScopeKey]) : null;
+      const expectedTurns = Math.max(0, Number(sourceWriter.completedTurnCount || 0));
+      verifiedWriterTurns = Math.max(0, Number(targetWriter?.completedTurnCount || 0));
+      writerVerified = !!targetWriter && verifiedWriterTurns >= expectedTurns && verifiedWriterTurns <= targetTurns.length;
+    }
+    const narrativeArchiveVerified = Number(narrativeResult?.verifiedEntries || 0) === Number(narrativeResult?.expectedEntries || 0);
+    return {
+      ok: storyArcVerified && writerVerified && narrativeArchiveVerified,
+      storyArcVerified,
+      writerVerified,
+      narrativeArchiveVerified,
+      verifiedArcThroughTurn,
+      verifiedWriterTurns,
+      expectedNarrativeArchiveEntries: Math.max(0, Number(narrativeResult?.expectedEntries || 0)),
+      verifiedNarrativeArchiveEntries: Math.max(0, Number(narrativeResult?.verifiedEntries || 0))
+    };
   };
 
   const resetNativeChatCopyTransientState = reason => {
@@ -19530,64 +19677,67 @@ ${passage.text || ''}`, 420));
     const registry = { ...(stores.registry || await readNativeChatCopyRegistry()) };
     const originalArcStore = nativeChatCopyClone(arcStore) || {};
     const originalWriterStore = nativeChatCopyClone(writerStore) || {};
+    const originalArchiveStore = await readNarrativeArchiveStore({ hydrateShared: false });
     const originalRegistry = nativeChatCopyClone(registry) || {};
     const targetArcAlreadyExists = !!arcStore[targetArcScopeKey];
     const targetWriterAlreadyExists = !!writerStore[targetWriterScopeKey];
     let copiedStoryArc = false;
     let copiedWriterDesign = false;
-    let skippedArcReason = targetArcAlreadyExists ? 'target_arc_already_initialized' : source.sourceArc ? '' : 'source_arc_unavailable_or_incompatible';
-    let skippedWriterReason = targetWriterAlreadyExists ? 'target_writer_already_initialized' : source.sourceWriter ? '' : 'source_writer_unavailable_or_ahead';
+    let repairedStoryArc = false;
+    let repairedWriterDesign = false;
+    let skippedArcReason = source.sourceArc ? '' : 'source_arc_unavailable_or_incompatible';
+    let skippedWriterReason = source.sourceWriter ? '' : 'source_writer_unavailable_or_ahead';
 
     try {
-      if (!targetArcAlreadyExists && source.sourceArc?.arc) {
+      if (source.sourceArc?.arc) {
         const compatibility = nativeChatCopyArcCompatibleWithTarget(source.sourceArc.arc, targetTurns);
         if (compatibility.ok) {
-          const copiedArc = normalizeStoryArcPackage(compatibility.arc, {
-            ...compatibility.arc,
-            scopeKey: targetArcScopeKey,
-            createdAt: compatibility.arc.createdAt || Date.now(),
-            updatedAt: Date.now()
-          });
-          copiedArc.scopeKey = targetArcScopeKey;
-          arcStore[targetArcScopeKey] = copiedArc;
-          copiedStoryArc = true;
-          skippedArcReason = '';
+          const existingArc = arcStore[targetArcScopeKey] ? normalizeStoryArcPackage(arcStore[targetArcScopeKey], arcStore[targetArcScopeKey]) : null;
+          const existingCompatibility = existingArc ? nativeChatCopyArcCompatibleWithTarget(existingArc, targetTurns) : { ok: false };
+          const sourceThrough = Math.max(0, Number(compatibility.arc?.basis?.throughTurn || 0));
+          const existingThrough = Math.max(0, Number(existingArc?.basis?.throughTurn || 0));
+          if (!existingArc || !existingCompatibility.ok || existingThrough < sourceThrough) {
+            const copiedArc = normalizeStoryArcPackage(compatibility.arc, {
+              ...compatibility.arc,
+              scopeKey: targetArcScopeKey,
+              createdAt: existingArc?.createdAt || compatibility.arc.createdAt || Date.now(),
+              updatedAt: Date.now()
+            });
+            copiedArc.scopeKey = targetArcScopeKey;
+            arcStore[targetArcScopeKey] = copiedArc;
+            copiedStoryArc = true;
+            repairedStoryArc = !!existingArc;
+            skippedArcReason = '';
+          } else {
+            skippedArcReason = 'target_arc_already_equivalent_or_newer';
+          }
         } else {
           skippedArcReason = compatibility.reason;
         }
       }
 
-      if (!targetWriterAlreadyExists && source.sourceWriter) {
+      if (source.sourceWriter) {
         const sourceCompletedTurns = Math.max(0, Number(source.sourceWriter.completedTurnCount || 0));
-        if (sourceCompletedTurns <= targetTurns.length) {
+        const existingWriter = writerStore[targetWriterScopeKey] ? normalizeWriterDesignPackage(writerStore[targetWriterScopeKey], writerStore[targetWriterScopeKey]) : null;
+        const existingCompletedTurns = Math.max(0, Number(existingWriter?.completedTurnCount || 0));
+        if (sourceCompletedTurns <= targetTurns.length && (!existingWriter || existingCompletedTurns < sourceCompletedTurns)) {
           const copiedWriter = normalizeWriterDesignPackage(source.sourceWriter, {
             ...source.sourceWriter,
             scopeKey: targetWriterScopeKey,
-            createdAt: source.sourceWriter.createdAt || Date.now(),
+            createdAt: existingWriter?.createdAt || source.sourceWriter.createdAt || Date.now(),
             updatedAt: Date.now(),
             completedTurnCount: sourceCompletedTurns
           });
           copiedWriter.scopeKey = targetWriterScopeKey;
           writerStore[targetWriterScopeKey] = copiedWriter;
           copiedWriterDesign = true;
+          repairedWriterDesign = !!existingWriter;
           skippedWriterReason = '';
+        } else if (sourceCompletedTurns <= targetTurns.length) {
+          skippedWriterReason = 'target_writer_already_equivalent_or_newer';
         } else {
           skippedWriterReason = 'source_writer_ahead_of_target';
         }
-      }
-
-      const adoptedAnything = copiedStoryArc || copiedWriterDesign;
-      const targetInitialized = targetArcAlreadyExists || targetWriterAlreadyExists;
-      if (!adoptedAnything && !targetInitialized) {
-        return {
-          ok: false,
-          skipped: true,
-          reason: 'source_has_no_target_valid_state',
-          sourceChatId,
-          targetChatId,
-          skippedArcReason,
-          skippedWriterReason
-        };
       }
 
       if (copiedStoryArc && !await writeNativeChatCopyArcStore(
@@ -19599,10 +19749,21 @@ ${passage.text || ''}`, 420));
         [source.sourceWriterScopeKey || '', targetWriterScopeKey]
       )) throw new Error('GRADIA Writer design native-copy save failed.');
 
+      const sourceArchiveScopeKey = text(source.sourceArc?.storeKey || nativeChatCopyArcScopeKey(character, source.chat, `${context.characterIndex}:${source.chatIndex}`)).trim();
+      const narrativeResult = await mergeNativeChatCopyNarrativeArchive(sourceArchiveScopeKey, targetArcScopeKey, targetTurns);
+      const verification = await verifyNativeChatCopyState({ source, targetArcScopeKey, targetWriterScopeKey, targetTurns, narrativeResult });
+      const sourceHasState = !!source.sourceArc || !!source.sourceWriter || Number(narrativeResult.expectedEntries || 0) > 0;
+      if (!sourceHasState) {
+        return { ok: false, skipped: true, reason: 'source_has_no_target_valid_state', sourceChatId, targetChatId, skippedArcReason, skippedWriterReason };
+      }
+      if (!verification.ok) throw new Error('GRADIA native chat-copy completeness verification failed.');
+
       const copiedAt = Date.now();
       const receipt = {
         schema: GRADIA_NATIVE_CHAT_COPY_SCHEMA,
+        completenessVersion: GRADIA_NATIVE_CHAT_COPY_COMPLETENESS_VERSION,
         complete: true,
+        durableVerified: true,
         reason: source.reason,
         sourceChatId,
         targetChatId,
@@ -19610,14 +19771,29 @@ ${passage.text || ''}`, 420));
         targetArcScopeKey,
         sourceWriterScopeKey: source.sourceWriterScopeKey || '',
         targetWriterScopeKey,
+        sourceNarrativeArchiveScopeKey: sourceArchiveScopeKey,
+        targetNarrativeArchiveScopeKey: targetArcScopeKey,
         copiedStoryArc,
         copiedWriterDesign,
+        copiedNarrativeArchive: narrativeResult.changed === true,
+        repairedStoryArc,
+        repairedWriterDesign,
         targetArcAlreadyExists,
         targetWriterAlreadyExists,
         skippedArcReason,
         skippedWriterReason,
         sharedTurns: Number(source.sharedTurns || 0),
         targetTurnCount: targetTurns.length,
+        storyArcVerified: verification.storyArcVerified,
+        writerVerified: verification.writerVerified,
+        narrativeArchiveVerified: verification.narrativeArchiveVerified,
+        verifiedArcThroughTurn: verification.verifiedArcThroughTurn,
+        verifiedWriterTurns: verification.verifiedWriterTurns,
+        expectedNarrativeArchiveEntries: verification.expectedNarrativeArchiveEntries,
+        verifiedNarrativeArchiveEntries: verification.verifiedNarrativeArchiveEntries,
+        narrativeArchiveId: narrativeResult.archiveId || '',
+        narrativeArchiveReason: narrativeResult.reason || '',
+        narrativeArchiveReembedded: false,
         copiedAt,
         at: copiedAt
       };
@@ -19625,8 +19801,7 @@ ${passage.text || ''}`, 420));
       if (!await writeNativeChatCopyRegistry(registry)) throw new Error('GRADIA native chat-copy receipt save failed.');
       const persistedRegistry = await readNativeChatCopyRegistry();
       const persisted = persistedRegistry[registryKey];
-      if (persisted?.schema !== GRADIA_NATIVE_CHAT_COPY_SCHEMA
-        || persisted?.complete !== true
+      if (!nativeChatCopyReceiptComplete(persisted)
         || text(persisted?.sourceChatId || '') !== text(sourceChatId || '')
         || text(persisted?.targetChatId || '') !== text(targetChatId || '')) {
         throw new Error('GRADIA native chat-copy durable receipt readback failed.');
@@ -19638,6 +19813,7 @@ ${passage.text || ''}`, 420));
     } catch (error) {
       try { if (copiedStoryArc) await writeStoryArcStore(originalArcStore); } catch (_) {}
       try { if (copiedWriterDesign) await writeWriterDesignStore(originalWriterStore); } catch (_) {}
+      try { await writeNarrativeArchiveStore(originalArchiveStore); } catch (_) {}
       try { await writeNativeChatCopyRegistry(originalRegistry); } catch (_) {}
       throw error;
     }
@@ -19673,7 +19849,7 @@ ${passage.text || ''}`, 420));
     const task = (async () => {
       const registry = await readNativeChatCopyRegistry();
       const existingReceipt = registry[registryIdentity];
-      if (existingReceipt?.schema === GRADIA_NATIVE_CHAT_COPY_SCHEMA && existingReceipt?.complete === true) {
+      if (nativeChatCopyReceiptComplete(existingReceipt)) {
         Runtime.lastNativeChatCopy = nativeChatCopyClone(existingReceipt);
         return { ok: true, skipped: true, reason: 'native_copy_already_adopted', receipt: nativeChatCopyClone(existingReceipt) };
       }
@@ -19685,10 +19861,11 @@ ${passage.text || ''}`, 420));
       const source = await locateNativeChatCopySource(context, { arcStore, writerStore });
       if (source?.blocked) return { ok: false, skipped: true, reason: source.reason };
       if (!source) {
+        const repairableReceipt = nativeChatCopyReceiptSchemaSupported(existingReceipt);
         return {
-          ok: targetHasArc || targetHasWriter,
+          ok: !repairableReceipt && (targetHasArc || targetHasWriter),
           skipped: true,
-          reason: targetHasArc || targetHasWriter ? 'target_already_initialized' : 'copy_source_not_found',
+          reason: repairableReceipt ? 'native_copy_repair_source_not_found' : (targetHasArc || targetHasWriter ? 'target_already_initialized' : 'copy_source_not_found'),
           targetHasArc,
           targetHasWriter
         };
