@@ -1,8 +1,10 @@
 //@name serial_gradation_agents_for_rp
-//@display-name GRADIA v0.25.80
+//@display-name GRADIA v0.25.82
 //@api 3.0
-//@version 0.25.80
+//@version 0.25.82
 
+/* v0.25.82 makes WebRisu credential persistence update-safe by mirroring every provider-preset secret, Narrative Archive embedding key, and hosting token into verified pluginStorage backups while retaining localPluginStorage; startup reads repair a missing local copy from the synced backup, and the active narrative-embedding/hosting credentials also use host arguments when available without changing provider/model selection. */
+/* v0.25.81 aligns GRADIA with RE:TRACE peer-compatibility v1 and makes all next-session state handoff source-immutable: Narrative Archive preparation no longer empties or rewrites the source scope, source Story Arc/Writer/Narrative fingerprints are proven unchanged across prepare/adopt, and future GRADIA versions are negotiated by stable protocol/features instead of exact version gates. */
 /* v0.25.49 fixes the button-only Input Writer GUI capability probe that was referenced by the composer/delivery flow but missing from both the source feature branch and the merged canonical build. v0.25.48 merges the explicit button-only Input Writer flow while preserving the shared Narrative Archive, local Float32 vector tier, and RE:TRACE summary-only handoff contract. */
 //@allowed-ipc flashback_hayaku_bridge
 //@update-url https://raw.githubusercontent.com/rusinus12-droid/GRADIA/main/GRADIA.js
@@ -97,6 +99,7 @@
 //@arg backend_hosting_mode string Hosting bridge mode: off|auto|hosted
 //@arg backend_hosting_url string LIBRA hosting bridge backend URL
 //@arg backend_hosting_token string LIBRA hosting bridge backend token
+//@arg narrative_embedding_key string Narrative Archive embedding API key backup; normally managed by the GRADIA GUI
 //@arg enable_gui string true|false
 
 /*
@@ -938,7 +941,7 @@
   };
 
   const PLUGIN_NAME = 'serial_gradation_agents_for_rp';
-  const PLUGIN_VERSION = '0.25.80';
+  const PLUGIN_VERSION = '0.25.82';
   const RETRACE_PLUGIN_ID = 'flashback_hayaku_bridge';
   const GRADIA_RETRACE_IPC_SCHEMA = 'gradia-retrace-ipc-v1';
   const GRADIA_RETRACE_IPC_REQUEST_CHANNEL = 'gradia_retrace_bridge_request_v1';
@@ -949,6 +952,9 @@
   const GRADIA_RETRACE_HANDOFF_RECEIPT_SCHEMA = 'gradia.session_handoff.receipt.v1';
   const GRADIA_RETRACE_CHAT_HANDOFF_MARKER_SCHEMA = 'retrace.gradia_handoff_marker.v1';
   const GRADIA_RETRACE_HANDOFF_TTL_MS = 30 * 60 * 1000;
+  const RETRACE_PEER_COMPATIBILITY_SCHEMA = 'retrace.peer_compatibility.v1';
+  const RETRACE_PEER_PROTOCOL_MAJOR = 1;
+  const GRADIA_SESSION_HANDOFF_CONTRACT = 'gradia.handoff_immutable_source.v1';
   const GRADIA_RETRACE_HANDOFF_PACKAGE_PREFIX = 'serial_gradation_agents_for_rp:retrace_handoff:package:';
   const GRADIA_RETRACE_HANDOFF_RECEIPT_PREFIX = 'serial_gradation_agents_for_rp:retrace_handoff:receipt:';
   const INJECTION_HEADER = '[SCENE CONTINUITY AND RESPONSE]';
@@ -978,6 +984,11 @@
   const LOCAL_PROVIDER_SECRETS_KEY = 'serial_gradation_agents_for_rp:provider_secrets:v1';
   const LOCAL_NARRATIVE_EMBEDDING_SECRET_KEY = 'serial_gradation_agents_for_rp:narrative_embedding_secret:v1';
   const LOCAL_BACKEND_HOSTING_TOKEN_KEY = 'serial_gradation_agents_for_rp:backend_hosting_token:v1';
+  const SYNCED_PROVIDER_SECRETS_KEY = 'serial_gradation_agents_for_rp:provider_secrets_synced:v1';
+  const SYNCED_NARRATIVE_EMBEDDING_SECRET_KEY = 'serial_gradation_agents_for_rp:narrative_embedding_secret_synced:v1';
+  const SYNCED_BACKEND_HOSTING_TOKEN_KEY = 'serial_gradation_agents_for_rp:backend_hosting_token_synced:v1';
+  const CREDENTIAL_BACKUP_SCHEMA = 'gradia.credential_backup.v1';
+  const CREDENTIAL_BACKUP_VERSION = 1;
   const SETTINGS_UI_ID = 'serial-gradation-agents-for-rp-settings';
   const INPUT_ASSIST_CONTINUE_BUTTON_ID = 'serial-gradation-agents-for-rp-continue';
   const INPUT_ASSIST_CONTINUE_PANEL_ID = 'serial-gradation-agents-for-rp-continue-status';
@@ -3412,6 +3423,34 @@
     return hasValue ? value : fallback;
   };
 
+  const setPluginArgumentValue = async (name, value) => {
+    const key = text(name || '').trim();
+    const clean = value == null ? '' : String(value);
+    if (!key) return { ok: false, verified: false, attempted: false, reason: 'argument_name_missing' };
+    const writers = [];
+    if (typeof API.setArgument === 'function') writers.push({ name: 'setArgument', fn: API.setArgument.bind(API) });
+    if (typeof API.setArg === 'function' && API.setArg !== API.setArgument) writers.push({ name: 'setArg', fn: API.setArg.bind(API) });
+    let attempted = false;
+    let lastError = '';
+    for (const writer of writers) {
+      try {
+        attempted = true;
+        const result = await writer.fn(key, clean);
+        if (result === false) continue;
+        clearArgumentCache();
+        const readback = text(await getArgument(key, '') || '').trim();
+        const verified = clean ? readback === clean.trim() : !readback;
+        if (verified) return { ok: true, verified: true, attempted: true, method: writer.name, reason: clean ? 'argument_saved_and_verified' : 'argument_cleared_and_verified' };
+      } catch (error) {
+        lastError = compact(error?.message || error, 300);
+      }
+    }
+    clearArgumentCache();
+    const current = text(await getArgument(key, '') || '').trim();
+    const verified = clean ? current === clean.trim() : !current;
+    return { ok: verified, verified, attempted, reason: verified ? 'argument_already_matches' : 'argument_write_unavailable_or_failed', error: lastError };
+  };
+
   const LEGACY_PRESET_ARGUMENT_NAMES = Object.freeze([
     'model_presets_json', 'provider_presets_json', 'llm_provider', 'llm_url', 'llm_key',
     'llm_model', 'llm_temp', 'llm_timeout', 'llm_timeout_ms', 'llm_max_completion_tokens',
@@ -5032,9 +5071,78 @@ const narrativeEmbeddingStableHash = value => {
 
   const writeObject = async (key, value) => await RisuCompat.setItem(key, JSON.stringify(value ?? {}, null, 2));
 
+  const credentialClone = value => {
+    try { return JSON.parse(JSON.stringify(value ?? null)); }
+    catch (_) { return value; }
+  };
+  const credentialBackupEnvelope = value => ({
+    schema: CREDENTIAL_BACKUP_SCHEMA,
+    version: CREDENTIAL_BACKUP_VERSION,
+    savedAt: Date.now(),
+    value: credentialClone(value)
+  });
+  const credentialBackupState = raw => {
+    let parsed = raw;
+    if (typeof raw === 'string') parsed = tryJsonParse(raw, raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.schema === CREDENTIAL_BACKUP_SCHEMA) {
+      return { present: parsed.value !== undefined && parsed.value !== null, value: credentialClone(parsed.value), savedAt: Math.max(0, Number(parsed.savedAt || 0) || 0), legacy: false };
+    }
+    const present = parsed !== undefined && parsed !== null && parsed !== '';
+    return { present, value: present ? credentialClone(parsed) : null, savedAt: 0, legacy: present };
+  };
+  const credentialBackupEqual = (left, right) => {
+    try { return JSON.stringify(left ?? null) === JSON.stringify(right ?? null); }
+    catch (_) { return false; }
+  };
+  const readDurableCredential = async (localKey, syncedKey, fallback = null) => {
+    const local = credentialBackupState(await RisuCompat.localGetItem(localKey).catch(() => null));
+    const synced = credentialBackupState(await RisuCompat.getItem(syncedKey).catch(() => null));
+    let chosen = null;
+    if (local.present && synced.present) {
+      if (credentialBackupEqual(local.value, synced.value)) chosen = local.savedAt >= synced.savedAt ? local : synced;
+      else if (local.savedAt && synced.savedAt) chosen = local.savedAt >= synced.savedAt ? local : synced;
+      else chosen = synced.savedAt > 0 ? synced : local;
+    } else chosen = local.present ? local : (synced.present ? synced : null);
+    if (!chosen) return credentialClone(fallback);
+    const envelope = credentialBackupEnvelope(chosen.value);
+    if (!local.present || !credentialBackupEqual(local.value, chosen.value)) await RisuCompat.localSetItem(localKey, envelope).catch(() => false);
+    if (!synced.present || !credentialBackupEqual(synced.value, chosen.value)) await RisuCompat.setItem(syncedKey, JSON.stringify(envelope)).catch(() => false);
+    return credentialClone(chosen.value);
+  };
+  const writeDurableCredential = async (localKey, syncedKey, value) => {
+    const empty = value === undefined || value === null || value === ''
+      || (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0);
+    if (empty) {
+      await Promise.all([
+        RisuCompat.localRemoveItem(localKey).catch(() => false),
+        RisuCompat.removeItem(syncedKey).catch(() => false)
+      ]);
+      const [localRaw, syncedRaw] = await Promise.all([
+        RisuCompat.localGetItem(localKey).catch(() => null),
+        RisuCompat.getItem(syncedKey).catch(() => null)
+      ]);
+      const localVerified = !credentialBackupState(localRaw).present;
+      const syncedVerified = !credentialBackupState(syncedRaw).present;
+      return { ok: syncedVerified, durable: syncedVerified, localVerified, syncedVerified, cleared: true };
+    }
+    const envelope = credentialBackupEnvelope(value);
+    const [localWrite, syncedWrite] = await Promise.all([
+      RisuCompat.localSetItem(localKey, envelope).catch(() => false),
+      RisuCompat.setItem(syncedKey, JSON.stringify(envelope)).catch(() => false)
+    ]);
+    const [localRaw, syncedRaw] = await Promise.all([
+      RisuCompat.localGetItem(localKey).catch(() => null),
+      RisuCompat.getItem(syncedKey).catch(() => null)
+    ]);
+    const localState = credentialBackupState(localRaw);
+    const syncedState = credentialBackupState(syncedRaw);
+    const localVerified = localState.present && credentialBackupEqual(localState.value, value);
+    const syncedVerified = syncedState.present && credentialBackupEqual(syncedState.value, value);
+    return { ok: syncedVerified, durable: syncedVerified, localVerified, syncedVerified, localWrite: !!localWrite, syncedWrite: !!syncedWrite, cleared: false };
+  };
+
   const readProviderSecrets = async () => {
-    const raw = await RisuCompat.localGetItem(LOCAL_PROVIDER_SECRETS_KEY);
-    const parsed = typeof raw === 'string' ? tryJsonParse(raw, {}) : raw;
+    const parsed = await readDurableCredential(LOCAL_PROVIDER_SECRETS_KEY, SYNCED_PROVIDER_SECRETS_KEY, {});
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   };
 
@@ -5045,19 +5153,21 @@ const narrativeEmbeddingStableHash = value => {
       const secret = text(value || '').trim();
       if (key && secret) clean[key] = secret;
     }
-    if (!Object.keys(clean).length) {
-      await RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY);
-      return true;
-    }
-    return await RisuCompat.localSetItem(LOCAL_PROVIDER_SECRETS_KEY, clean);
+    const persisted = await writeDurableCredential(LOCAL_PROVIDER_SECRETS_KEY, SYNCED_PROVIDER_SECRETS_KEY, clean);
+    return persisted.durable === true;
   };
 
 
-  const readBackendHostingToken = async () => text(await RisuCompat.localGetItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY) || '').trim();
+  const readBackendHostingToken = async () => {
+    const stored = text(await readDurableCredential(LOCAL_BACKEND_HOSTING_TOKEN_KEY, SYNCED_BACKEND_HOSTING_TOKEN_KEY, '') || '').trim();
+    if (stored) return stored;
+    return text(await getArgument('backend_hosting_token', '') || '').trim();
+  };
   const writeBackendHostingToken = async (token = '') => {
     const clean = text(token || '').trim();
-    if (!clean) return await RisuCompat.localRemoveItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY);
-    return await RisuCompat.localSetItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY, clean);
+    const persisted = await writeDurableCredential(LOCAL_BACKEND_HOSTING_TOKEN_KEY, SYNCED_BACKEND_HOSTING_TOKEN_KEY, clean);
+    const argument = await setPluginArgumentValue('backend_hosting_token', clean).catch(() => ({ verified: false }));
+    return clean ? (persisted.durable === true || argument?.verified === true) : (persisted.syncedVerified === true && (!argument?.attempted || argument?.verified === true));
   };
 
   const stripPresetSecret = (preset) => {
@@ -5423,12 +5533,14 @@ const narrativeEmbeddingConfigFingerprint = raw => {
 };
 
 const readNarrativeEmbeddingSettings = async () => {
-  const [stored, secret] = await Promise.all([
-    readObject(STORAGE_NARRATIVE_EMBEDDING_SETTINGS_KEY, {}),
-    RisuCompat.localGetItem(LOCAL_NARRATIVE_EMBEDDING_SECRET_KEY)
-  ]);
+  const stored = await readObject(STORAGE_NARRATIVE_EMBEDDING_SETTINGS_KEY, {});
   const source = stored?.settings && typeof stored.settings === 'object' ? stored.settings : stored;
-  const key = text(secret?.key ?? secret ?? '').trim();
+  let secret = await readDurableCredential(LOCAL_NARRATIVE_EMBEDDING_SECRET_KEY, SYNCED_NARRATIVE_EMBEDDING_SECRET_KEY, null);
+  let key = text(secret?.key ?? secret ?? '').trim();
+  if (!key) {
+    key = text(await getArgument('narrative_embedding_key', '') || '').trim();
+    if (key) await writeDurableCredential(LOCAL_NARRATIVE_EMBEDDING_SECRET_KEY, SYNCED_NARRATIVE_EMBEDDING_SECRET_KEY, { key, savedAt: Date.now() }).catch(() => null);
+  }
   return normalizeNarrativeEmbeddingSettings({ ...NARRATIVE_EMBEDDING_DEFAULTS, ...(source || {}), key });
 };
 
@@ -5441,11 +5553,16 @@ const writeNarrativeEmbeddingSettings = async raw => {
     savedAt: new Date().toISOString(),
     settings: persistent
   });
-  const secretOk = settings.key
-    ? await RisuCompat.localSetItem(LOCAL_NARRATIVE_EMBEDDING_SECRET_KEY, { key: settings.key, savedAt: Date.now() })
-    : await RisuCompat.localRemoveItem(LOCAL_NARRATIVE_EMBEDDING_SECRET_KEY);
+  const secretState = await writeDurableCredential(
+    LOCAL_NARRATIVE_EMBEDDING_SECRET_KEY,
+    SYNCED_NARRATIVE_EMBEDDING_SECRET_KEY,
+    settings.key ? { key: settings.key, savedAt: Date.now() } : null
+  );
+  const argument = await setPluginArgumentValue('narrative_embedding_key', settings.key || '').catch(() => ({ verified: false }));
   if (!storageOk) throw new Error('Narrative Archive 임베딩 설정을 pluginStorage에 저장하지 못했습니다.');
-  if (settings.key && !secretOk) throw new Error('Narrative Archive 임베딩 API 키를 기기 로컬 저장소에 저장하지 못했습니다.');
+  if (settings.key && secretState.durable !== true && argument?.verified !== true) {
+    throw new Error('Narrative Archive 임베딩 API 키를 업데이트 후에도 유지되는 저장소에 기록하지 못했습니다.');
+  }
   NarrativeEmbeddingProviderRegistry.clearQueryCache();
   return settings;
 };
@@ -19613,13 +19730,65 @@ ${passage.text || ''}`, 420));
   const gradiaRetracePackageKey = transferId => `${GRADIA_RETRACE_HANDOFF_PACKAGE_PREFIX}${text(transferId || '').trim()}`;
   const gradiaRetraceReceiptKey = transferId => `${GRADIA_RETRACE_HANDOFF_RECEIPT_PREFIX}${text(transferId || '').trim()}`;
 
+  const gradiaRetraceCompatibility = () => ({
+    schema: RETRACE_PEER_COMPATIBILITY_SCHEMA,
+    protocolMajor: RETRACE_PEER_PROTOCOL_MAJOR,
+    protocolMinor: 0,
+    pluginId: PLUGIN_NAME,
+    pluginVersion: PLUGIN_VERSION,
+    peerRole: 'narrative_planning_state',
+    features: {
+      inspect: true,
+      nextSessionHandoff: true,
+      sourceImmutableHandoff: true,
+      durableTargetReadback: true,
+      idempotentHandoff: true,
+      inheritedStateUsable: true
+    },
+    handoff: {
+      contract: GRADIA_SESSION_HANDOFF_CONTRACT,
+      receiptSchemas: [GRADIA_RETRACE_HANDOFF_RECEIPT_SCHEMA],
+      sourceMutationAllowed: false,
+      sourceCompactionAllowed: false,
+      physicalCopyRequired: false
+    }
+  });
+
+  const gradiaSourceHandoffIntegritySnapshot = async source => {
+    const spec = source && typeof source === 'object' ? source : {};
+    const storyArcScopeKey = text(spec.storyArcScopeKey || spec.sourceStoryArcScopeKey || '').trim();
+    const writerScopeKey = text(spec.writerScopeKey || spec.sourceWriterScopeKey || '').trim();
+    const narrativeArchiveScopeKey = text(spec.narrativeArchiveScopeKey || spec.sourceNarrativeArchiveScopeKey || storyArcScopeKey || '').trim();
+    const [arcStore, writerStore, archiveStore] = await Promise.all([
+      readStoryArcStore(),
+      readWriterDesignStore(),
+      readNarrativeArchiveStore({ hydrateShared: false })
+    ]);
+    const arcRaw = storyArcScopeKey ? (arcStore[storyArcScopeKey] ?? null) : null;
+    const writerRaw = writerScopeKey ? (writerStore[writerScopeKey] ?? null) : null;
+    const archiveRaw = narrativeArchiveScopeKey ? (archiveStore[narrativeArchiveScopeKey] ?? null) : null;
+    const core = {
+      storyArcScopeKey,
+      storyArcHash: arcRaw ? gradiaRetraceHash(arcRaw) : '',
+      writerScopeKey,
+      writerHash: writerRaw ? gradiaRetraceHash(writerRaw) : '',
+      narrativeArchiveScopeKey,
+      narrativeArchiveHash: archiveRaw ? gradiaRetraceHash(archiveRaw) : ''
+    };
+    return { ...core, fingerprint: gradiaRetraceHash(core) };
+  };
+
   const gradiaRetraceCapabilities = () => ({
     schema: GRADIA_RETRACE_CAPABILITIES_SCHEMA,
     pluginVersion: PLUGIN_VERSION,
     available: true,
     inspectSchema: GRADIA_RETRACE_INSPECT_SCHEMA,
     actions: ['ping', 'capabilities', 'inspect', 'prepare_session_handoff', 'adopt_session_handoff', 'verify_session_handoff'],
+    compatibility: gradiaRetraceCompatibility(),
     features: {
+      retraceCompatibility: gradiaRetraceCompatibility(),
+      sourceImmutableHandoff: true,
+      handoffContract: GRADIA_SESSION_HANDOFF_CONTRACT,
       storyArcHandoff: true,
       writerDesignHandoff: true,
       narrativeArchiveHandoff: true,
@@ -19734,7 +19903,8 @@ ${passage.text || ''}`, 420));
       pluginVersion: PLUGIN_VERSION,
       available: integrityOk && !!(storyArc || writerDesign || narrativeArchiveCount),
       payloadIncluded: includePayload,
-      capabilities: { sharedNarrativeArchiveRefV1: true, summaryInspect: true, physicalNarrativeArchiveCopies: 0 },
+      capabilities: { sharedNarrativeArchiveRefV1: true, summaryInspect: true, physicalNarrativeArchiveCopies: 0, sourceImmutableHandoff: true, handoffContract: GRADIA_SESSION_HANDOFF_CONTRACT, retraceCompatibility: gradiaRetraceCompatibility() },
+      compatibility: gradiaRetraceCompatibility(),
       integrity: {
         ok: integrityOk,
         reason: storyArcIssue || (writerAhead ? 'writer_design_ahead_of_chat' : !archiveRefVerified ? 'narrative_archive_ref_mismatch' : 'ok'),
@@ -19787,18 +19957,18 @@ ${passage.text || ''}`, 420));
       || Number(inspection.counts?.narrativeArchive || 0) !== expectedNarrativeArchive) throw new Error('GRADIA handoff source count changed before preparation.');
     const expectedSnapshotHash = text(options.expectedSnapshotHash || '').trim();
     if (expectedSnapshotHash && expectedSnapshotHash !== text(inspection.snapshotHash || '')) throw new Error('GRADIA handoff source snapshot changed before preparation.');
+    const sourceIntegrityBefore = await gradiaSourceHandoffIntegritySnapshot(inspection.scope || {});
     let archiveRef = null;
     if (expectedNarrativeArchive) {
       const archive = await ensureGradiaSharedNarrativeArchive(inspection.narrativeArchive, inspection.scope?.narrativeArchiveScopeKey || inspection.scope?.storyArcScopeKey || '');
       archiveRef = archive.archiveRef;
       if (archive.entries.length !== expectedNarrativeArchive) throw new Error('GRADIA shared Narrative Archive count mismatch.');
-      const archiveStore = await readNarrativeArchiveStore({ hydrateShared: false });
-      const sourceScopeKey = text(inspection.scope?.narrativeArchiveScopeKey || inspection.scope?.storyArcScopeKey || '');
-      if (sourceScopeKey) {
-        const sourceScope = normalizeNarrativeArchiveScope(archiveStore[sourceScopeKey], sourceScopeKey);
-        archiveStore[sourceScopeKey] = { ...sourceScope, archiveRef, entries: [] };
-        await writeNarrativeArchiveStore(archiveStore);
-      }
+    }
+    const sourceIntegrityAfter = await gradiaSourceHandoffIntegritySnapshot(inspection.scope || {});
+    if (!sourceIntegrityBefore.fingerprint || sourceIntegrityBefore.fingerprint !== sourceIntegrityAfter.fingerprint) {
+      const error = new Error('GRADIA source mutation detected during handoff preparation.');
+      error.code = 'SOURCE_MUTATION_DETECTED';
+      throw error;
     }
     const preparedAt = Date.now();
     const packageData = {
@@ -19819,6 +19989,12 @@ ${passage.text || ''}`, 420));
       writerDesign: expectedWriterDesign ? gradiaRetraceClone(inspection.writerDesign) : null,
       narrativeArchiveRef: archiveRef,
       physicalNarrativeArchiveCopies: 0,
+      handoffContract: GRADIA_SESSION_HANDOFF_CONTRACT,
+      sourcePreserved: true,
+      sourceMutationAllowed: false,
+      sourceCompactionAllowed: false,
+      sourceFingerprintBefore: sourceIntegrityBefore.fingerprint,
+      sourceFingerprintAfter: sourceIntegrityAfter.fingerprint,
       preparedAt,
       expiresAt: preparedAt + GRADIA_RETRACE_HANDOFF_TTL_MS
     };
@@ -19839,6 +20015,12 @@ ${passage.text || ''}`, 420));
       narrativeArchiveGeneration: archiveRef?.generation || 0,
       narrativeArchiveDigest: archiveRef?.digest || '',
       physicalNarrativeArchiveCopies: 0,
+      handoffContract: GRADIA_SESSION_HANDOFF_CONTRACT,
+      sourcePreserved: true,
+      sourceMutationAllowed: false,
+      sourceCompactionAllowed: false,
+      sourceFingerprintBefore: sourceIntegrityBefore.fingerprint,
+      sourceFingerprintAfter: sourceIntegrityAfter.fingerprint,
       sourceSnapshotHash: packageData.sourceSnapshotHash,
       packageHash: packageData.packageHash,
       preparedAt: new Date(preparedAt).toISOString()
@@ -20076,7 +20258,13 @@ ${passage.text || ''}`, 420));
     const countOk = Number(receipt.storyArc || 0) === expectedStoryArc
       && Number(receipt.writerDesign || 0) === expectedWriterDesign
       && Number(receipt.narrativeArchive || 0) === expectedNarrativeArchive;
-    const verified = arcOk && writerOk && archiveOk && countOk && receipt.durable === true;
+    const sourceProofOk = text(receipt.handoffContract || '') === GRADIA_SESSION_HANDOFF_CONTRACT
+      && receipt.sourcePreserved === true
+      && receipt.sourceMutationAllowed === false
+      && receipt.sourceCompactionAllowed === false
+      && text(receipt.sourceFingerprintBefore || '').length > 0
+      && text(receipt.sourceFingerprintBefore || '') === text(receipt.sourceFingerprintAfter || '');
+    const verified = arcOk && writerOk && archiveOk && countOk && sourceProofOk && receipt.durable === true;
     return {
       ...gradiaRetraceClone(receipt),
       schema: GRADIA_RETRACE_HANDOFF_RECEIPT_SCHEMA,
@@ -20093,6 +20281,12 @@ ${passage.text || ''}`, 420));
       narrativeArchiveGeneration: Number(targetArchiveRef?.generation || receipt.narrativeArchiveGeneration || 0),
       narrativeArchiveDigest: text(targetArchiveRef?.digest || receipt.narrativeArchiveDigest || ''),
       physicalNarrativeArchiveCopies: 0,
+      handoffContract: GRADIA_SESSION_HANDOFF_CONTRACT,
+      sourcePreserved: sourceProofOk,
+      sourceMutationAllowed: false,
+      sourceCompactionAllowed: false,
+      sourceFingerprintBefore: text(receipt.sourceFingerprintBefore || ''),
+      sourceFingerprintAfter: text(receipt.sourceFingerprintAfter || ''),
       reason: verified ? 'gradia_handoff_readback_verified' : 'gradia_handoff_readback_mismatch',
       verifiedAt: new Date().toISOString()
     };
@@ -20131,6 +20325,24 @@ ${passage.text || ''}`, 420));
     const packageArchiveRef = normalizeNarrativeSharedArchiveRef(packageData.narrativeArchiveRef);
     if (expectedNarrativeArchive > 0 && (!packageArchiveRef || packageArchiveRef.entryCount !== expectedNarrativeArchive)) {
       throw new Error('GRADIA prepared shared Narrative Archive reference is invalid.');
+    }
+    if (text(packageData.handoffContract || '') !== GRADIA_SESSION_HANDOFF_CONTRACT
+      || packageData.sourcePreserved !== true
+      || packageData.sourceMutationAllowed !== false
+      || packageData.sourceCompactionAllowed !== false
+      || !text(packageData.sourceFingerprintBefore || '')
+      || text(packageData.sourceFingerprintBefore || '') !== text(packageData.sourceFingerprintAfter || '')) {
+      throw new Error('GRADIA handoff package does not prove immutable source preparation.');
+    }
+    const sourceIntegrityBeforeAdoption = await gradiaSourceHandoffIntegritySnapshot({
+      storyArcScopeKey: packageData.sourceStoryArcScopeKey,
+      writerScopeKey: packageData.sourceWriterScopeKey,
+      narrativeArchiveScopeKey: packageData.sourceNarrativeArchiveScopeKey
+    });
+    if (sourceIntegrityBeforeAdoption.fingerprint !== text(packageData.sourceFingerprintAfter || '')) {
+      const error = new Error('GRADIA source changed between handoff preparation and adoption.');
+      error.code = 'SOURCE_MUTATION_DETECTED';
+      throw error;
     }
     if (Number(packageData.expectedStoryArc || 0) !== expectedStoryArc
       || Number(packageData.expectedWriterDesign || 0) !== expectedWriterDesign
@@ -20202,6 +20414,16 @@ ${passage.text || ''}`, 420));
         archiveStore[targetNarrativeArchiveScopeKey] = targetArchive;
         if (!await writeNarrativeArchiveStore(archiveStore)) throw new Error('GRADIA target Narrative Archive save failed.');
       }
+      const sourceIntegrityAfterAdoption = await gradiaSourceHandoffIntegritySnapshot({
+        storyArcScopeKey: packageData.sourceStoryArcScopeKey,
+        writerScopeKey: packageData.sourceWriterScopeKey,
+        narrativeArchiveScopeKey: packageData.sourceNarrativeArchiveScopeKey
+      });
+      if (sourceIntegrityAfterAdoption.fingerprint !== text(packageData.sourceFingerprintAfter || '')) {
+        const error = new Error('GRADIA source mutation detected during target adoption.');
+        error.code = 'SOURCE_MUTATION_DETECTED';
+        throw error;
+      }
       const adoptedAt = Date.now();
       const receipt = {
         schema: GRADIA_RETRACE_HANDOFF_RECEIPT_SCHEMA,
@@ -20234,6 +20456,12 @@ ${passage.text || ''}`, 420));
         narrativeArchiveGeneration: Number(targetArchive?.archiveRef?.generation || 0),
         narrativeArchiveDigest: text(targetArchive?.archiveRef?.digest || ''),
         physicalNarrativeArchiveCopies: 0,
+        handoffContract: GRADIA_SESSION_HANDOFF_CONTRACT,
+        sourcePreserved: true,
+        sourceMutationAllowed: false,
+        sourceCompactionAllowed: false,
+        sourceFingerprintBefore: text(packageData.sourceFingerprintBefore || ''),
+        sourceFingerprintAfter: text(packageData.sourceFingerprintAfter || ''),
         targetArcRebasedThroughTurn: targetArc ? Math.max(0, Number(targetArc.basis?.throughTurn || 0) || 0) : 0,
         targetArcNextWindowStart: targetArc ? Number(targetArc.basis?.nextWindowStart || 0) : 0,
         targetArcNextWindowEnd: targetArc ? Number(targetArc.basis?.nextWindowEnd || 0) : 0,
@@ -36242,9 +36470,18 @@ Use edits: [] when the current draft already satisfies this stage. Never emit an
     ];
     await Promise.all(keys.map(key => RisuCompat.removeItem(key)));
     if (includeSecrets) {
-      await RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY);
-      await RisuCompat.localRemoveItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY);
-      await RisuCompat.localRemoveItem(LOCAL_NARRATIVE_EMBEDDING_SECRET_KEY);
+      await Promise.all([
+        RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY),
+        RisuCompat.localRemoveItem(LOCAL_BACKEND_HOSTING_TOKEN_KEY),
+        RisuCompat.localRemoveItem(LOCAL_NARRATIVE_EMBEDDING_SECRET_KEY),
+        RisuCompat.removeItem(SYNCED_PROVIDER_SECRETS_KEY),
+        RisuCompat.removeItem(SYNCED_BACKEND_HOSTING_TOKEN_KEY),
+        RisuCompat.removeItem(SYNCED_NARRATIVE_EMBEDDING_SECRET_KEY)
+      ]);
+      await Promise.all([
+        setPluginArgumentValue('backend_hosting_token', '').catch(() => null),
+        setPluginArgumentValue('narrative_embedding_key', '').catch(() => null)
+      ]);
     }
     const marker = {
       version: 2,
@@ -46037,7 +46274,7 @@ const buildNarrativeArchiveViewerPage = () => {
       referenceBudgetMigrationPromise = null;
       return true;
     },
-    async clearStoredPresets() { await RisuCompat.removeItem(STORAGE_PROVIDER_PRESETS_KEY); await RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY); Runtime.settings=null; Runtime.settingsLoadedAt=0; clearRequestReuseCache(); return true; }
+    async clearStoredPresets() { await RisuCompat.removeItem(STORAGE_PROVIDER_PRESETS_KEY); await RisuCompat.localRemoveItem(LOCAL_PROVIDER_SECRETS_KEY); await RisuCompat.removeItem(SYNCED_PROVIDER_SECRETS_KEY); Runtime.settings=null; Runtime.settingsLoadedAt=0; clearRequestReuseCache(); return true; }
   });
 
   try {
